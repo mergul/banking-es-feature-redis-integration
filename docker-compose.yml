@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: banking_es
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/banking_es
+      REDIS_URL: redis://redis:6379 # Added Redis URL
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis: # Add redis dependency
+        condition: service_started # Wait for redis to start
+
+  redis: # Add redis service
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    healthcheck: # Add healthcheck for redis
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
