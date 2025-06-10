@@ -8,6 +8,6 @@ pub use application::AccountService;
 pub use domain::AccountError;
 pub use infrastructure::repository::AccountRepositoryTrait;
 pub use infrastructure::{
-    AccountRepository, EventStore, EventStoreConfig, ProjectionStore, RealRedisClient,
-    RedisClientTrait,
+    AccountRepository, EventStore, EventStoreConfig, KafkaConfig, KafkaEventProcessor,
+    ProjectionStore,
 };
