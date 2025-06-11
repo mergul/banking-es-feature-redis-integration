@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::domain::{Account, AccountCommand, AccountError, AccountEvent};
 use crate::infrastructure::projections::{AccountProjection, TransactionProjection};
 use crate::infrastructure::repository::AccountRepositoryTrait;
-use crate::infrastructure::{AccountRepository, EventStore, EventStoreConfig, ProjectionStore};
+use crate::infrastructure::{AccountRepository, EventStore, EventStoreConfig, ProjectionStore, CacheService};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -21,12 +21,14 @@ struct ServiceMetrics {
     commands_failed: std::sync::atomic::AtomicU64,
     projection_updates: std::sync::atomic::AtomicU64,
     projection_errors: std::sync::atomic::AtomicU64,
+    cache_hits: std::sync::atomic::AtomicU64,
+    cache_misses: std::sync::atomic::AtomicU64,
 }
 
-#[derive(Clone)]
 pub struct AccountService {
     repository: Arc<dyn AccountRepositoryTrait + 'static>,
     projections: ProjectionStore,
+    cache_service: CacheService,
     metrics: Arc<ServiceMetrics>,
     command_cache: Arc<RwLock<std::collections::HashMap<Uuid, Instant>>>,
 }
@@ -38,13 +40,16 @@ impl AccountService {
     ///
     /// * `repository`: The account repository for data access.
     /// * `projections`: The projection store for querying denormalized views.
+    /// * `cache_service`: The cache service for caching account data.
     pub fn new(
         repository: Arc<dyn AccountRepositoryTrait + 'static>,
         projections: ProjectionStore,
+        cache_service: CacheService,
     ) -> Self {
         let service = Self {
             repository,
             projections,
+            cache_service,
             metrics: Arc::new(ServiceMetrics::default()),
             command_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         };
@@ -291,10 +296,21 @@ impl AccountService {
         &self,
         account_id: Uuid,
     ) -> Result<Option<AccountProjection>, AccountError> {
-        self.projections
-            .get_account(account_id)
-            .await
-            .map_err(|e| AccountError::InfrastructureError(e.to_string()))
+        // Try cache first
+        if let Some(account) = self.cache_service.get_account(account_id).await? {
+            self.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(Some(AccountProjection {
+                id: account.id,
+                owner_name: account.owner_name,
+                balance: account.balance,
+                is_active: account.is_active,
+                version: account.version,
+            }));
+        }
+        self.metrics.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Fall back to projections
+        self.projections.get_account(account_id).await
     }
 
     pub async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>, AccountError> {
@@ -308,96 +324,52 @@ impl AccountService {
         &self,
         account_id: Uuid,
     ) -> Result<Vec<TransactionProjection>, AccountError> {
-        self.projections
-            .get_account_transactions(account_id)
-            .await
-            .map_err(|e| AccountError::InfrastructureError(e.to_string()))
+        // Try cache first
+        if let Some(events) = self.cache_service.get_account_events(account_id).await? {
+            self.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(events.into_iter().map(|e| e.into()).collect());
+        }
+        self.metrics.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Fall back to projections
+        self.projections.get_account_transactions(account_id).await
     }
 
     async fn update_projections_from_events(
         &self,
         events: &[crate::domain::AccountEvent],
     ) -> Result<(), AccountError> {
-        use crate::domain::AccountEvent;
-
-        let mut account_updates = Vec::new();
-        let mut transaction_updates = Vec::new();
-
+        let start_time = Instant::now();
+        
         for event in events {
-            match event {
-                AccountEvent::MoneyDeposited {
-                    account_id,
-                    amount,
-                    transaction_id,
-                } => {
-                    // Prepare account balance update
-                    if let Some(mut account_proj) = self
-                        .projections
-                        .get_account(*account_id)
-                        .await
-                        .map_err(|e| AccountError::InfrastructureError(e.to_string()))?
-                    {
-                        account_proj.balance += amount;
-                        account_proj.updated_at = Utc::now();
-                        account_updates.push(account_proj);
+            match self.projections.update_from_event(event).await {
+                Ok(_) => {
+                    self.metrics.projection_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    
+                    // Update cache with new account state
+                    if let Some(account) = self.projections.get_account(event.get_account_id()).await? {
+                        let account = Account {
+                            id: account.id,
+                            owner_name: account.owner_name,
+                            balance: account.balance,
+                            is_active: account.is_active,
+                            version: account.version,
+                        };
+                        self.cache_service
+                            .set_account(&account, Some(Duration::from_secs(3600)))
+                            .await?;
                     }
-
-                    // Prepare transaction record
-                    let transaction = TransactionProjection {
-                        id: *transaction_id,
-                        account_id: *account_id,
-                        transaction_type: "deposit".to_string(),
-                        amount: *amount,
-                        timestamp: Utc::now(),
-                    };
-                    transaction_updates.push(transaction);
                 }
-                AccountEvent::MoneyWithdrawn {
-                    account_id,
-                    amount,
-                    transaction_id,
-                } => {
-                    // Prepare account balance update
-                    if let Some(mut account_proj) = self
-                        .projections
-                        .get_account(*account_id)
-                        .await
-                        .map_err(|e| AccountError::InfrastructureError(e.to_string()))?
-                    {
-                        account_proj.balance -= amount;
-                        account_proj.updated_at = Utc::now();
-                        account_updates.push(account_proj);
-                    }
-
-                    // Prepare transaction record
-                    let transaction = TransactionProjection {
-                        id: *transaction_id,
-                        account_id: *account_id,
-                        transaction_type: "withdrawal".to_string(),
-                        amount: *amount,
-                        timestamp: Utc::now(),
-                    };
-                    transaction_updates.push(transaction);
+                Err(e) => {
+                    self.metrics.projection_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    error!("Failed to update projection: {}", e);
+                    return Err(AccountError::ProjectionError(e));
                 }
-                _ => {} // Handle other events as needed
             }
         }
 
-        // Batch update projections
-        if !account_updates.is_empty() {
-            self.projections
-                .upsert_accounts_batch(account_updates)
-                .await
-                .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
-        }
-
-        if !transaction_updates.is_empty() {
-            self.projections
-                .insert_transactions_batch(transaction_updates)
-                .await
-                .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
-        }
-
+        let duration = start_time.elapsed();
+        debug!("Projection update took {:?}", duration);
         Ok(())
     }
 
