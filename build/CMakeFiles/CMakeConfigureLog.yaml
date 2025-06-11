@@ -1,0 +1,2652 @@
+
+---
+events:
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineSystem.cmake:233 (message)"
+      - "CMakeLists.txt:6 (project)"
+    message: |
+      The system is: Linux - 6.8.0-60-generic - x86_64
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerId.cmake:17 (message)"
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCCompiler.cmake:123 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "CMakeLists.txt:6 (project)"
+    message: |
+      Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+      Compiler: /usr/bin/clang 
+      Build flags: 
+      Id flags:  
+      
+      The output was:
+      0
+      
+      
+      Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "a.out"
+      
+      The C compiler identification is Clang, found in:
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/3.28.3/CompilerIdC/a.out
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerId.cmake:17 (message)"
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCXXCompiler.cmake:126 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "CMakeLists.txt:6 (project)"
+    message: |
+      Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+      Compiler: /usr/bin/clang++ 
+      Build flags: 
+      Id flags:  
+      
+      The output was:
+      0
+      
+      
+      Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "a.out"
+      
+      The CXX compiler identification is Clang, found in:
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/3.28.3/CompilerIdCXX/a.out
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerABI.cmake:57 (try_compile)"
+      - "/usr/share/cmake-3.28/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:6 (project)"
+    checks:
+      - "Detecting C compiler ABI info"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-RwkjcT"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-RwkjcT"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "CMAKE_C_ABI_COMPILED"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-RwkjcT'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_c6fef
+        [1/2] /usr/bin/clang   -v -MD -MT CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -MF CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o.d -o CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -c /usr/share/cmake-3.28/Modules/CMakeCCompilerABI.c
+        Ubuntu clang version 18.1.3 (1ubuntu1)
+        Target: x86_64-pc-linux-gnu
+        Thread model: posix
+        InstalledDir: /usr/bin
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/10
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/11
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/13
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5.5.0
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7.5.0
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/9
+        Selected GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14
+        Candidate multilib: .;@m64
+        Candidate multilib: 32;@m32
+        Candidate multilib: x32;@mx32
+        Selected multilib: .;@m64
+         (in-process)
+         "/usr/lib/llvm-18/bin/clang" -cc1 -triple x86_64-pc-linux-gnu -emit-obj -mrelax-all -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCCompilerABI.c -mrelocation-model pic -pic-level 2 -pic-is-pie -mframe-pointer=all -fmath-errno -ffp-contract=on -fno-rounding-math -mconstructor-aliases -funwind-tables=2 -target-cpu x86-64 -tune-cpu generic -debugger-tuning=gdb -fdebug-compilation-dir=/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-RwkjcT -v -fcoverage-compilation-dir=/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-RwkjcT -resource-dir /usr/lib/llvm-18/lib/clang/18 -dependency-file CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o.d -MT CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -sys-header-deps -I/usr/include -c-isystem /usr/include -cxx-isystem /usr/include/x86_64-linux-gnu/c++/13 -internal-isystem /usr/lib/llvm-18/lib/clang/18/include -internal-isystem /usr/local/include -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../x86_64-linux-gnu/include -internal-externc-isystem /usr/include/x86_64-linux-gnu -internal-externc-isystem /include -internal-externc-isystem /usr/include -ferror-limit 19 -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -faddrsig -D__GCC_HAVE_DWARF2_CFI_ASM=1 -o CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -x c /usr/share/cmake-3.28/Modules/CMakeCCompilerABI.c
+        clang -cc1 version 18.1.3 based upon LLVM 18.1.3 default target x86_64-pc-linux-gnu
+        ignoring nonexistent directory "/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../x86_64-linux-gnu/include"
+        ignoring nonexistent directory "/include"
+        ignoring duplicate directory "/usr/include"
+          as it is a non-system directory that duplicates a system directory
+        ignoring duplicate directory "/usr/include"
+        #include "..." search starts here:
+        #include <...> search starts here:
+         /usr/include
+         /usr/lib/llvm-18/lib/clang/18/include
+         /usr/local/include
+         /usr/include/x86_64-linux-gnu
+        End of search list.
+        [2/2] : && /usr/bin/clang  -v CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -o cmTC_c6fef   && :
+        Ubuntu clang version 18.1.3 (1ubuntu1)
+        Target: x86_64-pc-linux-gnu
+        Thread model: posix
+        InstalledDir: /usr/bin
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/10
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/11
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/13
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5.5.0
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7.5.0
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/9
+        Selected GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14
+        Candidate multilib: .;@m64
+        Candidate multilib: 32;@m32
+        Candidate multilib: x32;@mx32
+        Selected multilib: .;@m64
+         "/usr/bin/ld" -z relro --hash-style=gnu --build-id --eh-frame-hdr -m elf_x86_64 -pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_c6fef /lib/x86_64-linux-gnu/Scrt1.o /lib/x86_64-linux-gnu/crti.o /usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o -L/usr/bin/../lib/gcc/x86_64-linux-gnu/14 -L/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64 -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64 -L/lib -L/usr/lib CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -lgcc --as-needed -lgcc_s --no-as-needed -lc -lgcc --as-needed -lgcc_s --no-as-needed /usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o /lib/x86_64-linux-gnu/crtn.o
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerABI.cmake:127 (message)"
+      - "/usr/share/cmake-3.28/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:6 (project)"
+    message: |
+      Parsed C implicit include dir info: rv=done
+        found start of include info
+        found start of implicit include info
+          add: [/usr/include]
+          add: [/usr/lib/llvm-18/lib/clang/18/include]
+          add: [/usr/local/include]
+          add: [/usr/include/x86_64-linux-gnu]
+        end of search list found
+        collapse include dir [/usr/include] ==> [/usr/include]
+        collapse include dir [/usr/lib/llvm-18/lib/clang/18/include] ==> [/usr/lib/llvm-18/lib/clang/18/include]
+        collapse include dir [/usr/local/include] ==> [/usr/local/include]
+        collapse include dir [/usr/include/x86_64-linux-gnu] ==> [/usr/include/x86_64-linux-gnu]
+        implicit include dirs: [/usr/include;/usr/lib/llvm-18/lib/clang/18/include;/usr/local/include;/usr/include/x86_64-linux-gnu]
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerABI.cmake:159 (message)"
+      - "/usr/share/cmake-3.28/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:6 (project)"
+    message: |
+      Parsed C implicit link information:
+        link line regex: [^( *|.*[/\\])(ld\\.lld|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        ignore line: [Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-RwkjcT']
+        ignore line: []
+        ignore line: [Run Build Command(s): /usr/bin/ninja -v cmTC_c6fef]
+        ignore line: [[1/2] /usr/bin/clang   -v -MD -MT CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -MF CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o.d -o CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -c /usr/share/cmake-3.28/Modules/CMakeCCompilerABI.c]
+        ignore line: [Ubuntu clang version 18.1.3 (1ubuntu1)]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: /usr/bin]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/10]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/11]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/13]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5.5.0]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7.5.0]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/9]
+        ignore line: [Selected GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+        ignore line: [Candidate multilib: .]
+        ignore line: [@m64]
+        ignore line: [Candidate multilib: 32]
+        ignore line: [@m32]
+        ignore line: [Candidate multilib: x32]
+        ignore line: [@mx32]
+        ignore line: [Selected multilib: .]
+        ignore line: [@m64]
+        ignore line: [ (in-process)]
+        ignore line: [ "/usr/lib/llvm-18/bin/clang" -cc1 -triple x86_64-pc-linux-gnu -emit-obj -mrelax-all -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCCompilerABI.c -mrelocation-model pic -pic-level 2 -pic-is-pie -mframe-pointer=all -fmath-errno -ffp-contract=on -fno-rounding-math -mconstructor-aliases -funwind-tables=2 -target-cpu x86-64 -tune-cpu generic -debugger-tuning=gdb -fdebug-compilation-dir=/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-RwkjcT -v -fcoverage-compilation-dir=/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-RwkjcT -resource-dir /usr/lib/llvm-18/lib/clang/18 -dependency-file CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o.d -MT CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -sys-header-deps -I/usr/include -c-isystem /usr/include -cxx-isystem /usr/include/x86_64-linux-gnu/c++/13 -internal-isystem /usr/lib/llvm-18/lib/clang/18/include -internal-isystem /usr/local/include -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../x86_64-linux-gnu/include -internal-externc-isystem /usr/include/x86_64-linux-gnu -internal-externc-isystem /include -internal-externc-isystem /usr/include -ferror-limit 19 -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -faddrsig -D__GCC_HAVE_DWARF2_CFI_ASM=1 -o CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -x c /usr/share/cmake-3.28/Modules/CMakeCCompilerABI.c]
+        ignore line: [clang -cc1 version 18.1.3 based upon LLVM 18.1.3 default target x86_64-pc-linux-gnu]
+        ignore line: [ignoring nonexistent directory "/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../x86_64-linux-gnu/include"]
+        ignore line: [ignoring nonexistent directory "/include"]
+        ignore line: [ignoring duplicate directory "/usr/include"]
+        ignore line: [  as it is a non-system directory that duplicates a system directory]
+        ignore line: [ignoring duplicate directory "/usr/include"]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ /usr/include]
+        ignore line: [ /usr/lib/llvm-18/lib/clang/18/include]
+        ignore line: [ /usr/local/include]
+        ignore line: [ /usr/include/x86_64-linux-gnu]
+        ignore line: [End of search list.]
+        ignore line: [[2/2] : && /usr/bin/clang  -v CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -o cmTC_c6fef   && :]
+        ignore line: [Ubuntu clang version 18.1.3 (1ubuntu1)]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: /usr/bin]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/10]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/11]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/13]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5.5.0]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7.5.0]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/9]
+        ignore line: [Selected GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+        ignore line: [Candidate multilib: .]
+        ignore line: [@m64]
+        ignore line: [Candidate multilib: 32]
+        ignore line: [@m32]
+        ignore line: [Candidate multilib: x32]
+        ignore line: [@mx32]
+        ignore line: [Selected multilib: .]
+        ignore line: [@m64]
+        link line: [ "/usr/bin/ld" -z relro --hash-style=gnu --build-id --eh-frame-hdr -m elf_x86_64 -pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_c6fef /lib/x86_64-linux-gnu/Scrt1.o /lib/x86_64-linux-gnu/crti.o /usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o -L/usr/bin/../lib/gcc/x86_64-linux-gnu/14 -L/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64 -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64 -L/lib -L/usr/lib CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o -lgcc --as-needed -lgcc_s --no-as-needed -lc -lgcc --as-needed -lgcc_s --no-as-needed /usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o /lib/x86_64-linux-gnu/crtn.o]
+          arg [/usr/bin/ld] ==> ignore
+          arg [-zrelro] ==> ignore
+          arg [--hash-style=gnu] ==> ignore
+          arg [--build-id] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [-m] ==> ignore
+          arg [elf_x86_64] ==> ignore
+          arg [-pie] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/lib64/ld-linux-x86-64.so.2] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_c6fef] ==> ignore
+          arg [/lib/x86_64-linux-gnu/Scrt1.o] ==> obj [/lib/x86_64-linux-gnu/Scrt1.o]
+          arg [/lib/x86_64-linux-gnu/crti.o] ==> obj [/lib/x86_64-linux-gnu/crti.o]
+          arg [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o] ==> obj [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o]
+          arg [-L/usr/bin/../lib/gcc/x86_64-linux-gnu/14] ==> dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+          arg [-L/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64] ==> dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64]
+          arg [-L/lib/x86_64-linux-gnu] ==> dir [/lib/x86_64-linux-gnu]
+          arg [-L/lib/../lib64] ==> dir [/lib/../lib64]
+          arg [-L/usr/lib/x86_64-linux-gnu] ==> dir [/usr/lib/x86_64-linux-gnu]
+          arg [-L/usr/lib/../lib64] ==> dir [/usr/lib/../lib64]
+          arg [-L/lib] ==> dir [/lib]
+          arg [-L/usr/lib] ==> dir [/usr/lib]
+          arg [CMakeFiles/cmTC_c6fef.dir/CMakeCCompilerABI.c.o] ==> ignore
+          arg [-lgcc] ==> lib [gcc]
+          arg [--as-needed] ==> ignore
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [--no-as-needed] ==> ignore
+          arg [-lc] ==> lib [c]
+          arg [-lgcc] ==> lib [gcc]
+          arg [--as-needed] ==> ignore
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [--no-as-needed] ==> ignore
+          arg [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o] ==> obj [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o]
+          arg [/lib/x86_64-linux-gnu/crtn.o] ==> obj [/lib/x86_64-linux-gnu/crtn.o]
+        collapse obj [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o] ==> [/usr/lib/gcc/x86_64-linux-gnu/14/crtbeginS.o]
+        collapse obj [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o] ==> [/usr/lib/gcc/x86_64-linux-gnu/14/crtendS.o]
+        collapse library dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14] ==> [/usr/lib/gcc/x86_64-linux-gnu/14]
+        collapse library dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64] ==> [/usr/lib64]
+        collapse library dir [/lib/x86_64-linux-gnu] ==> [/lib/x86_64-linux-gnu]
+        collapse library dir [/lib/../lib64] ==> [/lib64]
+        collapse library dir [/usr/lib/x86_64-linux-gnu] ==> [/usr/lib/x86_64-linux-gnu]
+        collapse library dir [/usr/lib/../lib64] ==> [/usr/lib64]
+        collapse library dir [/lib] ==> [/lib]
+        collapse library dir [/usr/lib] ==> [/usr/lib]
+        implicit libs: [gcc;gcc_s;c;gcc;gcc_s]
+        implicit objs: [/lib/x86_64-linux-gnu/Scrt1.o;/lib/x86_64-linux-gnu/crti.o;/usr/lib/gcc/x86_64-linux-gnu/14/crtbeginS.o;/usr/lib/gcc/x86_64-linux-gnu/14/crtendS.o;/lib/x86_64-linux-gnu/crtn.o]
+        implicit dirs: [/usr/lib/gcc/x86_64-linux-gnu/14;/usr/lib64;/lib/x86_64-linux-gnu;/lib64;/usr/lib/x86_64-linux-gnu;/lib;/usr/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerABI.cmake:57 (try_compile)"
+      - "/usr/share/cmake-3.28/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:6 (project)"
+    checks:
+      - "Detecting CXX compiler ABI info"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-eFeZ80"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-eFeZ80"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "CMAKE_CXX_ABI_COMPILED"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-eFeZ80'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_16fe4
+        [1/2] /usr/bin/clang++   -v -MD -MT CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -MF CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o.d -o CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake-3.28/Modules/CMakeCXXCompilerABI.cpp
+        Ubuntu clang version 18.1.3 (1ubuntu1)
+        Target: x86_64-pc-linux-gnu
+        Thread model: posix
+        InstalledDir: /usr/bin
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/10
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/11
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/13
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5.5.0
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7.5.0
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/9
+        Selected GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14
+        Candidate multilib: .;@m64
+        Candidate multilib: 32;@m32
+        Candidate multilib: x32;@mx32
+        Selected multilib: .;@m64
+         (in-process)
+         "/usr/lib/llvm-18/bin/clang" -cc1 -triple x86_64-pc-linux-gnu -emit-obj -mrelax-all -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model pic -pic-level 2 -pic-is-pie -mframe-pointer=all -fmath-errno -ffp-contract=on -fno-rounding-math -mconstructor-aliases -funwind-tables=2 -target-cpu x86-64 -tune-cpu generic -debugger-tuning=gdb -fdebug-compilation-dir=/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-eFeZ80 -v -fcoverage-compilation-dir=/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-eFeZ80 -resource-dir /usr/lib/llvm-18/lib/clang/18 -dependency-file CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o.d -MT CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -sys-header-deps -I/usr/include -c-isystem /usr/include -cxx-isystem /usr/include/x86_64-linux-gnu/c++/13 -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14 -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/x86_64-linux-gnu/c++/14 -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14/backward -internal-isystem /usr/lib/llvm-18/lib/clang/18/include -internal-isystem /usr/local/include -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../x86_64-linux-gnu/include -internal-externc-isystem /usr/include/x86_64-linux-gnu -internal-externc-isystem /include -internal-externc-isystem /usr/include -fdeprecated-macro -ferror-limit 19 -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -fcxx-exceptions -fexceptions -faddrsig -D__GCC_HAVE_DWARF2_CFI_ASM=1 -o CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -x c++ /usr/share/cmake-3.28/Modules/CMakeCXXCompilerABI.cpp
+        clang -cc1 version 18.1.3 based upon LLVM 18.1.3 default target x86_64-pc-linux-gnu
+        ignoring nonexistent directory "/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../x86_64-linux-gnu/include"
+        ignoring nonexistent directory "/include"
+        ignoring duplicate directory "/usr/include"
+          as it is a non-system directory that duplicates a system directory
+        #include "..." search starts here:
+        #include <...> search starts here:
+         /usr/include/x86_64-linux-gnu/c++/13
+         /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14
+         /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/x86_64-linux-gnu/c++/14
+         /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14/backward
+         /usr/lib/llvm-18/lib/clang/18/include
+         /usr/local/include
+         /usr/include/x86_64-linux-gnu
+         /usr/include
+        End of search list.
+        [2/2] : && /usr/bin/clang++  -v CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_16fe4   && :
+        Ubuntu clang version 18.1.3 (1ubuntu1)
+        Target: x86_64-pc-linux-gnu
+        Thread model: posix
+        InstalledDir: /usr/bin
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/10
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/11
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/13
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5.5.0
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7.5.0
+        Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/9
+        Selected GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14
+        Candidate multilib: .;@m64
+        Candidate multilib: 32;@m32
+        Candidate multilib: x32;@mx32
+        Selected multilib: .;@m64
+         "/usr/bin/ld" -z relro --hash-style=gnu --build-id --eh-frame-hdr -m elf_x86_64 -pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_16fe4 /lib/x86_64-linux-gnu/Scrt1.o /lib/x86_64-linux-gnu/crti.o /usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o -L/usr/bin/../lib/gcc/x86_64-linux-gnu/14 -L/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64 -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64 -L/lib -L/usr/lib CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -lc -lgcc_s -lgcc /usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o /lib/x86_64-linux-gnu/crtn.o
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerABI.cmake:127 (message)"
+      - "/usr/share/cmake-3.28/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:6 (project)"
+    message: |
+      Parsed CXX implicit include dir info: rv=done
+        found start of include info
+        found start of implicit include info
+          add: [/usr/include/x86_64-linux-gnu/c++/13]
+          add: [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14]
+          add: [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/x86_64-linux-gnu/c++/14]
+          add: [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14/backward]
+          add: [/usr/lib/llvm-18/lib/clang/18/include]
+          add: [/usr/local/include]
+          add: [/usr/include/x86_64-linux-gnu]
+          add: [/usr/include]
+        end of search list found
+        collapse include dir [/usr/include/x86_64-linux-gnu/c++/13] ==> [/usr/include/x86_64-linux-gnu/c++/13]
+        collapse include dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14] ==> [/usr/include/c++/14]
+        collapse include dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/x86_64-linux-gnu/c++/14] ==> [/usr/include/x86_64-linux-gnu/c++/14]
+        collapse include dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14/backward] ==> [/usr/include/c++/14/backward]
+        collapse include dir [/usr/lib/llvm-18/lib/clang/18/include] ==> [/usr/lib/llvm-18/lib/clang/18/include]
+        collapse include dir [/usr/local/include] ==> [/usr/local/include]
+        collapse include dir [/usr/include/x86_64-linux-gnu] ==> [/usr/include/x86_64-linux-gnu]
+        collapse include dir [/usr/include] ==> [/usr/include]
+        implicit include dirs: [/usr/include/x86_64-linux-gnu/c++/13;/usr/include/c++/14;/usr/include/x86_64-linux-gnu/c++/14;/usr/include/c++/14/backward;/usr/lib/llvm-18/lib/clang/18/include;/usr/local/include;/usr/include/x86_64-linux-gnu;/usr/include]
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CMakeDetermineCompilerABI.cmake:159 (message)"
+      - "/usr/share/cmake-3.28/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:6 (project)"
+    message: |
+      Parsed CXX implicit link information:
+        link line regex: [^( *|.*[/\\])(ld\\.lld|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        ignore line: [Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-eFeZ80']
+        ignore line: []
+        ignore line: [Run Build Command(s): /usr/bin/ninja -v cmTC_16fe4]
+        ignore line: [[1/2] /usr/bin/clang++   -v -MD -MT CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -MF CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o.d -o CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake-3.28/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [Ubuntu clang version 18.1.3 (1ubuntu1)]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: /usr/bin]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/10]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/11]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/13]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5.5.0]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7.5.0]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/9]
+        ignore line: [Selected GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+        ignore line: [Candidate multilib: .]
+        ignore line: [@m64]
+        ignore line: [Candidate multilib: 32]
+        ignore line: [@m32]
+        ignore line: [Candidate multilib: x32]
+        ignore line: [@mx32]
+        ignore line: [Selected multilib: .]
+        ignore line: [@m64]
+        ignore line: [ (in-process)]
+        ignore line: [ "/usr/lib/llvm-18/bin/clang" -cc1 -triple x86_64-pc-linux-gnu -emit-obj -mrelax-all -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model pic -pic-level 2 -pic-is-pie -mframe-pointer=all -fmath-errno -ffp-contract=on -fno-rounding-math -mconstructor-aliases -funwind-tables=2 -target-cpu x86-64 -tune-cpu generic -debugger-tuning=gdb -fdebug-compilation-dir=/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-eFeZ80 -v -fcoverage-compilation-dir=/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-eFeZ80 -resource-dir /usr/lib/llvm-18/lib/clang/18 -dependency-file CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o.d -MT CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -sys-header-deps -I/usr/include -c-isystem /usr/include -cxx-isystem /usr/include/x86_64-linux-gnu/c++/13 -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14 -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/x86_64-linux-gnu/c++/14 -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14/backward -internal-isystem /usr/lib/llvm-18/lib/clang/18/include -internal-isystem /usr/local/include -internal-isystem /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../x86_64-linux-gnu/include -internal-externc-isystem /usr/include/x86_64-linux-gnu -internal-externc-isystem /include -internal-externc-isystem /usr/include -fdeprecated-macro -ferror-limit 19 -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -fcxx-exceptions -fexceptions -faddrsig -D__GCC_HAVE_DWARF2_CFI_ASM=1 -o CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -x c++ /usr/share/cmake-3.28/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [clang -cc1 version 18.1.3 based upon LLVM 18.1.3 default target x86_64-pc-linux-gnu]
+        ignore line: [ignoring nonexistent directory "/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../x86_64-linux-gnu/include"]
+        ignore line: [ignoring nonexistent directory "/include"]
+        ignore line: [ignoring duplicate directory "/usr/include"]
+        ignore line: [  as it is a non-system directory that duplicates a system directory]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ /usr/include/x86_64-linux-gnu/c++/13]
+        ignore line: [ /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14]
+        ignore line: [ /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/x86_64-linux-gnu/c++/14]
+        ignore line: [ /usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../include/c++/14/backward]
+        ignore line: [ /usr/lib/llvm-18/lib/clang/18/include]
+        ignore line: [ /usr/local/include]
+        ignore line: [ /usr/include/x86_64-linux-gnu]
+        ignore line: [ /usr/include]
+        ignore line: [End of search list.]
+        ignore line: [[2/2] : && /usr/bin/clang++  -v CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_16fe4   && :]
+        ignore line: [Ubuntu clang version 18.1.3 (1ubuntu1)]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: /usr/bin]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/10]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/11]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/13]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/5.5.0]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/7.5.0]
+        ignore line: [Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/9]
+        ignore line: [Selected GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+        ignore line: [Candidate multilib: .]
+        ignore line: [@m64]
+        ignore line: [Candidate multilib: 32]
+        ignore line: [@m32]
+        ignore line: [Candidate multilib: x32]
+        ignore line: [@mx32]
+        ignore line: [Selected multilib: .]
+        ignore line: [@m64]
+        link line: [ "/usr/bin/ld" -z relro --hash-style=gnu --build-id --eh-frame-hdr -m elf_x86_64 -pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_16fe4 /lib/x86_64-linux-gnu/Scrt1.o /lib/x86_64-linux-gnu/crti.o /usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o -L/usr/bin/../lib/gcc/x86_64-linux-gnu/14 -L/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64 -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64 -L/lib -L/usr/lib CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -lc -lgcc_s -lgcc /usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o /lib/x86_64-linux-gnu/crtn.o]
+          arg [/usr/bin/ld] ==> ignore
+          arg [-zrelro] ==> ignore
+          arg [--hash-style=gnu] ==> ignore
+          arg [--build-id] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [-m] ==> ignore
+          arg [elf_x86_64] ==> ignore
+          arg [-pie] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/lib64/ld-linux-x86-64.so.2] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_16fe4] ==> ignore
+          arg [/lib/x86_64-linux-gnu/Scrt1.o] ==> obj [/lib/x86_64-linux-gnu/Scrt1.o]
+          arg [/lib/x86_64-linux-gnu/crti.o] ==> obj [/lib/x86_64-linux-gnu/crti.o]
+          arg [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o] ==> obj [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o]
+          arg [-L/usr/bin/../lib/gcc/x86_64-linux-gnu/14] ==> dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14]
+          arg [-L/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64] ==> dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64]
+          arg [-L/lib/x86_64-linux-gnu] ==> dir [/lib/x86_64-linux-gnu]
+          arg [-L/lib/../lib64] ==> dir [/lib/../lib64]
+          arg [-L/usr/lib/x86_64-linux-gnu] ==> dir [/usr/lib/x86_64-linux-gnu]
+          arg [-L/usr/lib/../lib64] ==> dir [/usr/lib/../lib64]
+          arg [-L/lib] ==> dir [/lib]
+          arg [-L/usr/lib] ==> dir [/usr/lib]
+          arg [CMakeFiles/cmTC_16fe4.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
+          arg [-lstdc++] ==> lib [stdc++]
+          arg [-lm] ==> lib [m]
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [-lgcc] ==> lib [gcc]
+          arg [-lc] ==> lib [c]
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [-lgcc] ==> lib [gcc]
+          arg [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o] ==> obj [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o]
+          arg [/lib/x86_64-linux-gnu/crtn.o] ==> obj [/lib/x86_64-linux-gnu/crtn.o]
+        collapse obj [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtbeginS.o] ==> [/usr/lib/gcc/x86_64-linux-gnu/14/crtbeginS.o]
+        collapse obj [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/crtendS.o] ==> [/usr/lib/gcc/x86_64-linux-gnu/14/crtendS.o]
+        collapse library dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14] ==> [/usr/lib/gcc/x86_64-linux-gnu/14]
+        collapse library dir [/usr/bin/../lib/gcc/x86_64-linux-gnu/14/../../../../lib64] ==> [/usr/lib64]
+        collapse library dir [/lib/x86_64-linux-gnu] ==> [/lib/x86_64-linux-gnu]
+        collapse library dir [/lib/../lib64] ==> [/lib64]
+        collapse library dir [/usr/lib/x86_64-linux-gnu] ==> [/usr/lib/x86_64-linux-gnu]
+        collapse library dir [/usr/lib/../lib64] ==> [/usr/lib64]
+        collapse library dir [/lib] ==> [/lib]
+        collapse library dir [/usr/lib] ==> [/usr/lib]
+        implicit libs: [stdc++;m;gcc_s;gcc;c;gcc_s;gcc]
+        implicit objs: [/lib/x86_64-linux-gnu/Scrt1.o;/lib/x86_64-linux-gnu/crti.o;/usr/lib/gcc/x86_64-linux-gnu/14/crtbeginS.o;/usr/lib/gcc/x86_64-linux-gnu/14/crtendS.o;/lib/x86_64-linux-gnu/crtn.o]
+        implicit dirs: [/usr/lib/gcc/x86_64-linux-gnu/14;/usr/lib64;/lib/x86_64-linux-gnu;/lib64;/usr/lib/x86_64-linux-gnu;/lib;/usr/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CheckLibraryExists.cmake:69 (try_compile)"
+      - "CMakeLists.txt:37 (check_library_exists)"
+    checks:
+      - "Looking for pow in m"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-4tKrfV"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-4tKrfV"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_HDRHISTOGRAM"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-4tKrfV'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_16bdf
+        [1/2] /usr/bin/clang   -DCHECK_FUNCTION_EXISTS=pow -MD -MT CMakeFiles/cmTC_16bdf.dir/CheckFunctionExists.c.o -MF CMakeFiles/cmTC_16bdf.dir/CheckFunctionExists.c.o.d -o CMakeFiles/cmTC_16bdf.dir/CheckFunctionExists.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-4tKrfV/CheckFunctionExists.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-4tKrfV/CheckFunctionExists.c:7:3: warning: incompatible redeclaration of library function 'pow' [-Wincompatible-library-redeclaration]
+            7 |   CHECK_FUNCTION_EXISTS(void);
+              |   ^
+        <command line>:1:31: note: expanded from macro 'CHECK_FUNCTION_EXISTS'
+            1 | #define CHECK_FUNCTION_EXISTS pow
+              |                               ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-4tKrfV/CheckFunctionExists.c:7:3: note: 'pow' is a builtin with type 'double (double, double)'
+        <command line>:1:31: note: expanded from macro 'CHECK_FUNCTION_EXISTS'
+            1 | #define CHECK_FUNCTION_EXISTS pow
+              |                               ^
+        1 warning generated.
+        [2/2] : && /usr/bin/clang -DCHECK_FUNCTION_EXISTS=pow  CMakeFiles/cmTC_16bdf.dir/CheckFunctionExists.c.o -o cmTC_16bdf  -lm && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "CMakeLists.txt:83 (try_compile)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_LIBDL"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_dce68
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_dce68.dir/dlopen_test.c.o -MF CMakeFiles/cmTC_dce68.dir/dlopen_test.c.o.d -o CMakeFiles/cmTC_dce68.dir/dlopen_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/dlopen_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_dce68.dir/dlopen_test.c.o -o cmTC_dce68  -ldl && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:1 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_REGEX"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_86597
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_86597.dir/regex_test.c.o -MF CMakeFiles/cmTC_86597.dir/regex_test.c.o.d -o CMakeFiles/cmTC_86597.dir/regex_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/regex_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_86597.dir/regex_test.c.o -o cmTC_86597   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:7 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_STRNDUP"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_fa255
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_fa255.dir/strndup_test.c.o -MF CMakeFiles/cmTC_fa255.dir/strndup_test.c.o.d -o CMakeFiles/cmTC_fa255.dir/strndup_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/strndup_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_fa255.dir/strndup_test.c.o -o cmTC_fa255   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:13 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_RAND_R"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_1dd19
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_1dd19.dir/rand_r_test.c.o -MF CMakeFiles/cmTC_1dd19.dir/rand_r_test.c.o.d -o CMakeFiles/cmTC_1dd19.dir/rand_r_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/rand_r_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_1dd19.dir/rand_r_test.c.o -o cmTC_1dd19   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:19 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_GNU"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_42d3c
+        [1/2] /usr/bin/clang -D_GNU_SOURCE   -MD -MT CMakeFiles/cmTC_42d3c.dir/pthread_setname_gnu_test.c.o -MF CMakeFiles/cmTC_42d3c.dir/pthread_setname_gnu_test.c.o.d -o CMakeFiles/cmTC_42d3c.dir/pthread_setname_gnu_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_gnu_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_42d3c.dir/pthread_setname_gnu_test.c.o -o cmTC_42d3c  -lpthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:27 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_DARWIN"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_038ed
+        [1/2] /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_038ed.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_038ed.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_038ed.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        FAILED: CMakeFiles/cmTC_038ed.dir/pthread_setname_darwin_test.c.o 
+        /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_038ed.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_038ed.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_038ed.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c:4:9: error: call to undeclared function 'pthread_setname_np'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+            4 |         pthread_setname_np("abc");
+              |         ^
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:35 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_FREEBSD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_b0c90
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_b0c90.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_b0c90.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_b0c90.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        FAILED: CMakeFiles/cmTC_b0c90.dir/pthread_setname_freebsd_test.c.o 
+        /usr/bin/clang    -MD -MT CMakeFiles/cmTC_b0c90.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_b0c90.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_b0c90.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c:2:10: fatal error: 'pthread_np.h' file not found
+            2 | #include <pthread_np.h>
+              |          ^~~~~~~~~~~~~~
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:47 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_32"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_0c7ed
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_0c7ed.dir/atomic_32_test.c.o -MF CMakeFiles/cmTC_0c7ed.dir/atomic_32_test.c.o.d -o CMakeFiles/cmTC_0c7ed.dir/atomic_32_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_32_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_0c7ed.dir/atomic_32_test.c.o -o cmTC_0c7ed   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:79 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_64"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_f5374
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_f5374.dir/atomic_64_test.c.o -MF CMakeFiles/cmTC_f5374.dir/atomic_64_test.c.o.d -o CMakeFiles/cmTC_f5374.dir/atomic_64_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_64_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_f5374.dir/atomic_64_test.c.o -o cmTC_f5374   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:108 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_C11THREADS"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e0284
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_e0284.dir/c11threads_test.c.o -MF CMakeFiles/cmTC_e0284.dir/c11threads_test.c.o.d -o CMakeFiles/cmTC_e0284.dir/c11threads_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            8 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: note: change return type to 'int'
+            8 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_e0284.dir/c11threads_test.c.o -o cmTC_e0284  -pthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:117 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_CRC32C_HW"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_9e07e
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_9e07e.dir/crc32c_hw_test.c.o -MF CMakeFiles/cmTC_9e07e.dir/crc32c_hw_test.c.o.d -o CMakeFiles/cmTC_9e07e.dir/crc32c_hw_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            5 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: note: change return type to 'int'
+            5 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_9e07e.dir/crc32c_hw_test.c.o -o cmTC_9e07e   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/Internal/CheckSourceCompiles.cmake:101 (try_compile)"
+      - "/usr/share/cmake-3.28/Modules/CheckCSourceCompiles.cmake:52 (cmake_check_source_compiles)"
+      - "/usr/share/cmake-3.28/Modules/FindThreads.cmake:97 (CHECK_C_SOURCE_COMPILES)"
+      - "/usr/share/cmake-3.28/Modules/FindThreads.cmake:163 (_threads_check_libc)"
+      - "src/CMakeLists.txt:255 (find_package)"
+    checks:
+      - "Performing Test CMAKE_HAVE_LIBC_PTHREAD"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-IZP52f"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-IZP52f"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "CMAKE_HAVE_LIBC_PTHREAD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-IZP52f'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_2ed7a
+        [1/2] /usr/bin/clang -DCMAKE_HAVE_LIBC_PTHREAD   -MD -MT CMakeFiles/cmTC_2ed7a.dir/src.c.o -MF CMakeFiles/cmTC_2ed7a.dir/src.c.o.d -o CMakeFiles/cmTC_2ed7a.dir/src.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/CMakeFiles/CMakeScratch/TryCompile-IZP52f/src.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_2ed7a.dir/src.c.o -o cmTC_2ed7a   && :
+        
+      exitCode: 0
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "CMakeLists.txt:83 (try_compile)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_LIBDL"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_c4b5b
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_c4b5b.dir/dlopen_test.c.o -MF CMakeFiles/cmTC_c4b5b.dir/dlopen_test.c.o.d -o CMakeFiles/cmTC_c4b5b.dir/dlopen_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/dlopen_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_c4b5b.dir/dlopen_test.c.o -o cmTC_c4b5b  -ldl && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:1 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_REGEX"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_f27b1
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_f27b1.dir/regex_test.c.o -MF CMakeFiles/cmTC_f27b1.dir/regex_test.c.o.d -o CMakeFiles/cmTC_f27b1.dir/regex_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/regex_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_f27b1.dir/regex_test.c.o -o cmTC_f27b1   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:7 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_STRNDUP"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_afe3a
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_afe3a.dir/strndup_test.c.o -MF CMakeFiles/cmTC_afe3a.dir/strndup_test.c.o.d -o CMakeFiles/cmTC_afe3a.dir/strndup_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/strndup_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_afe3a.dir/strndup_test.c.o -o cmTC_afe3a   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:13 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_RAND_R"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_85505
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_85505.dir/rand_r_test.c.o -MF CMakeFiles/cmTC_85505.dir/rand_r_test.c.o.d -o CMakeFiles/cmTC_85505.dir/rand_r_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/rand_r_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_85505.dir/rand_r_test.c.o -o cmTC_85505   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:19 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_GNU"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e9dde
+        [1/2] /usr/bin/clang -D_GNU_SOURCE   -MD -MT CMakeFiles/cmTC_e9dde.dir/pthread_setname_gnu_test.c.o -MF CMakeFiles/cmTC_e9dde.dir/pthread_setname_gnu_test.c.o.d -o CMakeFiles/cmTC_e9dde.dir/pthread_setname_gnu_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_gnu_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_e9dde.dir/pthread_setname_gnu_test.c.o -o cmTC_e9dde  -lpthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:27 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_DARWIN"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_4caf3
+        [1/2] /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_4caf3.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_4caf3.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_4caf3.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        FAILED: CMakeFiles/cmTC_4caf3.dir/pthread_setname_darwin_test.c.o 
+        /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_4caf3.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_4caf3.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_4caf3.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c:4:9: error: call to undeclared function 'pthread_setname_np'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+            4 |         pthread_setname_np("abc");
+              |         ^
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:35 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_FREEBSD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_36dd9
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_36dd9.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_36dd9.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_36dd9.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        FAILED: CMakeFiles/cmTC_36dd9.dir/pthread_setname_freebsd_test.c.o 
+        /usr/bin/clang    -MD -MT CMakeFiles/cmTC_36dd9.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_36dd9.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_36dd9.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c:2:10: fatal error: 'pthread_np.h' file not found
+            2 | #include <pthread_np.h>
+              |          ^~~~~~~~~~~~~~
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:47 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_32"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_375cd
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_375cd.dir/atomic_32_test.c.o -MF CMakeFiles/cmTC_375cd.dir/atomic_32_test.c.o.d -o CMakeFiles/cmTC_375cd.dir/atomic_32_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_32_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_375cd.dir/atomic_32_test.c.o -o cmTC_375cd   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:79 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_64"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_95ae8
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_95ae8.dir/atomic_64_test.c.o -MF CMakeFiles/cmTC_95ae8.dir/atomic_64_test.c.o.d -o CMakeFiles/cmTC_95ae8.dir/atomic_64_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_64_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_95ae8.dir/atomic_64_test.c.o -o cmTC_95ae8   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:108 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_C11THREADS"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_d1793
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_d1793.dir/c11threads_test.c.o -MF CMakeFiles/cmTC_d1793.dir/c11threads_test.c.o.d -o CMakeFiles/cmTC_d1793.dir/c11threads_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            8 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: note: change return type to 'int'
+            8 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_d1793.dir/c11threads_test.c.o -o cmTC_d1793  -pthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:117 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_CRC32C_HW"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_eb3b0
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_eb3b0.dir/crc32c_hw_test.c.o -MF CMakeFiles/cmTC_eb3b0.dir/crc32c_hw_test.c.o.d -o CMakeFiles/cmTC_eb3b0.dir/crc32c_hw_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            5 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: note: change return type to 'int'
+            5 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_eb3b0.dir/crc32c_hw_test.c.o -o cmTC_eb3b0   && :
+        
+      exitCode: 0
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "CMakeLists.txt:83 (try_compile)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_LIBDL"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e7e30
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_e7e30.dir/dlopen_test.c.o -MF CMakeFiles/cmTC_e7e30.dir/dlopen_test.c.o.d -o CMakeFiles/cmTC_e7e30.dir/dlopen_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/dlopen_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_e7e30.dir/dlopen_test.c.o -o cmTC_e7e30  -ldl && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:1 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_REGEX"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_85665
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_85665.dir/regex_test.c.o -MF CMakeFiles/cmTC_85665.dir/regex_test.c.o.d -o CMakeFiles/cmTC_85665.dir/regex_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/regex_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_85665.dir/regex_test.c.o -o cmTC_85665   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:7 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_STRNDUP"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_fcf63
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_fcf63.dir/strndup_test.c.o -MF CMakeFiles/cmTC_fcf63.dir/strndup_test.c.o.d -o CMakeFiles/cmTC_fcf63.dir/strndup_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/strndup_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_fcf63.dir/strndup_test.c.o -o cmTC_fcf63   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:13 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_RAND_R"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_9cfec
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_9cfec.dir/rand_r_test.c.o -MF CMakeFiles/cmTC_9cfec.dir/rand_r_test.c.o.d -o CMakeFiles/cmTC_9cfec.dir/rand_r_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/rand_r_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_9cfec.dir/rand_r_test.c.o -o cmTC_9cfec   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:19 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_GNU"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e3862
+        [1/2] /usr/bin/clang -D_GNU_SOURCE   -MD -MT CMakeFiles/cmTC_e3862.dir/pthread_setname_gnu_test.c.o -MF CMakeFiles/cmTC_e3862.dir/pthread_setname_gnu_test.c.o.d -o CMakeFiles/cmTC_e3862.dir/pthread_setname_gnu_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_gnu_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_e3862.dir/pthread_setname_gnu_test.c.o -o cmTC_e3862  -lpthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:27 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_DARWIN"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_2d934
+        [1/2] /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_2d934.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_2d934.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_2d934.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        FAILED: CMakeFiles/cmTC_2d934.dir/pthread_setname_darwin_test.c.o 
+        /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_2d934.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_2d934.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_2d934.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c:4:9: error: call to undeclared function 'pthread_setname_np'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+            4 |         pthread_setname_np("abc");
+              |         ^
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:35 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_FREEBSD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_bd317
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_bd317.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_bd317.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_bd317.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        FAILED: CMakeFiles/cmTC_bd317.dir/pthread_setname_freebsd_test.c.o 
+        /usr/bin/clang    -MD -MT CMakeFiles/cmTC_bd317.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_bd317.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_bd317.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c:2:10: fatal error: 'pthread_np.h' file not found
+            2 | #include <pthread_np.h>
+              |          ^~~~~~~~~~~~~~
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:47 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_32"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_f9390
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_f9390.dir/atomic_32_test.c.o -MF CMakeFiles/cmTC_f9390.dir/atomic_32_test.c.o.d -o CMakeFiles/cmTC_f9390.dir/atomic_32_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_32_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_f9390.dir/atomic_32_test.c.o -o cmTC_f9390   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:79 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_64"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_26201
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_26201.dir/atomic_64_test.c.o -MF CMakeFiles/cmTC_26201.dir/atomic_64_test.c.o.d -o CMakeFiles/cmTC_26201.dir/atomic_64_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_64_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_26201.dir/atomic_64_test.c.o -o cmTC_26201   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:108 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_C11THREADS"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_2fd37
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_2fd37.dir/c11threads_test.c.o -MF CMakeFiles/cmTC_2fd37.dir/c11threads_test.c.o.d -o CMakeFiles/cmTC_2fd37.dir/c11threads_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            8 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: note: change return type to 'int'
+            8 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_2fd37.dir/c11threads_test.c.o -o cmTC_2fd37  -pthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:117 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_CRC32C_HW"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_c9937
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_c9937.dir/crc32c_hw_test.c.o -MF CMakeFiles/cmTC_c9937.dir/crc32c_hw_test.c.o.d -o CMakeFiles/cmTC_c9937.dir/crc32c_hw_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            5 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: note: change return type to 'int'
+            5 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_c9937.dir/crc32c_hw_test.c.o -o cmTC_c9937   && :
+        
+      exitCode: 0
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "CMakeLists.txt:83 (try_compile)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_LIBDL"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e9693
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_e9693.dir/dlopen_test.c.o -MF CMakeFiles/cmTC_e9693.dir/dlopen_test.c.o.d -o CMakeFiles/cmTC_e9693.dir/dlopen_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/dlopen_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_e9693.dir/dlopen_test.c.o -o cmTC_e9693  -ldl && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:1 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_REGEX"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e584f
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_e584f.dir/regex_test.c.o -MF CMakeFiles/cmTC_e584f.dir/regex_test.c.o.d -o CMakeFiles/cmTC_e584f.dir/regex_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/regex_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_e584f.dir/regex_test.c.o -o cmTC_e584f   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:7 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_STRNDUP"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_3c272
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_3c272.dir/strndup_test.c.o -MF CMakeFiles/cmTC_3c272.dir/strndup_test.c.o.d -o CMakeFiles/cmTC_3c272.dir/strndup_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/strndup_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_3c272.dir/strndup_test.c.o -o cmTC_3c272   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:13 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_RAND_R"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_9328f
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_9328f.dir/rand_r_test.c.o -MF CMakeFiles/cmTC_9328f.dir/rand_r_test.c.o.d -o CMakeFiles/cmTC_9328f.dir/rand_r_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/rand_r_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_9328f.dir/rand_r_test.c.o -o cmTC_9328f   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:19 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_GNU"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_50718
+        [1/2] /usr/bin/clang -D_GNU_SOURCE   -MD -MT CMakeFiles/cmTC_50718.dir/pthread_setname_gnu_test.c.o -MF CMakeFiles/cmTC_50718.dir/pthread_setname_gnu_test.c.o.d -o CMakeFiles/cmTC_50718.dir/pthread_setname_gnu_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_gnu_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_50718.dir/pthread_setname_gnu_test.c.o -o cmTC_50718  -lpthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:27 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_DARWIN"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_3e790
+        [1/2] /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_3e790.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_3e790.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_3e790.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        FAILED: CMakeFiles/cmTC_3e790.dir/pthread_setname_darwin_test.c.o 
+        /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_3e790.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_3e790.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_3e790.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c:4:9: error: call to undeclared function 'pthread_setname_np'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+            4 |         pthread_setname_np("abc");
+              |         ^
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:35 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_FREEBSD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_f1212
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_f1212.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_f1212.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_f1212.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        FAILED: CMakeFiles/cmTC_f1212.dir/pthread_setname_freebsd_test.c.o 
+        /usr/bin/clang    -MD -MT CMakeFiles/cmTC_f1212.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_f1212.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_f1212.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c:2:10: fatal error: 'pthread_np.h' file not found
+            2 | #include <pthread_np.h>
+              |          ^~~~~~~~~~~~~~
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:47 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_32"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e8ae8
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_e8ae8.dir/atomic_32_test.c.o -MF CMakeFiles/cmTC_e8ae8.dir/atomic_32_test.c.o.d -o CMakeFiles/cmTC_e8ae8.dir/atomic_32_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_32_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_e8ae8.dir/atomic_32_test.c.o -o cmTC_e8ae8   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:79 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_64"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_441ae
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_441ae.dir/atomic_64_test.c.o -MF CMakeFiles/cmTC_441ae.dir/atomic_64_test.c.o.d -o CMakeFiles/cmTC_441ae.dir/atomic_64_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_64_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_441ae.dir/atomic_64_test.c.o -o cmTC_441ae   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:108 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_C11THREADS"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_c48ef
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_c48ef.dir/c11threads_test.c.o -MF CMakeFiles/cmTC_c48ef.dir/c11threads_test.c.o.d -o CMakeFiles/cmTC_c48ef.dir/c11threads_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            8 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: note: change return type to 'int'
+            8 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_c48ef.dir/c11threads_test.c.o -o cmTC_c48ef  -pthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:117 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_CRC32C_HW"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_b7b56
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_b7b56.dir/crc32c_hw_test.c.o -MF CMakeFiles/cmTC_b7b56.dir/crc32c_hw_test.c.o.d -o CMakeFiles/cmTC_b7b56.dir/crc32c_hw_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            5 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: note: change return type to 'int'
+            5 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_b7b56.dir/crc32c_hw_test.c.o -o cmTC_b7b56   && :
+        
+      exitCode: 0
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "CMakeLists.txt:83 (try_compile)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_LIBDL"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_60533
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_60533.dir/dlopen_test.c.o -MF CMakeFiles/cmTC_60533.dir/dlopen_test.c.o.d -o CMakeFiles/cmTC_60533.dir/dlopen_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/dlopen_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_60533.dir/dlopen_test.c.o -o cmTC_60533  -ldl && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:1 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_REGEX"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_60eaa
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_60eaa.dir/regex_test.c.o -MF CMakeFiles/cmTC_60eaa.dir/regex_test.c.o.d -o CMakeFiles/cmTC_60eaa.dir/regex_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/regex_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_60eaa.dir/regex_test.c.o -o cmTC_60eaa   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:7 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_STRNDUP"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_db527
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_db527.dir/strndup_test.c.o -MF CMakeFiles/cmTC_db527.dir/strndup_test.c.o.d -o CMakeFiles/cmTC_db527.dir/strndup_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/strndup_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_db527.dir/strndup_test.c.o -o cmTC_db527   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:13 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_RAND_R"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_d0087
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_d0087.dir/rand_r_test.c.o -MF CMakeFiles/cmTC_d0087.dir/rand_r_test.c.o.d -o CMakeFiles/cmTC_d0087.dir/rand_r_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/rand_r_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_d0087.dir/rand_r_test.c.o -o cmTC_d0087   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:19 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_GNU"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e5796
+        [1/2] /usr/bin/clang -D_GNU_SOURCE   -MD -MT CMakeFiles/cmTC_e5796.dir/pthread_setname_gnu_test.c.o -MF CMakeFiles/cmTC_e5796.dir/pthread_setname_gnu_test.c.o.d -o CMakeFiles/cmTC_e5796.dir/pthread_setname_gnu_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_gnu_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_e5796.dir/pthread_setname_gnu_test.c.o -o cmTC_e5796  -lpthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:27 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_DARWIN"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_f680a
+        [1/2] /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_f680a.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_f680a.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_f680a.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        FAILED: CMakeFiles/cmTC_f680a.dir/pthread_setname_darwin_test.c.o 
+        /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_f680a.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_f680a.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_f680a.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c:4:9: error: call to undeclared function 'pthread_setname_np'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+            4 |         pthread_setname_np("abc");
+              |         ^
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:35 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_FREEBSD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_c22bc
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_c22bc.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_c22bc.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_c22bc.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        FAILED: CMakeFiles/cmTC_c22bc.dir/pthread_setname_freebsd_test.c.o 
+        /usr/bin/clang    -MD -MT CMakeFiles/cmTC_c22bc.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_c22bc.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_c22bc.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c:2:10: fatal error: 'pthread_np.h' file not found
+            2 | #include <pthread_np.h>
+              |          ^~~~~~~~~~~~~~
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:47 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_32"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_79d6c
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_79d6c.dir/atomic_32_test.c.o -MF CMakeFiles/cmTC_79d6c.dir/atomic_32_test.c.o.d -o CMakeFiles/cmTC_79d6c.dir/atomic_32_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_32_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_79d6c.dir/atomic_32_test.c.o -o cmTC_79d6c   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:79 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_64"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_c2caa
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_c2caa.dir/atomic_64_test.c.o -MF CMakeFiles/cmTC_c2caa.dir/atomic_64_test.c.o.d -o CMakeFiles/cmTC_c2caa.dir/atomic_64_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_64_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_c2caa.dir/atomic_64_test.c.o -o cmTC_c2caa   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:108 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_C11THREADS"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_08dec
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_08dec.dir/c11threads_test.c.o -MF CMakeFiles/cmTC_08dec.dir/c11threads_test.c.o.d -o CMakeFiles/cmTC_08dec.dir/c11threads_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            8 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: note: change return type to 'int'
+            8 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_08dec.dir/c11threads_test.c.o -o cmTC_08dec  -pthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:117 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_CRC32C_HW"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_c2d95
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_c2d95.dir/crc32c_hw_test.c.o -MF CMakeFiles/cmTC_c2d95.dir/crc32c_hw_test.c.o.d -o CMakeFiles/cmTC_c2d95.dir/crc32c_hw_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            5 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: note: change return type to 'int'
+            5 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_c2d95.dir/crc32c_hw_test.c.o -o cmTC_c2d95   && :
+        
+      exitCode: 0
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "CMakeLists.txt:83 (try_compile)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_LIBDL"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_6aaa3
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_6aaa3.dir/dlopen_test.c.o -MF CMakeFiles/cmTC_6aaa3.dir/dlopen_test.c.o.d -o CMakeFiles/cmTC_6aaa3.dir/dlopen_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/dlopen_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_6aaa3.dir/dlopen_test.c.o -o cmTC_6aaa3  -ldl && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:1 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_REGEX"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_6e1e6
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_6e1e6.dir/regex_test.c.o -MF CMakeFiles/cmTC_6e1e6.dir/regex_test.c.o.d -o CMakeFiles/cmTC_6e1e6.dir/regex_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/regex_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_6e1e6.dir/regex_test.c.o -o cmTC_6e1e6   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:7 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_STRNDUP"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_32b96
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_32b96.dir/strndup_test.c.o -MF CMakeFiles/cmTC_32b96.dir/strndup_test.c.o.d -o CMakeFiles/cmTC_32b96.dir/strndup_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/strndup_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_32b96.dir/strndup_test.c.o -o cmTC_32b96   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:13 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_RAND_R"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_93998
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_93998.dir/rand_r_test.c.o -MF CMakeFiles/cmTC_93998.dir/rand_r_test.c.o.d -o CMakeFiles/cmTC_93998.dir/rand_r_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/rand_r_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_93998.dir/rand_r_test.c.o -o cmTC_93998   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:19 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_GNU"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_59137
+        [1/2] /usr/bin/clang -D_GNU_SOURCE   -MD -MT CMakeFiles/cmTC_59137.dir/pthread_setname_gnu_test.c.o -MF CMakeFiles/cmTC_59137.dir/pthread_setname_gnu_test.c.o.d -o CMakeFiles/cmTC_59137.dir/pthread_setname_gnu_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_gnu_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_59137.dir/pthread_setname_gnu_test.c.o -o cmTC_59137  -lpthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:27 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_DARWIN"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_9c65e
+        [1/2] /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_9c65e.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_9c65e.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_9c65e.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        FAILED: CMakeFiles/cmTC_9c65e.dir/pthread_setname_darwin_test.c.o 
+        /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_9c65e.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_9c65e.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_9c65e.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c:4:9: error: call to undeclared function 'pthread_setname_np'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+            4 |         pthread_setname_np("abc");
+              |         ^
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:35 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_FREEBSD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_d9fd0
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_d9fd0.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_d9fd0.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_d9fd0.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        FAILED: CMakeFiles/cmTC_d9fd0.dir/pthread_setname_freebsd_test.c.o 
+        /usr/bin/clang    -MD -MT CMakeFiles/cmTC_d9fd0.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_d9fd0.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_d9fd0.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c:2:10: fatal error: 'pthread_np.h' file not found
+            2 | #include <pthread_np.h>
+              |          ^~~~~~~~~~~~~~
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:47 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_32"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_baa62
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_baa62.dir/atomic_32_test.c.o -MF CMakeFiles/cmTC_baa62.dir/atomic_32_test.c.o.d -o CMakeFiles/cmTC_baa62.dir/atomic_32_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_32_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_baa62.dir/atomic_32_test.c.o -o cmTC_baa62   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:79 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_64"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_d78ce
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_d78ce.dir/atomic_64_test.c.o -MF CMakeFiles/cmTC_d78ce.dir/atomic_64_test.c.o.d -o CMakeFiles/cmTC_d78ce.dir/atomic_64_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_64_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_d78ce.dir/atomic_64_test.c.o -o cmTC_d78ce   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:108 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_C11THREADS"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_f62e3
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_f62e3.dir/c11threads_test.c.o -MF CMakeFiles/cmTC_f62e3.dir/c11threads_test.c.o.d -o CMakeFiles/cmTC_f62e3.dir/c11threads_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            8 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: note: change return type to 'int'
+            8 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_f62e3.dir/c11threads_test.c.o -o cmTC_f62e3  -pthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:117 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_CRC32C_HW"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_9311b
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_9311b.dir/crc32c_hw_test.c.o -MF CMakeFiles/cmTC_9311b.dir/crc32c_hw_test.c.o.d -o CMakeFiles/cmTC_9311b.dir/crc32c_hw_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            5 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: note: change return type to 'int'
+            5 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_9311b.dir/crc32c_hw_test.c.o -o cmTC_9311b   && :
+        
+      exitCode: 0
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "CMakeLists.txt:83 (try_compile)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_LIBDL"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_75d01
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_75d01.dir/dlopen_test.c.o -MF CMakeFiles/cmTC_75d01.dir/dlopen_test.c.o.d -o CMakeFiles/cmTC_75d01.dir/dlopen_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/dlopen_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_75d01.dir/dlopen_test.c.o -o cmTC_75d01  -ldl && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:1 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_REGEX"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_fbb1d
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_fbb1d.dir/regex_test.c.o -MF CMakeFiles/cmTC_fbb1d.dir/regex_test.c.o.d -o CMakeFiles/cmTC_fbb1d.dir/regex_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/regex_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_fbb1d.dir/regex_test.c.o -o cmTC_fbb1d   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:7 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_STRNDUP"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_60634
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_60634.dir/strndup_test.c.o -MF CMakeFiles/cmTC_60634.dir/strndup_test.c.o.d -o CMakeFiles/cmTC_60634.dir/strndup_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/strndup_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_60634.dir/strndup_test.c.o -o cmTC_60634   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:13 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_RAND_R"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_067e7
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_067e7.dir/rand_r_test.c.o -MF CMakeFiles/cmTC_067e7.dir/rand_r_test.c.o.d -o CMakeFiles/cmTC_067e7.dir/rand_r_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/rand_r_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_067e7.dir/rand_r_test.c.o -o cmTC_067e7   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:19 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_GNU"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_b541a
+        [1/2] /usr/bin/clang -D_GNU_SOURCE   -MD -MT CMakeFiles/cmTC_b541a.dir/pthread_setname_gnu_test.c.o -MF CMakeFiles/cmTC_b541a.dir/pthread_setname_gnu_test.c.o.d -o CMakeFiles/cmTC_b541a.dir/pthread_setname_gnu_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_gnu_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_b541a.dir/pthread_setname_gnu_test.c.o -o cmTC_b541a  -lpthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:27 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_DARWIN"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e7bd5
+        [1/2] /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_e7bd5.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_e7bd5.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_e7bd5.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        FAILED: CMakeFiles/cmTC_e7bd5.dir/pthread_setname_darwin_test.c.o 
+        /usr/bin/clang -D_DARWIN_C_SOURCE   -MD -MT CMakeFiles/cmTC_e7bd5.dir/pthread_setname_darwin_test.c.o -MF CMakeFiles/cmTC_e7bd5.dir/pthread_setname_darwin_test.c.o.d -o CMakeFiles/cmTC_e7bd5.dir/pthread_setname_darwin_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_darwin_test.c:4:9: error: call to undeclared function 'pthread_setname_np'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+            4 |         pthread_setname_np("abc");
+              |         ^
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:35 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "HAVE_PTHREAD_SETNAME_FREEBSD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_e6137
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_e6137.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_e6137.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_e6137.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        FAILED: CMakeFiles/cmTC_e6137.dir/pthread_setname_freebsd_test.c.o 
+        /usr/bin/clang    -MD -MT CMakeFiles/cmTC_e6137.dir/pthread_setname_freebsd_test.c.o -MF CMakeFiles/cmTC_e6137.dir/pthread_setname_freebsd_test.c.o.d -o CMakeFiles/cmTC_e6137.dir/pthread_setname_freebsd_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/pthread_setname_freebsd_test.c:2:10: fatal error: 'pthread_np.h' file not found
+            2 | #include <pthread_np.h>
+              |          ^~~~~~~~~~~~~~
+        1 error generated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:47 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_32"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_a8273
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_a8273.dir/atomic_32_test.c.o -MF CMakeFiles/cmTC_a8273.dir/atomic_32_test.c.o.d -o CMakeFiles/cmTC_a8273.dir/atomic_32_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_32_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_a8273.dir/atomic_32_test.c.o -o cmTC_a8273   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:79 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "_atomics_64"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_ba41a
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_ba41a.dir/atomic_64_test.c.o -MF CMakeFiles/cmTC_ba41a.dir/atomic_64_test.c.o.d -o CMakeFiles/cmTC_ba41a.dir/atomic_64_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/atomic_64_test.c
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_ba41a.dir/atomic_64_test.c.o -o cmTC_ba41a   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:108 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_C11THREADS"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_43300
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_43300.dir/c11threads_test.c.o -MF CMakeFiles/cmTC_43300.dir/c11threads_test.c.o.d -o CMakeFiles/cmTC_43300.dir/c11threads_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            8 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/c11threads_test.c:8:1: note: change return type to 'int'
+            8 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_43300.dir/c11threads_test.c.o -o cmTC_43300  -pthread && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "packaging/cmake/try_compile/rdkafka_setup.cmake:117 (try_compile)"
+      - "CMakeLists.txt:204 (include)"
+    directories:
+      source: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+      binary: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS-NOTFOUND"
+      CMAKE_C_FLAGS: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/Modules/"
+    buildResult:
+      variable: "WITH_CRC32C_HW"
+      cached: true
+      stdout: |
+        Change Dir: '/home/mesut/RustroverProjects/banking-es-feature-redis-integration/build/try_compile/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_47f4c
+        [1/2] /usr/bin/clang    -MD -MT CMakeFiles/cmTC_47f4c.dir/crc32c_hw_test.c.o -MF CMakeFiles/cmTC_47f4c.dir/crc32c_hw_test.c.o.d -o CMakeFiles/cmTC_47f4c.dir/crc32c_hw_test.c.o -c /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: warning: return type of 'main' is not 'int' [-Wmain-return-type]
+            5 | void main(void) {
+              | ^
+        /home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka/packaging/cmake/try_compile/crc32c_hw_test.c:5:1: note: change return type to 'int'
+            5 | void main(void) {
+              | ^~~~
+              | int
+        1 warning generated.
+        [2/2] : && /usr/bin/clang   CMakeFiles/cmTC_47f4c.dir/crc32c_hw_test.c.o -o cmTC_47f4c   && :
+        
+      exitCode: 0
+...

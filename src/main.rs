@@ -11,27 +11,17 @@ use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLay
 use tracing::{info, Level};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// Import redis client and trait abstractions
-use crate::infrastructure::{
-    projections::ProjectionConfig,
-    redis_abstraction::{
-        CircuitBreakerConfig, CircuitBreakerRedisClient, LoadShedderConfig,
-        LoadSheddingRedisClient, RedisPoolConfig,
-    },
-    RealRedisClient, RedisClientTrait,
-}; // Added trait imports
-use redis::Client as NativeRedisClient; // Renamed for clarity
-use std::env;
-use std::time::Duration;
-
 mod application;
 mod domain;
 mod infrastructure;
 mod web;
 
-use crate::infrastructure::{AccountRepository, EventStore, ProjectionStore};
+use crate::application::AccountService;
+use crate::infrastructure::projections::ProjectionConfig;
+use crate::infrastructure::{
+    AccountRepository, EventStore, EventStoreConfig, KafkaConfig, ProjectionStore,
+};
 use crate::web::handlers::RateLimitedService;
-use crate::{application::AccountService, infrastructure::EventStoreConfig};
 
 #[derive(Debug)]
 struct AppConfig {
@@ -41,15 +31,6 @@ struct AppConfig {
     batch_flush_interval_ms: u64,
     cache_size: usize,
     port: u16,
-    // Add new performance-related configs
-    redis_pool_config: RedisPoolConfig,
-    bulk_batch_size: usize,
-    bulk_processing_interval_ms: u64,
-    cache_ttl_seconds: u64,
-    max_retries: u32,
-    backoff_duration_ms: u64,
-    circuit_breaker_config: CircuitBreakerConfig,
-    load_shedder_config: LoadShedderConfig,
 }
 
 impl Default for AppConfig {
@@ -61,14 +42,6 @@ impl Default for AppConfig {
             batch_flush_interval_ms: 1000,
             cache_size: 1000,
             port: 8080,
-            redis_pool_config: RedisPoolConfig::default(),
-            bulk_batch_size: 100,
-            bulk_processing_interval_ms: 5000,
-            cache_ttl_seconds: 3600,
-            max_retries: 3,
-            backoff_duration_ms: 100,
-            circuit_breaker_config: CircuitBreakerConfig::default(),
-            load_shedder_config: LoadShedderConfig::default(),
         }
     }
 }
@@ -86,40 +59,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize infrastructure with optimized settings
     let event_store = EventStore::new_with_config(EventStoreConfig::default()).await?;
     let projection_store = ProjectionStore::new_with_config(ProjectionConfig::default()).await?;
+    let kafka_config = KafkaConfig::default();
 
-    // Initialize Redis Client with connection pooling
-    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| {
-        info!("REDIS_URL not set, defaulting to redis://127.0.0.1:6379");
-        "redis://127.0.0.1:6379".to_string()
-    });
-
-    // Create Redis client with circuit breaker and load shedding
-    let native_redis_client = NativeRedisClient::open(redis_url)?;
-    let redis_client_trait: Arc<dyn RedisClientTrait> = Arc::new(LoadSheddingRedisClient::new(
-        Arc::new(CircuitBreakerRedisClient::new(
-            RealRedisClient::new(
-                native_redis_client.clone(),
-                Some(config.redis_pool_config.clone()),
-            ),
-            config.circuit_breaker_config,
-        )),
-        config.load_shedder_config,
-    ));
-
-    // Create the repository
+    // Create optimized repository
     let repository = Arc::new(AccountRepository::new(
         event_store,
-        redis_client_trait.clone(),
-    ));
+        kafka_config,
+        projection_store.clone(),
+    )?);
 
-    // Create the service
-    let service = AccountService::new(repository, projection_store, redis_client_trait);
-
-    // Start background tasks for cache warming and consistency checking
-    service.start_background_tasks();
+    // Create high-performance service
+    let account_service = AccountService::new(repository, projection_store);
 
     // Create the rate-limited service
-    let rate_limited_service = RateLimitedService::new(service, config.max_requests_per_second);
+    let rate_limited_service =
+        RateLimitedService::new(account_service, config.max_requests_per_second);
 
     // Start the server
     let addr = format!("127.0.0.1:{}", config.port);

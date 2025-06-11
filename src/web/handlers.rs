@@ -23,7 +23,6 @@ use uuid::Uuid;
 use crate::application::AccountService;
 use crate::domain::{AccountCommand, AccountError};
 use crate::infrastructure::projections::{AccountProjection, TransactionProjection};
-use crate::infrastructure::redis_abstraction::RedisClientTrait;
 use crate::infrastructure::repository::AccountRepositoryTrait;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -71,17 +70,14 @@ pub struct ErrorResponse {
 #[derive(Clone)]
 pub struct RateLimitedService {
     service: Arc<AccountService>,
-    redis_client: Arc<dyn RedisClientTrait>,
     semaphore: Arc<Semaphore>,
     max_requests_per_second: usize,
 }
 
 impl RateLimitedService {
     pub fn new(service: AccountService, max_requests_per_second: usize) -> Self {
-        let redis_client = service.redis_client.clone();
         Self {
             service: Arc::new(service),
-            redis_client,
             semaphore: Arc::new(Semaphore::new(max_requests_per_second)),
             max_requests_per_second,
         }
@@ -99,7 +95,6 @@ impl Service<Request<Body>> for RateLimitedService {
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let service = self.service.clone();
-        let redis_client = self.redis_client.clone();
         let permit = self.semaphore.clone().acquire_owned();
         let rate_limited = self.clone();
 
@@ -114,73 +109,32 @@ impl Service<Request<Body>> for RateLimitedService {
                 .and_then(|s| uuid::Uuid::parse_str(s).ok());
 
             if let Some(cmd_id) = command_id {
-                let mut con = match redis_client.get_async_connection().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("Rate limiting: Failed to get Redis connection: {}", e);
-                        return Ok(Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Body::from("Rate limiting service unavailable"))
-                            .unwrap());
-                    }
-                };
-
-                let key = format!("cmd:{}", cmd_id);
-                match con.set_nx_ex_bytes(key.as_bytes(), b"1", 3600).await {
-                    Ok(true) => {
-                        // Command ID is new, proceed with the request
-                        let router = Router::new()
-                            .route("/accounts", get(get_all_accounts))
-                            .route("/accounts/:id", get(get_account))
-                            .route("/accounts/:id/transactions", get(get_account_transactions))
-                            .route("/accounts", post(create_account))
-                            .route("/accounts/:id/deposit", post(deposit_money))
-                            .route("/accounts/:id/withdraw", post(withdraw_money))
-                            .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
-                            .with_state(rate_limited.clone());
-
-                        match router.oneshot(req).await {
-                            Ok(resp) => Ok(resp),
-                            Err(e) => Ok(Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(Body::from(format!("Internal server error: {}", e)))
-                                .unwrap()),
-                        }
-                    }
-                    Ok(false) => {
-                        // Command ID already exists, return 409 Conflict
-                        Ok(Response::builder()
-                            .status(StatusCode::CONFLICT)
-                            .body(Body::from("Duplicate command ID"))
-                            .unwrap())
-                    }
-                    Err(e) => {
-                        error!("Rate limiting: Redis error: {}", e);
-                        Ok(Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Body::from("Rate limiting service unavailable"))
-                            .unwrap())
-                    }
+                // Check if command ID is already in the service's command cache
+                if service.is_duplicate_command(cmd_id).await {
+                    return Ok(Response::builder()
+                        .status(StatusCode::CONFLICT)
+                        .body(Body::from("Duplicate command ID"))
+                        .unwrap());
                 }
-            } else {
-                // No command ID provided, proceed with the request
-                let router = Router::new()
-                    .route("/accounts", get(get_all_accounts))
-                    .route("/accounts/:id", get(get_account))
-                    .route("/accounts/:id/transactions", get(get_account_transactions))
-                    .route("/accounts", post(create_account))
-                    .route("/accounts/:id/deposit", post(deposit_money))
-                    .route("/accounts/:id/withdraw", post(withdraw_money))
-                    .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
-                    .with_state(rate_limited.clone());
+            }
 
-                match router.oneshot(req).await {
-                    Ok(resp) => Ok(resp),
-                    Err(e) => Ok(Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::from(format!("Internal server error: {}", e)))
-                        .unwrap()),
-                }
+            // No command ID provided or not a duplicate, proceed with the request
+            let router = Router::new()
+                .route("/accounts", get(get_all_accounts))
+                .route("/accounts/:id", get(get_account))
+                .route("/accounts/:id/transactions", get(get_account_transactions))
+                .route("/accounts", post(create_account))
+                .route("/accounts/:id/deposit", post(deposit_money))
+                .route("/accounts/:id/withdraw", post(withdraw_money))
+                .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
+                .with_state(rate_limited.clone());
+
+            match router.oneshot(req).await {
+                Ok(resp) => Ok(resp),
+                Err(e) => Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(format!("Internal server error: {}", e)))
+                    .unwrap()),
             }
         })
     }

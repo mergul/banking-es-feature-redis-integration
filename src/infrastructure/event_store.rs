@@ -1,4 +1,4 @@
-use crate::domain::{AccountEvent, Event};
+use crate::domain::{Account, AccountEvent};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -11,6 +11,16 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub id: Uuid,
+    pub aggregate_id: Uuid,
+    pub event_type: String,
+    pub event_data: Value,
+    pub version: i64,
+    pub timestamp: DateTime<Utc>,
+}
 
 #[derive(Clone)]
 pub struct EventStore {
@@ -1154,6 +1164,42 @@ impl EventStore {
                 metrics.connection_lifetime.load(Ordering::Relaxed) / 1000
             );
         }
+    }
+
+    pub async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>> {
+        let mut account = Account::default();
+        let events = self.get_events(account_id, None).await?;
+
+        for event in events {
+            let account_event: AccountEvent = serde_json::from_value(event.event_data)?;
+            account.apply_event(&account_event);
+        }
+
+        Ok(Some(account))
+    }
+
+    pub async fn get_all_accounts(&self) -> Result<Vec<Account>> {
+        let account_ids: Vec<Uuid> = sqlx::query!(
+            r#"
+            SELECT DISTINCT aggregate_id as account_id
+            FROM events
+            ORDER BY aggregate_id
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| row.account_id)
+        .collect();
+
+        let mut accounts = Vec::new();
+        for account_id in account_ids {
+            if let Some(account) = self.get_account(account_id).await? {
+                accounts.push(account);
+            }
+        }
+
+        Ok(accounts)
     }
 }
 /// Health check response
