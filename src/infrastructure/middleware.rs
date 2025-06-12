@@ -9,6 +9,15 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use validator::{Validate, ValidationError};
 use std::collections::HashMap;
+use axum::{
+    http::{Request, Response, HeaderMap, StatusCode},
+    middleware::Next,
+};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tower::Service;
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
@@ -96,18 +105,16 @@ pub struct RequestValidator {
 }
 
 #[async_trait::async_trait]
-pub trait RequestValidationRule: Send + Sync {
+pub trait RequestValidationRule: Send + Sync + std::fmt::Debug {
     async fn validate(&self, request: &RequestContext) -> ValidationResult;
 }
 
 #[derive(Debug, Clone)]
 pub struct RequestContext {
     pub client_id: String,
-    pub user_id: Option<String>,
     pub request_type: String,
-    pub payload: serde_json::Value,
-    pub headers: HashMap<String, String>,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub payload: Value,
+    pub headers: HeaderMap,
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +157,7 @@ impl RequestValidator {
     }
 }
 
-// Example validation rules
+#[derive(Debug)]
 pub struct AccountCreationValidator;
 
 #[async_trait::async_trait]
@@ -197,6 +204,7 @@ impl RequestValidationRule for AccountCreationValidator {
     }
 }
 
+#[derive(Debug)]
 pub struct TransactionValidator;
 
 #[async_trait::async_trait]
@@ -243,8 +251,7 @@ impl RequestValidationRule for TransactionValidator {
     }
 }
 
-// Middleware for combining rate limiting and request validation
-#[derive(Clone)]
+#[derive(Debug)]
 pub struct RequestMiddleware {
     rate_limiter: RateLimiter,
     request_validator: RequestValidator,
@@ -258,31 +265,19 @@ impl RequestMiddleware {
         }
     }
 
-    pub async fn process_request(&self, context: RequestContext) -> Result<MiddlewareResult> {
+    pub async fn process_request(&self, context: RequestContext) -> Result<ValidationResult> {
         // Check rate limit
         if !self.rate_limiter.check_rate_limit(&context.client_id).await? {
-            return Ok(MiddlewareResult {
-                is_allowed: false,
-                error: Some("Rate limit exceeded".to_string()),
+            return Ok(ValidationResult {
+                is_valid: false,
+                errors: vec!["Rate limit exceeded".to_string()],
                 warnings: Vec::new(),
             });
         }
 
         // Validate request
-        let validation = self.request_validator.validate_request(&context).await;
-        if !validation.is_valid {
-            return Ok(MiddlewareResult {
-                is_allowed: false,
-                error: Some(validation.errors.join(", ")),
-                warnings: validation.warnings,
-            });
-        }
-
-        Ok(MiddlewareResult {
-            is_allowed: true,
-            error: None,
-            warnings: validation.warnings,
-        })
+        let validation_result = self.request_validator.validate_request(&context).await;
+        Ok(validation_result)
     }
 
     pub fn register_validator(
@@ -294,9 +289,8 @@ impl RequestMiddleware {
     }
 }
 
-#[derive(Debug)]
-pub struct MiddlewareResult {
-    pub is_allowed: bool,
-    pub error: Option<String>,
-    pub warnings: Vec<String>,
+impl Default for RequestMiddleware {
+    fn default() -> Self {
+        Self::new(RateLimitConfig::default())
+    }
 } 

@@ -2,174 +2,25 @@ use async_trait::async_trait;
 use redis::{
     AsyncIter, Client as NativeRedisClient, ErrorKind as RedisErrorKind, ExistenceCheck,
     FromRedisValue, Pipeline, RedisError, SetExpiry, SetOptions, Value as RedisValue,
+    aio::MultiplexedConnection,
+    AsyncCommands,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, Mutex};
 // Required for the trait methods even if not used by RealRedisConnection directly for all methods now
 // use mockall::automock; // Removed: no longer used
 #[allow(unused_imports)]
 use redis::ToRedisArgs;
-
-/// Defines a set of asynchronous Redis commands that can be executed on a connection.
-/// This trait allows for mocking Redis interactions in unit tests.
-#[async_trait]
-pub trait RedisConnectionCommands: Send + Sync {
-    /// Gets a value from Redis. Corresponds to `GET key`.
-    async fn get_bytes(&mut self, key: &[u8]) -> Result<RedisValue, RedisError>;
-
-    /// Sets a value with an expiration time (in seconds). Corresponds to `SET key value EX seconds`.
-    async fn set_ex_bytes(
-        &mut self,
-        key: &[u8],
-        value: &[u8],
-        seconds: u64,
-    ) -> Result<(), RedisError>;
-
-    /// Deletes a key. Corresponds to `DEL key`.
-    async fn del_bytes(&mut self, key: &[u8]) -> Result<(), RedisError>;
-
-    /// Appends one or multiple values to a list. Corresponds to `RPUSH key value [value ...]`.
-    async fn rpush_bytes(&mut self, key: &[u8], values: &[&[u8]]) -> Result<(), RedisError>;
-
-    /// Gets a range of elements from a list. Corresponds to `LRANGE key start stop`.
-    async fn lrange_bytes(
-        &mut self,
-        key: &[u8],
-        start: isize,
-        stop: isize,
-    ) -> Result<Vec<RedisValue>, RedisError>;
-
-    /// Iterates over keys matching a pattern. Corresponds to `SCAN cursor MATCH pattern [COUNT count]`.
-    async fn scan_match_bytes(&mut self, pattern: &[u8]) -> Result<Vec<String>, RedisError>;
-
-    /// Sets a value with options (e.g., NX, EX).
-    /// Note: The generic implementation of this in `RealRedisConnection` might be problematic
-    /// and `set_nx_ex_bytes` is preferred for specific SET NX EX cases.
-    async fn set_options_bytes(
-        &mut self,
-        key: &[u8],
-        value: &[u8],
-        options: SetOptions,
-    ) -> Result<Option<String>, RedisError>;
-
-    /// Sets a value if it does not already exist, with an expiration time. Corresponds to `SET key value NX EX seconds`.
-    /// Returns true if the key was set, false if the key was not set (because it already existed).
-    async fn set_nx_ex_bytes(
-        &mut self,
-        key: &[u8],
-        value: &[u8],
-        seconds: u64,
-    ) -> Result<bool, RedisError>;
-
-    /// Executes a pipeline of commands
-    async fn execute_pipeline(
-        &mut self,
-        pipeline: RedisPipeline,
-    ) -> Result<Vec<RedisValue>, RedisError>;
-}
-
-/// Concrete implementation of `RedisConnectionCommands` using a `redis::aio::MultiplexedConnection`.
-pub struct RealRedisConnection {
-    conn: redis::aio::MultiplexedConnection,
-}
-
-#[async_trait]
-impl RedisConnectionCommands for RealRedisConnection {
-    /// Gets a value from Redis.
-    async fn get_bytes(&mut self, key: &[u8]) -> Result<RedisValue, RedisError> {
-        redis::AsyncCommands::get(&mut self.conn, key).await
-    }
-
-    /// Sets a value with an expiration time.
-    async fn set_ex_bytes(
-        &mut self,
-        key: &[u8],
-        value: &[u8],
-        seconds: u64,
-    ) -> Result<(), RedisError> {
-        redis::AsyncCommands::set_ex(&mut self.conn, key, value, seconds).await
-    }
-
-    /// Deletes a key.
-    async fn del_bytes(&mut self, key: &[u8]) -> Result<(), RedisError> {
-        redis::AsyncCommands::del(&mut self.conn, key).await
-    }
-
-    /// Appends values to a list.
-    async fn rpush_bytes(&mut self, key: &[u8], values: &[&[u8]]) -> Result<(), RedisError> {
-        redis::AsyncCommands::rpush(&mut self.conn, key, values).await
-    }
-
-    /// Gets a range from a list.
-    async fn lrange_bytes(
-        &mut self,
-        key: &[u8],
-        start: isize,
-        stop: isize,
-    ) -> Result<Vec<RedisValue>, RedisError> {
-        redis::AsyncCommands::lrange(&mut self.conn, key, start, stop).await
-    }
-
-    /// Iterates over keys matching a pattern.
-    async fn scan_match_bytes(&mut self, pattern: &[u8]) -> Result<Vec<String>, RedisError> {
-        let mut iter: AsyncIter<String> =
-            redis::AsyncCommands::scan_match(&mut self.conn, pattern).await?;
-        let mut keys = Vec::new();
-        while let Some(key) = iter.next_item().await {
-            keys.push(key);
-        }
-        Ok(keys)
-    }
-
-    /// Sets a value with options.
-    /// Note: This implementation is simplified and potentially problematic for generic options.
-    /// Prefer specific command methods like `set_nx_ex_bytes` where possible.
-    async fn set_options_bytes(
-        &mut self,
-        key: &[u8],
-        value: &[u8],
-        options: SetOptions,
-    ) -> Result<Option<String>, RedisError> {
-        use redis::AsyncCommands;
-        self.conn.set_options(key, value, options).await
-    }
-
-    /// Sets a value if it does not exist, with an expiration.
-    async fn set_nx_ex_bytes(
-        &mut self,
-        key: &[u8],
-        value: &[u8],
-        seconds: u64,
-    ) -> Result<bool, RedisError> {
-        let result: RedisValue = redis::cmd("SET")
-            .arg(key)
-            .arg(value)
-            .arg("NX")
-            .arg("EX")
-            .arg(seconds)
-            .query_async(&mut self.conn)
-            .await?;
-        Ok(result == RedisValue::Okay)
-    }
-
-    async fn execute_pipeline(
-        &mut self,
-        pipeline: RedisPipeline,
-    ) -> Result<Vec<RedisValue>, RedisError> {
-        pipeline.pipeline.query_async(&mut self.conn).await
-    }
-}
+use redis::aio::ConnectionLike;
 
 /// Defines a trait for a Redis client that can provide connections.
 /// This allows for mocking the client itself in unit tests.
 #[async_trait]
 pub trait RedisClientTrait: Send + Sync {
     /// Gets a new asynchronous Redis connection, boxed as a trait object.
-    async fn get_async_connection(
-        &self,
-    ) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError>;
+    async fn get_connection(&self) -> Result<MultiplexedConnection, RedisError>;
     /// Clones the client, returning an `Arc` of the trait object.
     fn clone_client(&self) -> Arc<dyn RedisClientTrait>;
 
@@ -180,6 +31,10 @@ pub trait RedisClientTrait: Send + Sync {
 
     /// Gets the pool configuration
     fn get_pool_config(&self) -> RedisPoolConfig;
+
+    async fn get(&self, key: &str) -> Result<Option<String>, RedisError>;
+    async fn set(&self, key: &str, value: &str) -> Result<(), RedisError>;
+    async fn del(&self, key: &str) -> Result<(), RedisError>;
 }
 
 /// Concrete implementation of `RedisClientTrait` using a `redis::Client` (aliased as `NativeRedisClient`).
@@ -204,11 +59,8 @@ impl RealRedisClient {
 #[async_trait]
 impl RedisClientTrait for RealRedisClient {
     /// Gets a Redis connection from the underlying `NativeRedisClient`.
-    async fn get_async_connection(
-        &self,
-    ) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
-        let conn = self.client.get_multiplexed_async_connection().await?;
-        Ok(Box::new(RealRedisConnection { conn }))
+    async fn get_connection(&self) -> Result<MultiplexedConnection, RedisError> {
+        self.client.get_multiplexed_async_connection().await
     }
     /// Clones the `RealRedisClient` by cloning its internal `NativeRedisClient` and wrapping in a new `Arc`.
     fn clone_client(&self) -> Arc<dyn RedisClientTrait> {
@@ -222,55 +74,106 @@ impl RedisClientTrait for RealRedisClient {
         &self,
     ) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
         let conn = self.client.get_multiplexed_async_connection().await?;
-        Ok(Box::new(RealRedisConnection { conn }))
+        Ok(Box::new(RedisConnection::new(conn)))
     }
 
     fn get_pool_config(&self) -> RedisPoolConfig {
         self.pool_config.clone()
     }
+
+    async fn get(&self, key: &str) -> Result<Option<String>, RedisError> {
+        let mut conn = self.get_connection().await?;
+        conn.get(key).await
+    }
+
+    async fn set(&self, key: &str, value: &str) -> Result<(), RedisError> {
+        let mut conn = self.get_connection().await?;
+        conn.set(key, value).await
+    }
+
+    async fn del(&self, key: &str) -> Result<(), RedisError> {
+        let mut conn = self.get_connection().await?;
+        conn.del(key).await
+    }
 }
 
-// For mocking purposes, ensure Account is usable if tests need to mock results with it.
-// This is not strictly part of the abstraction but good for test setup.
-#[cfg(test)]
-mod redis_abstraction_tests {
-    use crate::domain::Account;
-    use rust_decimal::Decimal;
-    use serde::{Deserialize, Serialize};
-    use uuid::Uuid;
+#[async_trait::async_trait]
+pub trait RedisConnectionCommands: Send + Sync {
+    async fn execute_pipeline(&mut self, pipeline: &RedisPipeline) -> Result<Vec<RedisValue>, RedisError>;
+}
 
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)] // Ensure Account can be compared for tests
-    pub struct MockableAccount {
-        // If Account itself has non-clone/non-debug fields from external crates
-        pub id: Uuid,
-        pub owner_name: String,
-        pub balance: Decimal,
-        pub is_active: bool,
-        pub version: i64,
-    }
+/// Concrete implementation of `RedisConnectionCommands` using a `redis::aio::MultiplexedConnection`.
+pub struct RedisConnection {
+    conn: Arc<Mutex<MultiplexedConnection>>,
+}
 
-    impl From<Account> for MockableAccount {
-        fn from(acc: Account) -> Self {
-            Self {
-                id: acc.id,
-                owner_name: acc.owner_name,
-                balance: acc.balance,
-                is_active: acc.is_active,
-                version: acc.version,
-            }
+impl RedisConnection {
+    pub fn new(conn: MultiplexedConnection) -> Self {
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
         }
     }
-    impl From<MockableAccount> for Account {
-        fn from(m_acc: MockableAccount) -> Self {
-            Self {
-                id: m_acc.id,
-                owner_name: m_acc.owner_name,
-                balance: m_acc.balance,
-                is_active: m_acc.is_active,
-                version: m_acc.version,
-                // .. any other fields default or converted
-            }
+
+    pub async fn get_bytes(&self, key: &[u8]) -> Result<RedisValue, RedisError> {
+        let mut conn = self.conn.lock().await;
+        redis::AsyncCommands::get(&mut *conn, key).await
+    }
+
+    pub async fn set_ex_bytes(&self, key: &[u8], value: &[u8], seconds: u64) -> Result<(), RedisError> {
+        let mut conn = self.conn.lock().await;
+        redis::AsyncCommands::set_ex(&mut *conn, key, value, seconds).await
+    }
+
+    pub async fn del_bytes(&self, key: &[u8]) -> Result<(), RedisError> {
+        let mut conn = self.conn.lock().await;
+        redis::AsyncCommands::del(&mut *conn, key).await
+    }
+
+    pub async fn rpush_bytes(&self, key: &[u8], values: &[&[u8]]) -> Result<(), RedisError> {
+        let mut conn = self.conn.lock().await;
+        redis::AsyncCommands::rpush(&mut *conn, key, values).await
+    }
+
+    pub async fn lrange_bytes(&self, key: &[u8], start: isize, stop: isize) -> Result<Vec<RedisValue>, RedisError> {
+        let mut conn = self.conn.lock().await;
+        conn.lrange(key, start, stop).await
+    }
+
+    pub async fn scan_match_bytes(&self, pattern: &[u8]) -> Result<Vec<String>, RedisError> {
+        let mut conn = self.conn.lock().await;
+        let mut iter: AsyncIter<String> = redis::AsyncCommands::scan_match(&mut *conn, pattern).await?;
+        let mut keys = Vec::new();
+        while let Some(key) = iter.next_item().await {
+            keys.push(key);
         }
+        Ok(keys)
+    }
+
+    pub async fn set_options_bytes(&self, key: &[u8], value: &[u8], options: SetOptions) -> Result<Option<String>, RedisError> {
+        let mut conn = self.conn.lock().await;
+        conn.set_options(key, value, options).await
+    }
+
+    pub async fn set_nx_ex_bytes(&self, key: &[u8], value: &[u8], seconds: u64) -> Result<bool, RedisError> {
+        let mut conn = self.conn.lock().await;
+        let result: RedisValue = redis::cmd("SET")
+            .arg(key)
+            .arg(value)
+            .arg("NX")
+            .arg("EX")
+            .arg(seconds)
+            .query_async(&mut *conn)
+            .await?;
+        Ok(result == RedisValue::Okay)
+    }
+}
+
+#[async_trait::async_trait]
+impl RedisConnectionCommands for RedisConnection {
+    async fn execute_pipeline(&mut self, pipeline: &RedisPipeline) -> Result<Vec<RedisValue>, RedisError> {
+        let mut conn = self.conn.lock().await;
+        let mut pipeline = pipeline.pipeline.clone();
+        pipeline.query_async(&mut *conn).await
     }
 }
 
@@ -338,7 +241,7 @@ impl RedisPipeline {
         &self,
         conn: &mut dyn RedisConnectionCommands,
     ) -> Result<Vec<RedisValue>, RedisError> {
-        conn.execute_pipeline(self.clone()).await
+        conn.execute_pipeline(self).await
     }
 }
 
@@ -445,17 +348,15 @@ impl CircuitBreakerRedisClient {
 
 #[async_trait]
 impl RedisClientTrait for CircuitBreakerRedisClient {
-    async fn get_async_connection(
-        &self,
-    ) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
+    async fn get_connection(&self) -> Result<MultiplexedConnection, RedisError> {
         if !self.circuit_breaker.allow_request().await {
-            return Err(RedisError::from((
-                RedisErrorKind::IoError,
+            return Err(RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
                 "Circuit breaker is open",
             )));
         }
 
-        match self.inner.get_async_connection().await {
+        match self.inner.get_connection().await {
             Ok(conn) => {
                 self.circuit_breaker.record_success().await;
                 Ok(conn)
@@ -474,12 +375,10 @@ impl RedisClientTrait for CircuitBreakerRedisClient {
         })
     }
 
-    async fn get_pooled_connection(
-        &self,
-    ) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
+    async fn get_pooled_connection(&self) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
         if !self.circuit_breaker.allow_request().await {
-            return Err(RedisError::from((
-                RedisErrorKind::IoError,
+            return Err(RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
                 "Circuit breaker is open",
             )));
         }
@@ -498,6 +397,66 @@ impl RedisClientTrait for CircuitBreakerRedisClient {
 
     fn get_pool_config(&self) -> RedisPoolConfig {
         self.inner.get_pool_config()
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<String>, RedisError> {
+        if !self.circuit_breaker.allow_request().await {
+            return Err(RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Circuit breaker is open",
+            )));
+        }
+
+        match self.inner.get(key).await {
+            Ok(value) => {
+                self.circuit_breaker.record_success().await;
+                Ok(value)
+            }
+            Err(e) => {
+                self.circuit_breaker.record_failure().await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn set(&self, key: &str, value: &str) -> Result<(), RedisError> {
+        if !self.circuit_breaker.allow_request().await {
+            return Err(RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Circuit breaker is open",
+            )));
+        }
+
+        match self.inner.set(key, value).await {
+            Ok(_) => {
+                self.circuit_breaker.record_success().await;
+                Ok(())
+            }
+            Err(e) => {
+                self.circuit_breaker.record_failure().await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn del(&self, key: &str) -> Result<(), RedisError> {
+        if !self.circuit_breaker.allow_request().await {
+            return Err(RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Circuit breaker is open",
+            )));
+        }
+
+        match self.inner.del(key).await {
+            Ok(_) => {
+                self.circuit_breaker.record_success().await;
+                Ok(())
+            }
+            Err(e) => {
+                self.circuit_breaker.record_failure().await;
+                Err(e)
+            }
+        }
     }
 }
 
@@ -649,14 +608,9 @@ impl LoadSheddingRedisClient {
 
 #[async_trait]
 impl RedisClientTrait for LoadSheddingRedisClient {
-    async fn get_async_connection(
-        &self,
-    ) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
-        // Acquire a permit from the load shedder
+    async fn get_connection(&self) -> Result<MultiplexedConnection, RedisError> {
         let _permit = self.load_shedder.acquire_permit().await?;
-
-        // If we get here, we have a permit and can proceed
-        self.inner.get_async_connection().await
+        self.inner.get_connection().await
     }
 
     fn clone_client(&self) -> Arc<dyn RedisClientTrait> {
@@ -666,17 +620,66 @@ impl RedisClientTrait for LoadSheddingRedisClient {
         })
     }
 
-    async fn get_pooled_connection(
-        &self,
-    ) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
-        // Acquire a permit from the load shedder
+    async fn get_pooled_connection(&self) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
         let _permit = self.load_shedder.acquire_permit().await?;
-
-        // If we get here, we have a permit and can proceed
         self.inner.get_pooled_connection().await
     }
 
     fn get_pool_config(&self) -> RedisPoolConfig {
         self.inner.get_pool_config()
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<String>, RedisError> {
+        let _permit = self.load_shedder.acquire_permit().await?;
+        self.inner.get(key).await
+    }
+
+    async fn set(&self, key: &str, value: &str) -> Result<(), RedisError> {
+        let _permit = self.load_shedder.acquire_permit().await?;
+        self.inner.set(key, value).await
+    }
+
+    async fn del(&self, key: &str) -> Result<(), RedisError> {
+        let _permit = self.load_shedder.acquire_permit().await?;
+        self.inner.del(key).await
+    }
+}
+
+pub struct RedisClient {
+    conn: Arc<Mutex<MultiplexedConnection>>,
+}
+
+impl RedisClient {
+    pub async fn new() -> Result<Self, RedisError> {
+        let client = redis::Client::open("redis://127.0.0.1/")?;
+        let conn = client.get_multiplexed_async_connection().await?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    pub async fn get(&self, key: &str) -> Result<Option<String>, RedisError> {
+        let mut conn = self.conn.lock().await;
+        conn.get(key).await
+    }
+
+    pub async fn set(&self, key: &str, value: &str) -> Result<(), RedisError> {
+        let mut conn = self.conn.lock().await;
+        conn.set(key, value).await
+    }
+
+    pub async fn set_ex(&self, key: &str, value: &str, seconds: u64) -> Result<(), RedisError> {
+        let mut conn = self.conn.lock().await;
+        conn.set_ex(key, value, seconds).await
+    }
+
+    pub async fn del(&self, key: &str) -> Result<(), RedisError> {
+        let mut conn = self.conn.lock().await;
+        conn.del(key).await
+    }
+
+    pub async fn exists(&self, key: &str) -> Result<bool, RedisError> {
+        let mut conn = self.conn.lock().await;
+        conn.exists(key).await
     }
 }

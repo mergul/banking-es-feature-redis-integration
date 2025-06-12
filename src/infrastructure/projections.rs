@@ -7,9 +7,10 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, OnceCell};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use crate::infrastructure::event_store::DB_POOL;
 
 // Enhanced error types for projections
 #[derive(Debug, thiserror::Error)]
@@ -106,87 +107,94 @@ enum ProjectionUpdate {
     TransactionBatch(Vec<TransactionProjection>),
 }
 
+// Global connection pool
+static PROJECTION_POOL: OnceCell<Arc<PgPool>> = OnceCell::const_new();
+
 impl ProjectionStore {
     pub fn new(pool: PgPool) -> Self {
-        let (update_sender, update_receiver) = mpsc::unbounded_channel();
+        Self::from_pool_with_config(pool, ProjectionConfig::default())
+    }
+
+    pub fn from_pool_with_config(pool: PgPool, config: ProjectionConfig) -> Self {
         let account_cache = Arc::new(RwLock::new(HashMap::new()));
         let transaction_cache = Arc::new(RwLock::new(HashMap::new()));
+        let (update_sender, update_receiver) = mpsc::unbounded_channel();
         let cache_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let metrics = Arc::new(ProjectionMetrics::default());
-        let config = ProjectionConfig::default();
 
         let store = Self {
             pool: pool.clone(),
             account_cache: account_cache.clone(),
             transaction_cache: transaction_cache.clone(),
             update_sender,
-            cache_version: cache_version.clone(),
-            metrics: metrics.clone(),
+            cache_version,
+            metrics,
             config: config.clone(),
         };
 
-        // Start background batch processor
-        tokio::spawn(Self::batch_update_processor(
-            pool.clone(),
+        // Start background update processor
+        tokio::spawn(Self::update_processor(
+            pool,
             update_receiver,
-            account_cache.clone(),
-            transaction_cache.clone(),
-            cache_version,
-            metrics.clone(),
+            account_cache,
+            transaction_cache,
             config,
         ));
-
-        // Start cache cleanup worker
-        tokio::spawn(Self::cache_cleanup_worker(
-            account_cache.clone(),
-            transaction_cache.clone(),
-        ));
-
-        // Start metrics reporter
-        tokio::spawn(Self::metrics_reporter(metrics));
 
         store
     }
 
     pub async fn new_with_config(config: ProjectionConfig) -> Result<Self> {
-        let database_url = std::env::var("DATABASE_URL")
-            .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?;
+        // Get or initialize the global connection pool
+        let pool = PROJECTION_POOL.get_or_try_init(|| async {
+            let database_url = std::env::var("DATABASE_URL")
+                .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?;
 
-        let pool = PgPoolOptions::new()
-            .max_connections(config.max_connections)
-            .min_connections(config.min_connections)
-            .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
-            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-            .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    sqlx::query("SET SESSION synchronous_commit = 'off'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION work_mem = '64MB'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION maintenance_work_mem = '256MB'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION effective_cache_size = '4GB'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION random_page_cost = 1.1")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION effective_io_concurrency = 200")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SELECT 1").execute(&mut *conn).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(config.max_connections)
+                .min_connections(config.min_connections)
+                .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
+                .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+                .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
+                .after_connect(|conn, _meta| {
+                    Box::pin(async move {
+                        sqlx::query("SET SESSION synchronous_commit = 'off'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION work_mem = '32MB'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION maintenance_work_mem = '128MB'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION effective_cache_size = '2GB'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION random_page_cost = 1.1")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION effective_io_concurrency = 100")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION statement_timeout = '5s'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION pool_mode = 'transaction'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SELECT 1").execute(&mut *conn).await?;
 
-                    Ok(())
+                        Ok(())
+                    })
                 })
-            })
-            .connect(&database_url)
-            .await?;
+                .connect(&database_url)
+                .await?;
 
-        Ok(Self::new(pool))
+            Ok::<_, anyhow::Error>(Arc::new(pool))
+        })
+        .await?;
+
+        Ok(Self::from_pool_with_config(pool.as_ref().clone(), config))
     }
 
     pub async fn upsert_accounts_batch(&self, accounts: Vec<AccountProjection>) -> Result<()> {
@@ -349,19 +357,19 @@ impl ProjectionStore {
         Ok(accounts)
     }
 
-    async fn batch_update_processor(
+    async fn update_processor(
         pool: PgPool,
         mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
         account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
         transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
-        cache_version: Arc<std::sync::atomic::AtomicU64>,
-        metrics: Arc<ProjectionMetrics>,
         config: ProjectionConfig,
     ) {
         let mut account_batch = Vec::with_capacity(config.batch_size);
         let mut transaction_batch = Vec::with_capacity(config.batch_size);
         let mut last_flush = Instant::now();
         let batch_timeout = Duration::from_millis(config.batch_timeout_ms);
+        let cache_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let metrics = Arc::new(ProjectionMetrics::default());
 
         while let Some(update) = receiver.recv().await {
             match update {

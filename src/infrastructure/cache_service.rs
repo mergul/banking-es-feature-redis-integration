@@ -1,6 +1,7 @@
 use crate::domain::{Account, AccountEvent};
 use crate::infrastructure::redis_abstraction::{
     CircuitBreakerConfig, LoadShedderConfig, RedisClientTrait, RedisPoolConfig,
+    RedisPipeline,
 };
 use anyhow::Result;
 use redis::RedisError;
@@ -12,6 +13,16 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
+use async_trait::async_trait;
+use crate::infrastructure::redis_abstraction::RedisConnectionCommands;
+use redis::{Value as RedisValue, aio::MultiplexedConnection, ConnectionInfo};
+use serde_json;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::{duplex, AsyncRead, AsyncWrite};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use redis::Client;
 
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
@@ -30,7 +41,7 @@ pub enum EvictionPolicy {
     TTL,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CacheMetrics {
     pub hits: std::sync::atomic::AtomicU64,
     pub misses: std::sync::atomic::AtomicU64,
@@ -39,6 +50,20 @@ pub struct CacheMetrics {
     pub warmups: std::sync::atomic::AtomicU64,
     pub shard_hits: std::sync::atomic::AtomicU64,
     pub shard_misses: std::sync::atomic::AtomicU64,
+}
+
+impl Clone for CacheMetrics {
+    fn clone(&self) -> Self {
+        Self {
+            hits: std::sync::atomic::AtomicU64::new(self.hits.load(std::sync::atomic::Ordering::Relaxed)),
+            misses: std::sync::atomic::AtomicU64::new(self.misses.load(std::sync::atomic::Ordering::Relaxed)),
+            evictions: std::sync::atomic::AtomicU64::new(self.evictions.load(std::sync::atomic::Ordering::Relaxed)),
+            errors: std::sync::atomic::AtomicU64::new(self.errors.load(std::sync::atomic::Ordering::Relaxed)),
+            warmups: std::sync::atomic::AtomicU64::new(self.warmups.load(std::sync::atomic::Ordering::Relaxed)),
+            shard_hits: std::sync::atomic::AtomicU64::new(self.shard_hits.load(std::sync::atomic::Ordering::Relaxed)),
+            shard_misses: std::sync::atomic::AtomicU64::new(self.shard_misses.load(std::sync::atomic::Ordering::Relaxed)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,11 +75,12 @@ pub struct CacheEntry<T> {
     pub ttl: Duration,
 }
 
+#[derive(Clone)]
 pub struct CacheService {
     redis_client: Arc<dyn RedisClientTrait>,
     config: CacheConfig,
     metrics: Arc<CacheMetrics>,
-    shards: Vec<DashMap<Uuid, CacheEntry<Account>>>,
+    shards: Arc<Vec<DashMap<Uuid, CacheEntry<Account>>>>,
     event_cache: DashMap<Uuid, Vec<(i64, AccountEvent)>>,
     warming_state: Arc<RwLock<WarmingState>>,
 }
@@ -84,7 +110,7 @@ impl CacheService {
                 shard_hits: std::sync::atomic::AtomicU64::new(0),
                 shard_misses: std::sync::atomic::AtomicU64::new(0),
             }),
-            shards,
+            shards: Arc::new(shards),
             event_cache: DashMap::new(),
             warming_state: Arc::new(RwLock::new(WarmingState::default())),
         }
@@ -97,8 +123,9 @@ impl CacheService {
         }
 
         // Verify Redis connection
-        let mut conn = self.redis_client.get_async_connection().await?;
-        conn.get_bytes(b"test").await?;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
+        let _: Option<String> = conn.get("test").await.ok();
 
         state.is_warming = true;
         state.accounts_to_warm = Vec::new();
@@ -122,10 +149,11 @@ impl CacheService {
         self.metrics.shard_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Try Redis cache
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
         let key = format!("account:{}", account_id);
 
-        match conn.get_bytes(key.as_bytes()).await {
+        match conn.get(key.as_bytes()).await {
             Ok(redis::Value::Data(data)) => {
                 match serde_json::from_slice::<Account>(&data) {
                     Ok(account) => {
@@ -155,11 +183,12 @@ impl CacheService {
 
     pub async fn set_account(&self, account: &Account, ttl: Option<Duration>) -> Result<()> {
         let ttl = ttl.unwrap_or(self.config.default_ttl);
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
         let key = format!("account:{}", account.id);
         let value = serde_json::to_vec(account)?;
 
-        conn.set_ex_bytes(key.as_bytes(), &value, ttl.as_secs()).await?;
+        conn.set_ex(key.as_bytes(), &value, ttl.as_secs()).await?;
         
         // Update in-memory cache
         self.update_in_memory_cache(account.id, account.clone());
@@ -168,10 +197,11 @@ impl CacheService {
     }
 
     pub async fn delete_account(&self, account_id: Uuid) -> Result<()> {
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
         let key = format!("account:{}", account_id);
 
-        conn.del_bytes(key.as_bytes()).await?;
+        conn.del(key.as_bytes()).await?;
         self.metrics.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
@@ -182,10 +212,11 @@ impl CacheService {
             return Ok(Some(events.iter().map(|(_, event)| event.clone()).collect()));
         }
 
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
         let key = format!("events:{}", account_id);
 
-        match conn.get_bytes(key.as_bytes()).await {
+        match conn.get(key.as_bytes()).await {
             Ok(redis::Value::Data(data)) => {
                 match serde_json::from_slice::<Vec<(i64, AccountEvent)>>(&data) {
                     Ok(events) => {
@@ -220,11 +251,12 @@ impl CacheService {
         ttl: Option<Duration>,
     ) -> Result<()> {
         let ttl = ttl.unwrap_or(self.config.default_ttl);
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
         let key = format!("events:{}", account_id);
         let value = serde_json::to_vec(events)?;
 
-        conn.set_ex_bytes(key.as_bytes(), &value, ttl.as_secs()).await?;
+        conn.set_ex(key.as_bytes(), &value, ttl.as_secs()).await?;
         
         // Update in-memory cache
         self.event_cache.insert(account_id, events.to_vec());
@@ -233,10 +265,11 @@ impl CacheService {
     }
 
     pub async fn delete_account_events(&self, account_id: Uuid) -> Result<()> {
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
         let key = format!("events:{}", account_id);
 
-        conn.del_bytes(key.as_bytes()).await?;
+        conn.del(key.as_bytes()).await?;
         self.metrics.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
@@ -248,12 +281,13 @@ impl CacheService {
         self.event_cache.remove(&account_id);
 
         // Invalidate Redis cache
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
         let account_key = format!("account:{}", account_id);
         let events_key = format!("events:{}", account_id);
 
-        conn.del_bytes(account_key.as_bytes()).await?;
-        conn.del_bytes(events_key.as_bytes()).await?;
+        conn.del(account_key.as_bytes()).await?;
+        conn.del(events_key.as_bytes()).await?;
 
         self.metrics.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
@@ -266,14 +300,15 @@ impl CacheService {
         }
 
         state.is_warming = true;
-        state.accounts_to_warm = account_ids;
+        state.accounts_to_warm = account_ids.clone();
         drop(state);
 
         let batch_size = self.config.warmup_batch_size;
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
 
         for chunk in account_ids.chunks(batch_size) {
-            let mut pipeline = redis::Pipeline::new();
+            let mut pipeline = redis::pipe();
             
             for &account_id in chunk {
                 let account_key = format!("account:{}", account_id);
@@ -282,12 +317,20 @@ impl CacheService {
                 pipeline.get(events_key);
             }
 
-            let results = pipeline.query_async(&mut conn).await?;
+            let results: Vec<redis::Value> = pipeline.query_async(&mut conn).await?;
             
             for (i, &account_id) in chunk.iter().enumerate() {
+                let account_bytes = match &results[i * 2] {
+                    redis::Value::Data(bytes) => bytes.as_slice(),
+                    _ => &[],
+                };
+                let events_bytes = match &results[i * 2 + 1] {
+                    redis::Value::Data(bytes) => bytes.as_slice(),
+                    _ => &[],
+                };
                 if let (Ok(account_data), Ok(events_data)) = (
-                    serde_json::from_slice::<Account>(&results[i * 2]),
-                    serde_json::from_slice::<Vec<(i64, AccountEvent)>>(&results[i * 2 + 1]),
+                    serde_json::from_slice::<Account>(account_bytes),
+                    serde_json::from_slice::<Vec<(i64, AccountEvent)>>(events_bytes),
                 ) {
                     self.update_in_memory_cache(account_id, account_data);
                     self.event_cache.insert(account_id, events_data);
@@ -333,27 +376,27 @@ impl CacheService {
     fn evict_entries(&self, shard_index: usize) {
         match self.config.eviction_policy {
             EvictionPolicy::LRU => {
-                if let Some((key, _)) = self.shards[shard_index]
+                if let Some(entry) = self.shards[shard_index]
                     .iter()
                     .min_by_key(|entry| entry.last_accessed)
                 {
-                    self.shards[shard_index].remove(key);
+                    self.shards[shard_index].remove(entry.key());
                 }
             }
             EvictionPolicy::LFU => {
-                if let Some((key, _)) = self.shards[shard_index]
+                if let Some(entry) = self.shards[shard_index]
                     .iter()
                     .min_by_key(|entry| entry.access_count)
                 {
-                    self.shards[shard_index].remove(key);
+                    self.shards[shard_index].remove(entry.key());
                 }
             }
             EvictionPolicy::TTL => {
-                if let Some((key, _)) = self.shards[shard_index]
+                if let Some(entry) = self.shards[shard_index]
                     .iter()
                     .min_by_key(|entry| entry.created_at)
                 {
-                    self.shards[shard_index].remove(key);
+                    self.shards[shard_index].remove(entry.key());
                 }
             }
         }
@@ -380,34 +423,79 @@ impl Default for CacheConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockall::predicate::*;
-    use mockall::mock;
+    use redis::Client;
 
-    mock! {
-        RedisClient {}
-        #[async_trait]
-        impl RedisClientTrait for RedisClient {
-            async fn get_async_connection(&self) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError>;
-            fn clone_client(&self) -> Arc<dyn RedisClientTrait>;
-            async fn get_pooled_connection(&self) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError>;
-            fn get_pool_config(&self) -> RedisPoolConfig;
+    struct RedisConnection {
+        conn: redis::aio::Connection,
+    }
+
+    impl RedisConnection {
+        fn new(conn: redis::aio::Connection) -> Self {
+            Self { conn }
+        }
+    }
+
+    #[async_trait]
+    impl RedisConnectionCommands for RedisConnection {
+        async fn execute_pipeline(&mut self, pipeline: &RedisPipeline) -> Result<Vec<RedisValue>, RedisError> {
+            pipeline.execute_pipeline(self).await
+        }
+    }
+
+    struct TestRedisClient {
+        client: Client,
+    }
+
+    #[async_trait]
+    impl RedisClientTrait for TestRedisClient {
+        async fn get_connection(&self) -> Result<MultiplexedConnection, RedisError> {
+            self.client.get_multiplexed_async_connection().await
+        }
+
+        fn clone_client(&self) -> Arc<dyn RedisClientTrait> {
+            Arc::new(TestRedisClient {
+                client: self.client.clone(),
+            })
+        }
+
+        async fn get_pooled_connection(&self) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
+            let conn = self.client.get_async_connection().await?;
+            Ok(Box::new(RedisConnection::new(conn)))
+        }
+
+        fn get_pool_config(&self) -> RedisPoolConfig {
+            RedisPoolConfig::default()
+        }
+
+        async fn get(&self, key: &str) -> Result<Option<String>, RedisError> {
+            let mut conn = self.client.get_async_connection().await?;
+            redis::cmd("GET").arg(key).query_async(&mut conn).await
+        }
+
+        async fn set(&self, key: &str, value: &str) -> Result<(), RedisError> {
+            let mut conn = self.client.get_async_connection().await?;
+            redis::cmd("SET").arg(key).arg(value).query_async(&mut conn).await
+        }
+
+        async fn del(&self, key: &str) -> Result<(), RedisError> {
+            let mut conn = self.client.get_async_connection().await?;
+            redis::cmd("DEL").arg(key).query_async(&mut conn).await
         }
     }
 
     #[tokio::test]
     async fn test_cache_service_initialization() {
-        let mock_client = Arc::new(MockRedisClient::new());
-        let cache_service = CacheService::new(mock_client, CacheConfig::default());
+        let client = Client::open("redis://127.0.0.1/").unwrap();
+        let redis_client = TestRedisClient { client };
+        let cache_service = CacheService::new(Arc::new(redis_client), CacheConfig::default());
         assert!(cache_service.initialize().await.is_ok());
     }
 
     #[tokio::test]
     async fn test_get_account_cache_hit() {
-        let mock_client = Arc::new(MockRedisClient::new());
-        let cache_service = CacheService::new(mock_client, CacheConfig::default());
+        let client = Client::open("redis://127.0.0.1/").unwrap();
+        let redis_client = TestRedisClient { client };
         let account_id = Uuid::new_v4();
-        
-        // Mock Redis response
         let account = Account {
             id: account_id,
             owner_name: "Test User".to_string(),
@@ -415,12 +503,9 @@ mod tests {
             is_active: true,
             version: 1,
         };
-        let serialized = serde_json::to_vec(&account).unwrap();
-        
-        // Set up expectations
-        let mut mock_conn = MockRedisConnectionCommands::new();
-        mock_conn.expect_get_bytes()
-            .returning(move |_| Ok(redis::Value::Data(serialized.clone())));
+
+        let cache_service = CacheService::new(Arc::new(redis_client), CacheConfig::default());
+        cache_service.set_account(&account, None).await.unwrap();
         
         let result = cache_service.get_account(account_id).await;
         assert!(result.is_ok());

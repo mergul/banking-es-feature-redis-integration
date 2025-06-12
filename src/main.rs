@@ -1,13 +1,10 @@
 use axum::{
-    extract::Extension,
-    http::{HeaderValue, Method},
-    routing::{get, post},
-    Router, ServiceExt,
+    http::Method,
+    Router,
+    routing::IntoMakeService,
 };
 use std::{net::SocketAddr, sync::Arc};
-use tokio::net::TcpListener;
-use tower::ServiceBuilder;
-use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
+use tower_http::cors::CorsLayer;
 use tracing::{info, Level};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::infrastructure::redis_abstraction::RedisClient;
@@ -15,13 +12,21 @@ use crate::infrastructure::scaling::{ScalingConfig, ScalingManager, ServiceInsta
 use crate::infrastructure::event_store::EventStore;
 use crate::infrastructure::kafka_abstraction::KafkaConfig;
 use crate::infrastructure::projections::ProjectionStore;
-use crate::web::web_handlers::create_routes;
+use crate::web::routes::create_routes;
 use anyhow::Result;
 use tokio::signal;
 use uuid::Uuid;
 use crate::infrastructure::auth::{AuthService, AuthConfig};
 use std::time::Duration;
-use chrono::{Utc, Duration as ChronoDuration};
+use chrono::Utc;
+use dotenv;
+use redis;
+use crate::infrastructure::redis_abstraction::RealRedisClient;
+use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
+
+use tokio::net::TcpListener;
+use tower::ServiceBuilder;
+use tower_http::trace::TraceLayer;
 
 mod application;
 mod domain;
@@ -29,11 +34,10 @@ mod infrastructure;
 mod web;
 
 use crate::application::AccountService;
-use crate::infrastructure::projections::ProjectionConfig;
 use crate::infrastructure::{
-    AccountRepository, EventStoreConfig, KafkaConfig, ProjectionStore,
+    AccountRepository, EventStoreConfig,
 };
-use crate::web::handlers::RateLimitedService;
+use crate::infrastructure::middleware::RequestMiddleware;
 
 #[derive(Debug)]
 struct AppConfig {
@@ -60,11 +64,13 @@ impl Default for AppConfig {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv::dotenv().ok();
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
     // Initialize Redis client
-    let redis_client = Arc::new(RedisClient::new("redis://localhost:6379")?);
+    let redis_client = Arc::new(redis::Client::open("redis://localhost:6379")?);
+    let redis_client_trait = RealRedisClient::new(redis_client.as_ref().clone(), None);
 
     // Initialize scaling manager
     let scaling_config = ScalingConfig {
@@ -72,9 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_instances: 5,
         scale_up_threshold: 0.8,
         scale_down_threshold: 0.2,
-        check_interval: Duration::from_secs(30),
+        cooldown_period: Duration::from_secs(300),
+        health_check_interval: Duration::from_secs(30),
+        instance_timeout: Duration::from_secs(60),
     };
-    let scaling_manager = Arc::new(ScalingManager::new(redis_client.clone(), scaling_config));
+    let scaling_manager = Arc::new(ScalingManager::new(redis_client_trait, scaling_config));
 
     // Initialize auth service
     let auth_config = AuthConfig {
@@ -100,42 +108,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             memory_usage: 0.0,
             request_count: 0,
             error_count: 0,
-            latency_ms: 0.0,
+            latency_ms: 0,
         },
         shard_assignments: vec![],
-        last_heartbeat: chrono::Utc::now(),
+        last_heartbeat: Utc::now(),
     };
     scaling_manager.register_instance(instance).await?;
 
     // Start scaling manager
     let scaling_manager_clone = scaling_manager.clone();
     tokio::spawn(async move {
-        if let Err(e) = scaling_manager_clone.start().await {
+        if let Err(e) = scaling_manager_clone.start_scaling_manager().await {
             eprintln!("Scaling manager error: {}", e);
         }
     });
 
     // Initialize other components
-    let event_store = EventStore::new_with_config(Default::default()).await?;
+    let event_store = EventStore::new_with_config(EventStoreConfig::default()).await?;
     let kafka_config = KafkaConfig::default();
-    let projections = ProjectionStore::new(redis_client.clone());
+    let projections = ProjectionStore::new(crate::infrastructure::event_store::DB_POOL.get().unwrap().as_ref().clone());
+    let cache_config = CacheConfig {
+        default_ttl: Duration::from_secs(3600),
+        max_size: 10000,
+        shard_count: 16,
+        warmup_batch_size: 100,
+        warmup_interval: Duration::from_secs(300),
+        eviction_policy: EvictionPolicy::LRU,
+    };
+    let cache_service = CacheService::new(redis_client_trait, cache_config);
+    let middleware = Arc::new(RequestMiddleware::default());
+    let repository = Arc::new(AccountRepository::new(
+        event_store.clone(),
+        kafka_config,
+        projections.clone(),
+        redis_client.as_ref().clone(),
+    )?);
 
     // Create routes
     let app = create_routes(
-        event_store,
-        kafka_config,
-        projections,
-        redis_client,
-        scaling_manager,
-        auth_service,
+        AccountService::new(
+            repository,
+            projections,
+            cache_service,
+            middleware,
+            1000, // max_requests_per_second
+        ),
+        auth_service.as_ref().clone(),
     );
 
     // Start server
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     info!("Starting server on {}", addr);
     
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
+    let listener = TcpListener::bind(addr).await?;
+    axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
@@ -166,43 +192,4 @@ async fn shutdown_signal() {
     }
 
     info!("Shutting down gracefully...");
-}
-
-fn configure_tcp_listener(listener: &TcpListener) -> Result<(), Box<dyn std::error::Error>> {
-    use libc::{setsockopt, IPPROTO_TCP, SOL_SOCKET, SO_REUSEADDR, SO_REUSEPORT, TCP_NODELAY};
-    use std::os::unix::io::AsRawFd;
-
-    let fd = listener.as_raw_fd();
-    let optval: libc::c_int = 1;
-
-    unsafe {
-        // Enable SO_REUSEADDR for faster restarts
-        setsockopt(
-            fd,
-            SOL_SOCKET,
-            SO_REUSEADDR,
-            &optval as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&optval) as libc::socklen_t,
-        );
-
-        // Enable SO_REUSEPORT for load balancing across multiple processes
-        setsockopt(
-            fd,
-            SOL_SOCKET,
-            SO_REUSEPORT,
-            &optval as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&optval) as libc::socklen_t,
-        );
-
-        // Enable TCP_NODELAY for low latency
-        setsockopt(
-            fd,
-            IPPROTO_TCP,
-            TCP_NODELAY,
-            &optval as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&optval) as libc::socklen_t,
-        );
-    }
-
-    Ok(())
 }
