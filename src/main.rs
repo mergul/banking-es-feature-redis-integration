@@ -121,44 +121,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Initialize other components
-    let event_store = EventStore::new_with_config(EventStoreConfig::default()).await?;
-    let kafka_config = KafkaConfig::default();
-    let projections = ProjectionStore::new(
-        crate::infrastructure::event_store::DB_POOL
-            .get()
-            .unwrap()
-            .as_ref()
-            .clone(),
-    );
-    let cache_config = CacheConfig {
-        default_ttl: Duration::from_secs(3600),
-        max_size: 10000,
-        shard_count: 16,
-        warmup_batch_size: 100,
-        warmup_interval: Duration::from_secs(300),
-        eviction_policy: EvictionPolicy::LRU,
-    };
-    let cache_service = CacheService::new(redis_client_trait.clone(), cache_config);
-    let middleware = Arc::new(RequestMiddleware::default());
-    let repository = Arc::new(AccountRepository::new(
-        event_store.clone(),
-        kafka_config,
-        projections.clone(),
-        redis_client.as_ref().clone(),
-    )?);
-
     // Initialize services
     let (service, auth_service) = web::handlers::initialize_services().await?;
 
-    // Create router without state
-    let app = web::routes::create_router(
-        Arc::new(AccountService::default()),
-        Arc::new(AuthService::default()),
-    );
-
-    // Add state to the router
-    let app = app.with_state((service, auth_service));
+    // Create router
+    let app = web::routes::create_router(service, auth_service);
 
     // Start server
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));

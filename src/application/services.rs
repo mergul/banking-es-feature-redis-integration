@@ -543,17 +543,8 @@ mod tests {
     fn account_service_with_mock_repo(
         mock_repo: Arc<dyn AccountRepositoryTrait + 'static>,
     ) -> AccountService {
-        let ps_pool = tokio::runtime::Runtime::new().unwrap().block_on(async {
-            sqlx::PgPool::connect("postgres://postgres:postgres@localhost:5432/banking_test")
-                .await
-                .unwrap()
-        });
-        let projection_store = ProjectionStore::new(ps_pool);
-        let cache_service = CacheService::new(
-            RealRedisClient::new(redis::Client::open("redis://127.0.0.1/").unwrap(), None),
-            Default::default(),
-        );
-
+        let projection_store = ProjectionStore::default();
+        let cache_service = CacheService::default();
         AccountService::new(
             mock_repo,
             projection_store,
