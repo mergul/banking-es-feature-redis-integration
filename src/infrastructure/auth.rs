@@ -493,7 +493,8 @@ where
     fn from_request_parts<'a, 'b>(
         parts: &'a mut Parts,
         _state: &'b S,
-    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send + 'a {
+    ) -> impl futures::Future<Output = Result<Self, <Self as FromRequestParts<S>>::Rejection>>
+           + std::marker::Send {
         async move {
             let TypedHeader(Authorization(bearer)) = parts
                 .extract::<TypedHeader<Authorization<Bearer>>>()

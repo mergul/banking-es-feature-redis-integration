@@ -160,6 +160,7 @@ impl ProjectionStore {
                     .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
                     .after_connect(|conn, _meta| {
                         Box::pin(async move {
+                            // Set only essential and well-supported PostgreSQL parameters
                             sqlx::query("SET SESSION synchronous_commit = 'off'")
                                 .execute(&mut *conn)
                                 .await?;
@@ -181,11 +182,6 @@ impl ProjectionStore {
                             sqlx::query("SET SESSION statement_timeout = '5s'")
                                 .execute(&mut *conn)
                                 .await?;
-                            sqlx::query("SET SESSION pool_mode = 'transaction'")
-                                .execute(&mut *conn)
-                                .await?;
-                            sqlx::query("SELECT 1").execute(&mut *conn).await?;
-
                             Ok(())
                         })
                     })
