@@ -1,18 +1,18 @@
 use crate::domain::{Account, AccountError, AccountEvent};
-use crate::infrastructure::event_store::EventStore;
+use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
+use crate::infrastructure::event_store::{EventStore, EventStoreConfig};
+use crate::infrastructure::kafka_abstraction::KafkaConfig;
 use crate::infrastructure::kafka_event_processor::KafkaEventProcessor;
 use crate::infrastructure::projections::ProjectionStore;
-use crate::infrastructure::cache_service::{CacheService, CacheConfig, EvictionPolicy};
-use crate::infrastructure::kafka_abstraction::KafkaConfig;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
 use anyhow::Result;
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::error;
 use uuid::Uuid;
-use rust_decimal::Decimal;
-use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
@@ -26,7 +26,8 @@ pub enum RepositoryError {
 
 #[async_trait]
 pub trait AccountRepositoryTrait: Send + Sync {
-    async fn create_account(&self, owner_name: String, initial_balance: Decimal) -> Result<Account>;
+    async fn create_account(&self, owner_name: String, initial_balance: Decimal)
+        -> Result<Account>;
     async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>>;
     async fn deposit_money(&self, account_id: Uuid, amount: Decimal) -> Result<Account>;
     async fn withdraw_money(&self, account_id: Uuid, amount: Decimal) -> Result<Account>;
@@ -108,7 +109,11 @@ impl AccountRepository {
 
 #[async_trait]
 impl AccountRepositoryTrait for AccountRepository {
-    async fn create_account(&self, owner_name: String, initial_balance: Decimal) -> Result<Account> {
+    async fn create_account(
+        &self,
+        owner_name: String,
+        initial_balance: Decimal,
+    ) -> Result<Account> {
         // Implementation needed
         unimplemented!()
     }
@@ -184,10 +189,31 @@ mod tests {
         let kafka_config = KafkaConfig::default();
         let projections = ProjectionStore::new(pool);
         let redis_client = redis::Client::open("redis://127.0.0.1/").unwrap();
-        let repo = AccountRepository::new(event_store, kafka_config, projections, redis_client).unwrap();
+        let repo =
+            AccountRepository::new(event_store, kafka_config, projections, redis_client).unwrap();
         let id = Uuid::new_v4();
         let result = repo.get_by_id(id).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+}
+
+// Fix the error by using tokio::runtime::Runtime to block on the async connect call
+impl Default for AccountRepository {
+    fn default() -> Self {
+        let pool = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                sqlx::PgPool::connect("postgres://postgres:postgres@localhost:5432/banking_test")
+                    .await
+            })
+            .expect("Failed to connect to database");
+        let event_store = EventStore::new(pool);
+        let kafka_config = KafkaConfig::default();
+        let projection_store = ProjectionStore::default();
+        let redis_client =
+            redis::Client::open("redis://localhost:6379").expect("Failed to connect to Redis");
+        AccountRepository::new(event_store, kafka_config, projection_store, redis_client)
+            .expect("Failed to create AccountRepository")
     }
 }

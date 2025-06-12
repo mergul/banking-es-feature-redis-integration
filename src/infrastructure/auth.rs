@@ -1,3 +1,8 @@
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use async_trait::async_trait;
 use axum::{
     extract::FromRequestParts,
     http::{request::Parts, StatusCode},
@@ -9,23 +14,18 @@ use axum_extra::{
     headers::{authorization::Bearer, Authorization},
     TypedHeader,
 };
-use async_trait::async_trait;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation, Algorithm};
+use chrono::{DateTime, Duration, Utc};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use redis::{aio::Connection, AsyncCommands, RedisError};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::fmt::Display;
+use std::future::Future;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
-use chrono::{DateTime, Duration, Utc};
-use serde_json::json;
-use std::fmt::Display;
-use std::sync::LazyLock;
-use std::future::Future;
 
 static KEYS: LazyLock<Keys> = LazyLock::new(|| {
     let secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
@@ -176,7 +176,7 @@ impl AuthService {
         roles: Vec<UserRole>,
     ) -> Result<User, AuthError> {
         let mut users = self.users.write().await;
-        
+
         // Check if username already exists
         if users.iter().any(|u| u.username == username) {
             return Err(AuthError::InternalError("Username already exists".into()));
@@ -224,15 +224,19 @@ impl AuthService {
         // Verify password
         let parsed_hash = PasswordHash::new(&user.password_hash)
             .map_err(|e| AuthError::PasswordHashError(e.to_string()))?;
-        
+
         if !Argon2::default()
             .verify_password(password.as_bytes(), &parsed_hash)
             .is_ok()
         {
             user.failed_login_attempts += 1;
             if user.failed_login_attempts >= self.config.max_failed_attempts {
-                user.locked_until = Some(Utc::now() + Duration::minutes(self.config.lockout_duration_minutes as i64));
-                return Err(AuthError::InternalError("Account locked due to too many failed attempts".into()));
+                user.locked_until = Some(
+                    Utc::now() + Duration::minutes(self.config.lockout_duration_minutes as i64),
+                );
+                return Err(AuthError::InternalError(
+                    "Account locked due to too many failed attempts".into(),
+                ));
             }
             return Err(AuthError::InvalidCredentials);
         }
@@ -242,8 +246,12 @@ impl AuthService {
         user.last_login = Some(Utc::now());
 
         // Generate tokens
-        let access_token = self.generate_token(username, &user.roles, TokenType::Access).await?;
-        let refresh_token = self.generate_token(username, &user.roles, TokenType::Refresh).await?;
+        let access_token = self
+            .generate_token(username, &user.roles, TokenType::Access)
+            .await?;
+        let refresh_token = self
+            .generate_token(username, &user.roles, TokenType::Refresh)
+            .await?;
 
         Ok(LoginResponse {
             access_token,
@@ -256,8 +264,10 @@ impl AuthService {
     }
 
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<LoginResponse, AuthError> {
-        let claims = self.validate_token(refresh_token, TokenType::Refresh).await?;
-        
+        let claims = self
+            .validate_token(refresh_token, TokenType::Refresh)
+            .await?;
+
         let users = self.users.read().await;
         let user = users
             .iter()
@@ -265,8 +275,12 @@ impl AuthService {
             .ok_or(AuthError::UserNotFound)?;
 
         // Generate new tokens
-        let access_token = self.generate_token(&user.username, &user.roles, TokenType::Access).await?;
-        let new_refresh_token = self.generate_token(&user.username, &user.roles, TokenType::Refresh).await?;
+        let access_token = self
+            .generate_token(&user.username, &user.roles, TokenType::Access)
+            .await?;
+        let new_refresh_token = self
+            .generate_token(&user.username, &user.roles, TokenType::Refresh)
+            .await?;
 
         Ok(LoginResponse {
             access_token,
@@ -293,7 +307,7 @@ impl AuthService {
         // Verify current password
         let parsed_hash = PasswordHash::new(&user.password_hash)
             .map_err(|e| AuthError::PasswordHashError(e.to_string()))?;
-        
+
         if !Argon2::default()
             .verify_password(current_password.as_bytes(), &parsed_hash)
             .is_ok()
@@ -313,7 +327,10 @@ impl AuthService {
         Ok(())
     }
 
-    pub async fn request_password_reset(&self, email: &str) -> Result<PasswordResetResponse, AuthError> {
+    pub async fn request_password_reset(
+        &self,
+        email: &str,
+    ) -> Result<PasswordResetResponse, AuthError> {
         let users = self.users.read().await;
         let user = users
             .iter()
@@ -321,8 +338,10 @@ impl AuthService {
             .ok_or(AuthError::UserNotFound)?;
 
         // Generate reset token
-        let reset_token = self.generate_token(&user.username, &user.roles, TokenType::Access).await?;
-        
+        let reset_token = self
+            .generate_token(&user.username, &user.roles, TokenType::Access)
+            .await?;
+
         // Store reset token in Redis with expiration
         let mut conn = self.redis_client.get_async_connection().await?;
         conn.set_ex(
@@ -373,7 +392,11 @@ impl AuthService {
         .map_err(AuthError::from)
     }
 
-    pub async fn validate_token(&self, token: &str, expected_type: TokenType) -> Result<Claims, AuthError> {
+    pub async fn validate_token(
+        &self,
+        token: &str,
+        expected_type: TokenType,
+    ) -> Result<Claims, AuthError> {
         // Check if token is blacklisted
         let mut conn = self.redis_client.get_async_connection().await?;
         let is_blacklisted: bool = conn
@@ -422,13 +445,14 @@ impl AuthService {
 
     pub async fn check_rate_limit(&self, key: &str) -> Result<(), AuthError> {
         let mut conn = self.redis_client.get_async_connection().await?;
-        let current: i64 = conn
-            .incr(format!("rate_limit:{}", key), 1)
-            .await?;
+        let current: i64 = conn.incr(format!("rate_limit:{}", key), 1).await?;
 
         if current == 1 {
-            conn.expire(format!("rate_limit:{}", key), self.config.rate_limit_window as i64)
-                .await?;
+            conn.expire(
+                format!("rate_limit:{}", key),
+                self.config.rate_limit_window as i64,
+            )
+            .await?;
         }
 
         if current > self.config.rate_limit_requests as i64 {
@@ -439,6 +463,26 @@ impl AuthService {
     }
 }
 
+// Add Default implementation for AuthService
+impl Default for AuthService {
+    fn default() -> Self {
+        let redis_client = Arc::new(
+            redis::Client::open("redis://localhost:6379").expect("Failed to connect to Redis"),
+        );
+        let auth_config = AuthConfig {
+            jwt_secret: "default_secret".to_string(),
+            refresh_token_secret: "default_refresh_secret".to_string(),
+            access_token_expiry: 3600,
+            refresh_token_expiry: 604800,
+            rate_limit_requests: 100,
+            rate_limit_window: 60,
+            max_failed_attempts: 5,
+            lockout_duration_minutes: 30,
+        };
+        AuthService::new(redis_client, auth_config)
+    }
+}
+
 #[async_trait]
 impl<S> FromRequestParts<S> for Claims
 where
@@ -446,15 +490,19 @@ where
 {
     type Rejection = AuthError;
 
-    fn from_request_parts<'a, 'b>(parts: &'a mut Parts, _state: &'b S) -> impl Future<Output = Result<Self, Self::Rejection>> + Send + 'a {
+    fn from_request_parts<'a, 'b>(
+        parts: &'a mut Parts,
+        _state: &'b S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send + 'a {
         async move {
             let TypedHeader(Authorization(bearer)) = parts
                 .extract::<TypedHeader<Authorization<Bearer>>>()
                 .await
                 .map_err(|_| AuthError::InvalidToken)?;
             // Decode the user data
-            let token_data = decode::<Claims>(bearer.token(), &KEYS.decoding, &Validation::default())
-                .map_err(|_| AuthError::InvalidToken)?;
+            let token_data =
+                decode::<Claims>(bearer.token(), &KEYS.decoding, &Validation::default())
+                    .map_err(|_| AuthError::InvalidToken)?;
 
             Ok(token_data.claims)
         }
@@ -470,10 +518,15 @@ impl IntoResponse for AuthError {
             AuthError::TokenBlacklisted => (StatusCode::UNAUTHORIZED, "Token has been revoked"),
             AuthError::RateLimitExceeded => (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
             AuthError::UserNotFound => (StatusCode::NOT_FOUND, "User not found"),
-            AuthError::PasswordHashError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Password processing error"),
+            AuthError::PasswordHashError(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Password processing error",
+            ),
             AuthError::RedisError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
             AuthError::JwtError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Token processing error"),
-            AuthError::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+            AuthError::InternalError(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+            }
             AuthError::WrongCredentials => (StatusCode::UNAUTHORIZED, "Wrong credentials"),
             AuthError::MissingCredentials => (StatusCode::BAD_REQUEST, "Missing credentials"),
             AuthError::TokenCreation => (StatusCode::INTERNAL_SERVER_ERROR, "Token creation error"),
@@ -552,4 +605,4 @@ impl AuthBody {
             token_type: "Bearer".to_string(),
         }
     }
-} 
+}

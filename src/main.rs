@@ -1,28 +1,24 @@
-use axum::{
-    http::Method,
-    Router,
-    routing::IntoMakeService,
-};
-use std::{net::SocketAddr, sync::Arc};
-use tower_http::cors::CorsLayer;
-use tracing::{info, Level};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use crate::infrastructure::redis_abstraction::RedisClient;
-use crate::infrastructure::scaling::{ScalingConfig, ScalingManager, ServiceInstance};
+use crate::infrastructure::auth::{AuthConfig, AuthService};
+use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
 use crate::infrastructure::event_store::EventStore;
 use crate::infrastructure::kafka_abstraction::KafkaConfig;
 use crate::infrastructure::projections::ProjectionStore;
-use crate::web::routes::create_routes;
+use crate::infrastructure::redis_abstraction::RealRedisClient;
+use crate::infrastructure::redis_abstraction::RedisClient;
+use crate::infrastructure::scaling::{ScalingConfig, ScalingManager, ServiceInstance};
+use crate::web::routes::create_router;
 use anyhow::Result;
-use tokio::signal;
-use uuid::Uuid;
-use crate::infrastructure::auth::{AuthService, AuthConfig};
-use std::time::Duration;
+use axum::{http::Method, routing::IntoMakeService, Router};
 use chrono::Utc;
 use dotenv;
 use redis;
-use crate::infrastructure::redis_abstraction::RealRedisClient;
-use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
+use std::time::Duration;
+use std::{net::SocketAddr, sync::Arc};
+use tokio::signal;
+use tower_http::cors::CorsLayer;
+use tracing::{info, Level};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
 
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
@@ -34,10 +30,8 @@ mod infrastructure;
 mod web;
 
 use crate::application::AccountService;
-use crate::infrastructure::{
-    AccountRepository, EventStoreConfig,
-};
 use crate::infrastructure::middleware::RequestMiddleware;
+use crate::infrastructure::{AccountRepository, EventStoreConfig};
 
 #[derive(Debug)]
 struct AppConfig {
@@ -82,13 +76,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         health_check_interval: Duration::from_secs(30),
         instance_timeout: Duration::from_secs(60),
     };
-    let scaling_manager = Arc::new(ScalingManager::new(redis_client_trait, scaling_config));
+    let scaling_manager = Arc::new(ScalingManager::new(
+        redis_client_trait.clone(),
+        scaling_config,
+    ));
 
     // Initialize auth service
     let auth_config = AuthConfig {
         jwt_secret: std::env::var("JWT_SECRET").unwrap_or_else(|_| "your-secret-key".to_string()),
-        refresh_token_secret: std::env::var("REFRESH_TOKEN_SECRET").unwrap_or_else(|_| "your-refresh-secret-key".to_string()),
-        access_token_expiry: 3600, // 1 hour
+        refresh_token_secret: std::env::var("REFRESH_TOKEN_SECRET")
+            .unwrap_or_else(|_| "your-refresh-secret-key".to_string()),
+        access_token_expiry: 3600,    // 1 hour
         refresh_token_expiry: 604800, // 7 days
         rate_limit_requests: 100,
         rate_limit_window: 60,
@@ -126,7 +124,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize other components
     let event_store = EventStore::new_with_config(EventStoreConfig::default()).await?;
     let kafka_config = KafkaConfig::default();
-    let projections = ProjectionStore::new(crate::infrastructure::event_store::DB_POOL.get().unwrap().as_ref().clone());
+    let projections = ProjectionStore::new(
+        crate::infrastructure::event_store::DB_POOL
+            .get()
+            .unwrap()
+            .as_ref()
+            .clone(),
+    );
     let cache_config = CacheConfig {
         default_ttl: Duration::from_secs(3600),
         max_size: 10000,
@@ -135,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warmup_interval: Duration::from_secs(300),
         eviction_policy: EvictionPolicy::LRU,
     };
-    let cache_service = CacheService::new(redis_client_trait, cache_config);
+    let cache_service = CacheService::new(redis_client_trait.clone(), cache_config);
     let middleware = Arc::new(RequestMiddleware::default());
     let repository = Arc::new(AccountRepository::new(
         event_store.clone(),
@@ -144,24 +148,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         redis_client.as_ref().clone(),
     )?);
 
-    // Create routes
-    let app = create_routes(
-        AccountService::new(
-            repository,
-            projections,
-            cache_service,
-            middleware,
-            1000, // max_requests_per_second
-        ),
-        auth_service.as_ref().clone(),
+    // Initialize services
+    let (service, auth_service) = web::handlers::initialize_services().await?;
+
+    // Create router without state
+    let app = web::routes::create_router(
+        Arc::new(AccountService::default()),
+        Arc::new(AuthService::default()),
     );
+
+    // Add state to the router
+    let app = app.with_state((service, auth_service));
 
     // Start server
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     info!("Starting server on {}", addr);
-    
+
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service())
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

@@ -1,3 +1,4 @@
+use crate::infrastructure::event_store::DB_POOL;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -7,10 +8,9 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock, OnceCell};
+use tokio::sync::{mpsc, OnceCell, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use crate::infrastructure::event_store::DB_POOL;
 
 // Enhanced error types for projections
 #[derive(Debug, thiserror::Error)]
@@ -146,53 +146,55 @@ impl ProjectionStore {
 
     pub async fn new_with_config(config: ProjectionConfig) -> Result<Self> {
         // Get or initialize the global connection pool
-        let pool = PROJECTION_POOL.get_or_try_init(|| async {
-            let database_url = std::env::var("DATABASE_URL")
-                .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?;
+        let pool = PROJECTION_POOL
+            .get_or_try_init(|| async {
+                let database_url = std::env::var("DATABASE_URL").map_err(|_| {
+                    anyhow::anyhow!("DATABASE_URL environment variable is required")
+                })?;
 
-            let pool = PgPoolOptions::new()
-                .max_connections(config.max_connections)
-                .min_connections(config.min_connections)
-                .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
-                .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-                .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-                .after_connect(|conn, _meta| {
-                    Box::pin(async move {
-                        sqlx::query("SET SESSION synchronous_commit = 'off'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION work_mem = '32MB'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION maintenance_work_mem = '128MB'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION effective_cache_size = '2GB'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION random_page_cost = 1.1")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION effective_io_concurrency = 100")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION statement_timeout = '5s'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION pool_mode = 'transaction'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SELECT 1").execute(&mut *conn).await?;
+                let pool = PgPoolOptions::new()
+                    .max_connections(config.max_connections)
+                    .min_connections(config.min_connections)
+                    .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
+                    .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+                    .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
+                    .after_connect(|conn, _meta| {
+                        Box::pin(async move {
+                            sqlx::query("SET SESSION synchronous_commit = 'off'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION work_mem = '32MB'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION maintenance_work_mem = '128MB'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION effective_cache_size = '2GB'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION random_page_cost = 1.1")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION effective_io_concurrency = 100")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION statement_timeout = '5s'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION pool_mode = 'transaction'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SELECT 1").execute(&mut *conn).await?;
 
-                        Ok(())
+                            Ok(())
+                        })
                     })
-                })
-                .connect(&database_url)
-                .await?;
+                    .connect(&database_url)
+                    .await?;
 
-            Ok::<_, anyhow::Error>(Arc::new(pool))
-        })
-        .await?;
+                Ok::<_, anyhow::Error>(Arc::new(pool))
+            })
+            .await?;
 
         Ok(Self::from_pool_with_config(pool.as_ref().clone(), config))
     }
@@ -599,5 +601,16 @@ impl ProjectionStore {
                 hit_rate, batches, errors, avg_query_time
             );
         }
+    }
+}
+
+// Add Default implementation for ProjectionStore
+impl Default for ProjectionStore {
+    fn default() -> Self {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/banking_test")
+            .expect("Failed to connect to database");
+        ProjectionStore::new(pool)
     }
 }

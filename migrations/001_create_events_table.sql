@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS events (
     event_type VARCHAR(100) NOT NULL,
     event_data JSONB NOT NULL,
     version BIGINT NOT NULL,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 ) PARTITION BY RANGE (timestamp);
 
 -- Create monthly partitions with optimized fillfactor

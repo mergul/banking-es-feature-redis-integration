@@ -1,28 +1,28 @@
 use crate::domain::{Account, AccountEvent};
+use crate::infrastructure::redis_abstraction::RealRedisClient;
+use crate::infrastructure::redis_abstraction::RedisConnectionCommands;
 use crate::infrastructure::redis_abstraction::{
-    CircuitBreakerConfig, LoadShedderConfig, RedisClientTrait, RedisPoolConfig,
-    RedisPipeline,
+    CircuitBreakerConfig, LoadShedderConfig, RedisClientTrait, RedisPipeline, RedisPoolConfig,
 };
 use anyhow::Result;
+use async_trait::async_trait;
+use dashmap::DashMap;
+use redis::Client;
 use redis::RedisError;
+use redis::{aio::MultiplexedConnection, ConnectionInfo, Value as RedisValue};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+use tokio::io::{duplex, AsyncRead, AsyncWrite};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use dashmap::DashMap;
-use rust_decimal::Decimal;
-use async_trait::async_trait;
-use crate::infrastructure::redis_abstraction::RedisConnectionCommands;
-use redis::{Value as RedisValue, aio::MultiplexedConnection, ConnectionInfo};
-use serde_json;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{duplex, AsyncRead, AsyncWrite};
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use redis::Client;
 
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
@@ -55,13 +55,27 @@ pub struct CacheMetrics {
 impl Clone for CacheMetrics {
     fn clone(&self) -> Self {
         Self {
-            hits: std::sync::atomic::AtomicU64::new(self.hits.load(std::sync::atomic::Ordering::Relaxed)),
-            misses: std::sync::atomic::AtomicU64::new(self.misses.load(std::sync::atomic::Ordering::Relaxed)),
-            evictions: std::sync::atomic::AtomicU64::new(self.evictions.load(std::sync::atomic::Ordering::Relaxed)),
-            errors: std::sync::atomic::AtomicU64::new(self.errors.load(std::sync::atomic::Ordering::Relaxed)),
-            warmups: std::sync::atomic::AtomicU64::new(self.warmups.load(std::sync::atomic::Ordering::Relaxed)),
-            shard_hits: std::sync::atomic::AtomicU64::new(self.shard_hits.load(std::sync::atomic::Ordering::Relaxed)),
-            shard_misses: std::sync::atomic::AtomicU64::new(self.shard_misses.load(std::sync::atomic::Ordering::Relaxed)),
+            hits: std::sync::atomic::AtomicU64::new(
+                self.hits.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            misses: std::sync::atomic::AtomicU64::new(
+                self.misses.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            evictions: std::sync::atomic::AtomicU64::new(
+                self.evictions.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            errors: std::sync::atomic::AtomicU64::new(
+                self.errors.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            warmups: std::sync::atomic::AtomicU64::new(
+                self.warmups.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            shard_hits: std::sync::atomic::AtomicU64::new(
+                self.shard_hits.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            shard_misses: std::sync::atomic::AtomicU64::new(
+                self.shard_misses.load(std::sync::atomic::Ordering::Relaxed),
+            ),
         }
     }
 }
@@ -94,9 +108,7 @@ struct WarmingState {
 
 impl CacheService {
     pub fn new(redis_client: Arc<dyn RedisClientTrait>, config: CacheConfig) -> Self {
-        let shards = (0..config.shard_count)
-            .map(|_| DashMap::new())
-            .collect();
+        let shards = (0..config.shard_count).map(|_| DashMap::new()).collect();
 
         Self {
             redis_client,
@@ -140,13 +152,17 @@ impl CacheService {
         let shard_index = self.get_shard_index(account_id);
         if let Some(entry) = self.shards[shard_index].get(&account_id) {
             if !self.is_expired(&entry) {
-                self.metrics.shard_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .shard_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Ok(Some(entry.value.clone()));
             }
             // Remove expired entry
             self.shards[shard_index].remove(&account_id);
         }
-        self.metrics.shard_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .shard_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Try Redis cache
         let mut conn = self.redis_client.get_connection().await?;
@@ -157,24 +173,32 @@ impl CacheService {
             Ok(redis::Value::Data(data)) => {
                 match serde_json::from_slice::<Account>(&data) {
                     Ok(account) => {
-                        self.metrics.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.metrics
+                            .hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // Update in-memory cache
                         self.update_in_memory_cache(account_id, account.clone());
                         Ok(Some(account))
                     }
                     Err(e) => {
-                        self.metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.metrics
+                            .errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         error!("Failed to deserialize account from cache: {}", e);
                         Ok(None)
                     }
                 }
             }
             Ok(_) => {
-                self.metrics.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(None)
             }
             Err(e) => {
-                self.metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 error!("Redis error while getting account: {}", e);
                 Err(e.into())
             }
@@ -189,10 +213,10 @@ impl CacheService {
         let value = serde_json::to_vec(account)?;
 
         conn.set_ex(key.as_bytes(), &value, ttl.as_secs()).await?;
-        
+
         // Update in-memory cache
         self.update_in_memory_cache(account.id, account.clone());
-        
+
         Ok(())
     }
 
@@ -202,14 +226,18 @@ impl CacheService {
         let key = format!("account:{}", account_id);
 
         conn.del(key.as_bytes()).await?;
-        self.metrics.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .evictions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     pub async fn get_account_events(&self, account_id: Uuid) -> Result<Option<Vec<AccountEvent>>> {
         // Try in-memory event cache first
         if let Some(events) = self.event_cache.get(&account_id) {
-            return Ok(Some(events.iter().map(|(_, event)| event.clone()).collect()));
+            return Ok(Some(
+                events.iter().map(|(_, event)| event.clone()).collect(),
+            ));
         }
 
         let mut conn = self.redis_client.get_connection().await?;
@@ -220,24 +248,32 @@ impl CacheService {
             Ok(redis::Value::Data(data)) => {
                 match serde_json::from_slice::<Vec<(i64, AccountEvent)>>(&data) {
                     Ok(events) => {
-                        self.metrics.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.metrics
+                            .hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // Update in-memory cache
                         self.event_cache.insert(account_id, events.clone());
                         Ok(Some(events.into_iter().map(|(_, event)| event).collect()))
                     }
                     Err(e) => {
-                        self.metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.metrics
+                            .errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         error!("Failed to deserialize events from cache: {}", e);
                         Ok(None)
                     }
                 }
             }
             Ok(_) => {
-                self.metrics.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(None)
             }
             Err(e) => {
-                self.metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 error!("Redis error while getting events: {}", e);
                 Err(e.into())
             }
@@ -257,10 +293,10 @@ impl CacheService {
         let value = serde_json::to_vec(events)?;
 
         conn.set_ex(key.as_bytes(), &value, ttl.as_secs()).await?;
-        
+
         // Update in-memory cache
         self.event_cache.insert(account_id, events.to_vec());
-        
+
         Ok(())
     }
 
@@ -270,7 +306,9 @@ impl CacheService {
         let key = format!("events:{}", account_id);
 
         conn.del(key.as_bytes()).await?;
-        self.metrics.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .evictions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -289,7 +327,9 @@ impl CacheService {
         conn.del(account_key.as_bytes()).await?;
         conn.del(events_key.as_bytes()).await?;
 
-        self.metrics.evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .evictions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -309,7 +349,7 @@ impl CacheService {
 
         for chunk in account_ids.chunks(batch_size) {
             let mut pipeline = redis::pipe();
-            
+
             for &account_id in chunk {
                 let account_key = format!("account:{}", account_id);
                 let events_key = format!("events:{}", account_id);
@@ -318,7 +358,7 @@ impl CacheService {
             }
 
             let results: Vec<redis::Value> = pipeline.query_async(&mut conn).await?;
-            
+
             for (i, &account_id) in chunk.iter().enumerate() {
                 let account_bytes = match &results[i * 2] {
                     redis::Value::Data(bytes) => bytes.as_slice(),
@@ -334,7 +374,9 @@ impl CacheService {
                 ) {
                     self.update_in_memory_cache(account_id, account_data);
                     self.event_cache.insert(account_id, events_data);
-                    self.metrics.warmups.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics
+                        .warmups
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -420,6 +462,17 @@ impl Default for CacheConfig {
     }
 }
 
+impl Default for CacheService {
+    fn default() -> Self {
+        let redis_client = RealRedisClient::new(
+            redis::Client::open("redis://localhost:6379").expect("Failed to connect to Redis"),
+            None,
+        );
+        let cache_config = CacheConfig::default();
+        CacheService::new(redis_client, cache_config)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,7 +490,10 @@ mod tests {
 
     #[async_trait]
     impl RedisConnectionCommands for RedisConnection {
-        async fn execute_pipeline(&mut self, pipeline: &RedisPipeline) -> Result<Vec<RedisValue>, RedisError> {
+        async fn execute_pipeline(
+            &mut self,
+            pipeline: &RedisPipeline,
+        ) -> Result<Vec<RedisValue>, RedisError> {
             pipeline.execute_pipeline(self).await
         }
     }
@@ -458,7 +514,9 @@ mod tests {
             })
         }
 
-        async fn get_pooled_connection(&self) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
+        async fn get_pooled_connection(
+            &self,
+        ) -> Result<Box<dyn RedisConnectionCommands + Send>, RedisError> {
             let conn = self.client.get_async_connection().await?;
             Ok(Box::new(RedisConnection::new(conn)))
         }
@@ -474,7 +532,11 @@ mod tests {
 
         async fn set(&self, key: &str, value: &str) -> Result<(), RedisError> {
             let mut conn = self.client.get_async_connection().await?;
-            redis::cmd("SET").arg(key).arg(value).query_async(&mut conn).await
+            redis::cmd("SET")
+                .arg(key)
+                .arg(value)
+                .query_async(&mut conn)
+                .await
         }
 
         async fn del(&self, key: &str) -> Result<(), RedisError> {
@@ -506,9 +568,9 @@ mod tests {
 
         let cache_service = CacheService::new(Arc::new(redis_client), CacheConfig::default());
         cache_service.set_account(&account, None).await.unwrap();
-        
+
         let result = cache_service.get_account(account_id).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().unwrap().id, account_id);
     }
-} 
+}

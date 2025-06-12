@@ -2,19 +2,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::domain::{Account, AccountCommand, AccountError, AccountEvent};
+use crate::infrastructure::cache_service::CacheService;
+use crate::infrastructure::middleware::RequestMiddleware;
 use crate::infrastructure::projections::{AccountProjection, TransactionProjection};
 use crate::infrastructure::repository::AccountRepositoryTrait;
-use crate::infrastructure::{AccountRepository, EventStore, EventStoreConfig, ProjectionStore, RealRedisClient};
-use crate::infrastructure::cache_service::CacheService;
+use crate::infrastructure::{
+    AccountRepository, EventStore, EventStoreConfig, ProjectionStore, RealRedisClient,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use tokio::sync::Semaphore;
-use crate::infrastructure::middleware::RequestMiddleware;
 
 // Service metrics
 #[derive(Debug, Default)]
@@ -72,8 +74,12 @@ impl AccountService {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                let commands_processed = metrics.commands_processed.load(std::sync::atomic::Ordering::Relaxed);
-                let commands_failed = metrics.commands_failed.load(std::sync::atomic::Ordering::Relaxed);
+                let commands_processed = metrics
+                    .commands_processed
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let commands_failed = metrics
+                    .commands_failed
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let total_commands = commands_processed + commands_failed;
                 let success_rate = if total_commands > 0 {
                     (commands_processed as f64 / total_commands as f64) * 100.0
@@ -293,8 +299,15 @@ impl AccountService {
         account_id: Uuid,
     ) -> Result<Option<AccountProjection>, AccountError> {
         // Try cache first
-        if let Some(account) = self.cache_service.get_account(account_id).await.map_err(|e| AccountError::InfrastructureError(e.to_string()))? {
-            self.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(account) = self
+            .cache_service
+            .get_account(account_id)
+            .await
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?
+        {
+            self.metrics
+                .cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(Some(AccountProjection {
                 id: account.id,
                 owner_name: account.owner_name,
@@ -304,10 +317,15 @@ impl AccountService {
                 updated_at: Utc::now(),
             }));
         }
-        self.metrics.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .cache_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Fall back to projections
-        self.projections.get_account(account_id).await.map_err(|e| AccountError::InfrastructureError(e.to_string()))
+        self.projections
+            .get_account(account_id)
+            .await
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))
     }
 
     pub async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>, AccountError> {
@@ -322,14 +340,26 @@ impl AccountService {
         account_id: Uuid,
     ) -> Result<Vec<TransactionProjection>, AccountError> {
         // Try cache first
-        if let Some(events) = self.cache_service.get_account_events(account_id).await.map_err(|e| AccountError::InfrastructureError(e.to_string()))? {
-            self.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(events) = self
+            .cache_service
+            .get_account_events(account_id)
+            .await
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?
+        {
+            self.metrics
+                .cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(events.into_iter().map(|e| e.into()).collect());
         }
-        self.metrics.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .cache_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Fall back to projections
-        self.projections.get_account_transactions(account_id).await.map_err(|e| AccountError::InfrastructureError(e.to_string()))
+        self.projections
+            .get_account_transactions(account_id)
+            .await
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))
     }
 
     async fn update_projections_from_events(
@@ -337,7 +367,7 @@ impl AccountService {
         events: &[crate::domain::AccountEvent],
     ) -> Result<(), AccountError> {
         let start_time = Instant::now();
-        
+
         for event in events {
             let transaction = TransactionProjection {
                 id: Uuid::new_v4(),
@@ -350,13 +380,24 @@ impl AccountService {
                 transaction_type: event.event_type().to_string(),
                 timestamp: Utc::now(),
             };
-            
-            match self.projections.insert_transactions_batch(vec![transaction]).await {
+
+            match self
+                .projections
+                .insert_transactions_batch(vec![transaction])
+                .await
+            {
                 Ok(_) => {
-                    self.metrics.projection_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    
+                    self.metrics
+                        .projection_updates
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                     // Update cache with new account state
-                    if let Some(account) = self.projections.get_account(event.aggregate_id()).await.map_err(|e| AccountError::InfrastructureError(e.to_string()))? {
+                    if let Some(account) = self
+                        .projections
+                        .get_account(event.aggregate_id())
+                        .await
+                        .map_err(|e| AccountError::InfrastructureError(e.to_string()))?
+                    {
                         let account = Account {
                             id: account.id,
                             owner_name: account.owner_name,
@@ -366,11 +407,14 @@ impl AccountService {
                         };
                         self.cache_service
                             .set_account(&account, Some(Duration::from_secs(3600)))
-                            .await.map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+                            .await
+                            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
                     }
                 }
                 Err(e) => {
-                    self.metrics.projection_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics
+                        .projection_errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     error!("Failed to update projection: {}", e);
                     return Err(AccountError::InfrastructureError(e.to_string()));
                 }
@@ -400,6 +444,17 @@ impl From<AccountEvent> for TransactionProjection {
             transaction_type: event.event_type().to_string(),
             timestamp: Utc::now(),
         }
+    }
+}
+
+// Add Default implementation for AccountService
+impl Default for AccountService {
+    fn default() -> Self {
+        let repository = Arc::new(AccountRepository::default());
+        let projection_store = ProjectionStore::default();
+        let cache_service = CacheService::default();
+        let middleware = Arc::new(RequestMiddleware::default());
+        AccountService::new(repository, projection_store, cache_service, middleware, 100)
     }
 }
 
@@ -464,7 +519,11 @@ mod tests {
 
         fn start_batch_flush_task(&self) {}
 
-        async fn create_account(&self, _owner_name: String, _initial_balance: Decimal) -> Result<Account> {
+        async fn create_account(
+            &self,
+            _owner_name: String,
+            _initial_balance: Decimal,
+        ) -> Result<Account> {
             Ok(Account::default())
         }
 
@@ -492,10 +551,16 @@ mod tests {
         let projection_store = ProjectionStore::new(ps_pool);
         let cache_service = CacheService::new(
             RealRedisClient::new(redis::Client::open("redis://127.0.0.1/").unwrap(), None),
-            Default::default()
+            Default::default(),
         );
 
-        AccountService::new(mock_repo, projection_store, cache_service, Arc::new(RequestMiddleware::default()), 10)
+        AccountService::new(
+            mock_repo,
+            projection_store,
+            cache_service,
+            Arc::new(RequestMiddleware::default()),
+            10,
+        )
     }
 
     #[tokio::test]

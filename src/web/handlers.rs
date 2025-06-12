@@ -1,13 +1,16 @@
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{Request, Response, StatusCode, HeaderMap},
+    http::{HeaderMap, Request, Response, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use rust_decimal::{Decimal, prelude::{ToPrimitive, FromPrimitive}};
+use rust_decimal::{
+    prelude::{FromPrimitive, ToPrimitive},
+    Decimal,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     convert::Infallible,
@@ -26,17 +29,22 @@ use uuid::Uuid;
 use crate::application::AccountService;
 use crate::domain::{AccountCommand, AccountError};
 use crate::infrastructure::{
-    auth::{AuthService, Claims, LoginRequest, LoginResponse, LogoutRequest, PasswordResetResponse, UserRole, AuthConfig},
-    cache_service::{CacheService, CacheConfig, EvictionPolicy},
+    auth::{
+        AuthConfig, AuthService, Claims, LoginRequest, LoginResponse, LogoutRequest,
+        PasswordResetResponse, UserRole,
+    },
+    cache_service::{CacheConfig, CacheService, EvictionPolicy},
     event_store::{EventStore, EventStoreConfig},
     kafka_abstraction::KafkaConfig,
-    middleware::{RequestMiddleware, RequestContext, AccountCreationValidator, TransactionValidator},
-    projections::{AccountProjection, TransactionProjection, ProjectionStore, ProjectionConfig},
+    middleware::{
+        AccountCreationValidator, RequestContext, RequestMiddleware, TransactionValidator,
+    },
+    projections::{AccountProjection, ProjectionConfig, ProjectionStore, TransactionProjection},
     rate_limiter::RateLimitConfig,
-    redis_abstraction::{RedisClient, RealRedisClient, RedisPoolConfig},
+    redis_abstraction::{RealRedisClient, RedisClient, RedisPoolConfig},
     repository::{AccountRepository, AccountRepositoryTrait},
-    scaling::{ScalingManager, ServiceInstance, InstanceMetrics, ScalingConfig},
-    sharding::{ShardManager, ShardConfig, LockManager},
+    scaling::{InstanceMetrics, ScalingConfig, ScalingManager, ServiceInstance},
+    sharding::{LockManager, ShardConfig, ShardManager},
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -103,15 +111,26 @@ pub async fn create_account(
             return Err((StatusCode::BAD_REQUEST, result.errors.join(", ")));
         }
     }
-    let account = service.create_account(payload.owner_name, Decimal::from_f64(payload.initial_balance).unwrap_or(Decimal::ZERO)).await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(CreateAccountResponse { account_id: account }))
+    let account = service
+        .create_account(
+            payload.owner_name,
+            Decimal::from_f64(payload.initial_balance).unwrap_or(Decimal::ZERO),
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(CreateAccountResponse {
+        account_id: account,
+    }))
 }
 
 pub async fn get_account(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let account = service.get_account(id).await.map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    let account = service
+        .get_account(id)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     match account {
         Some(acc) => Ok(Json(AccountResponse {
             id: acc.id.to_string(),
@@ -126,7 +145,10 @@ pub async fn deposit_money(
     Path(id): Path<Uuid>,
     Json(payload): Json<TransactionRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    service.deposit_money(id, payload.amount).await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service
+        .deposit_money(id, payload.amount)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(StatusCode::OK)
 }
 
@@ -135,7 +157,10 @@ pub async fn withdraw_money(
     Path(id): Path<Uuid>,
     Json(payload): Json<TransactionRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    service.withdraw_money(id, payload.amount).await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service
+        .withdraw_money(id, payload.amount)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(StatusCode::OK)
 }
 
@@ -183,7 +208,9 @@ pub async fn metrics(
     Ok(Json(metrics))
 }
 
-pub async fn create_routes() -> Result<Router<(Arc<AccountService>, Arc<AuthService>)>, anyhow::Error> {
+// New function that only initializes all services and returns them as a tuple
+pub async fn initialize_services() -> Result<(Arc<AccountService>, Arc<AuthService>), anyhow::Error>
+{
     // Initialize Redis client
     let redis_client = Arc::new(redis::Client::open("redis://127.0.0.1/")?);
     let redis_client_trait = RealRedisClient::new(
@@ -194,7 +221,8 @@ pub async fn create_routes() -> Result<Router<(Arc<AccountService>, Arc<AuthServ
     // Initialize AuthService
     let auth_config = AuthConfig {
         jwt_secret: std::env::var("JWT_SECRET").unwrap_or_else(|_| "default_secret".to_string()),
-        refresh_token_secret: std::env::var("REFRESH_TOKEN_SECRET").unwrap_or_else(|_| "default_refresh_secret".to_string()),
+        refresh_token_secret: std::env::var("REFRESH_TOKEN_SECRET")
+            .unwrap_or_else(|_| "default_refresh_secret".to_string()),
         access_token_expiry: 3600,
         refresh_token_expiry: 604800,
         rate_limit_requests: 1000,
@@ -234,7 +262,10 @@ pub async fn create_routes() -> Result<Router<(Arc<AccountService>, Arc<AuthServ
         max_clients: 1000,
     };
     let middleware = Arc::new(RequestMiddleware::new(rate_limit_config));
-    middleware.register_validator("create_account".to_string(), Box::new(AccountCreationValidator));
+    middleware.register_validator(
+        "create_account".to_string(),
+        Box::new(AccountCreationValidator),
+    );
     middleware.register_validator("deposit_money".to_string(), Box::new(TransactionValidator));
     middleware.register_validator("withdraw_money".to_string(), Box::new(TransactionValidator));
 
@@ -248,11 +279,15 @@ pub async fn create_routes() -> Result<Router<(Arc<AccountService>, Arc<AuthServ
         health_check_interval: Duration::from_secs(30),
         instance_timeout: Duration::from_secs(60),
     };
-    let scaling_manager = Arc::new(ScalingManager::new(redis_client_trait.clone(), scaling_config));
+    let scaling_manager = Arc::new(ScalingManager::new(
+        redis_client_trait.clone(),
+        scaling_config,
+    ));
 
     // Initialize EventStore and ProjectionStore
     let event_store = Arc::new(EventStore::new_with_pool_size(10).await?);
-    let projection_store = Arc::new(ProjectionStore::new_with_config(ProjectionConfig::default()).await?);
+    let projection_store =
+        Arc::new(ProjectionStore::new_with_config(ProjectionConfig::default()).await?);
 
     // Initialize AccountRepository
     let repository = Arc::new(AccountRepository::new(
@@ -271,29 +306,17 @@ pub async fn create_routes() -> Result<Router<(Arc<AccountService>, Arc<AuthServ
         100,
     ));
 
-    // Create router with routes
-    let router = Router::new()
-        .route("/health", get(health_check))
-        .route("/metrics", get(metrics))
-        .route("/login", post(login))
-        .route("/logout", post(logout))
-        .route("/accounts", get(get_all_accounts))
-        .route("/accounts/:id", get(get_account))
-        .route("/accounts", post(create_account))
-        .route("/accounts/:id/deposit", post(deposit_money))
-        .route("/accounts/:id/withdraw", post(withdraw_money))
-        .route("/accounts/:id/transactions", get(get_account_transactions))
-        .route("/batch-transactions", post(batch_transactions))
-        .with_state((service, auth_service));
-
-    Ok(router)
+    Ok((service, auth_service))
 }
 
 pub async fn login(
     State((_, auth_service)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    match auth_service.login(&payload.username, &payload.password).await {
+    match auth_service
+        .login(&payload.username, &payload.password)
+        .await
+    {
         Ok(token) => Ok(Json(token)),
         Err(e) => Err((StatusCode::UNAUTHORIZED, e.to_string())),
     }
