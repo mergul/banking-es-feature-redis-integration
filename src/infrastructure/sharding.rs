@@ -1,13 +1,21 @@
-use crate::infrastructure::redis_abstraction::{RedisClient, RedisClientTrait};
+use crate::infrastructure::{
+    redis_abstraction::{RedisClientTrait, RedisConnectionCommands},
+    scaling::InstanceStatus,
+};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
-use redis::{aio::Connection, AsyncCommands, RedisError};
+use redis::{aio::MultiplexedConnection, AsyncCommands, RedisError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+use redis::aio::ConnectionLike;
+use redis::Client;
+use crate::infrastructure::redis_abstraction::RealRedisClient;
+
+pub type ShardId = Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardInfo {
@@ -27,7 +35,7 @@ pub enum ShardStatus {
     Failed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ShardManager {
     redis_client: Arc<dyn RedisClientTrait>,
     shards: Arc<DashMap<String, ShardInfo>>,
@@ -60,10 +68,11 @@ impl Default for ShardConfig {
 
 impl ShardManager {
     pub fn new(redis_client: Arc<dyn RedisClientTrait>, config: ShardConfig) -> Self {
+        let redis_client_clone = redis_client.clone();
         Self {
             redis_client,
             shards: Arc::new(DashMap::new()),
-            lock_manager: Arc::new(LockManager::new(redis_client.clone())),
+            lock_manager: Arc::new(LockManager::new(redis_client_clone)),
             config,
         }
     }
@@ -105,7 +114,7 @@ impl ShardManager {
             shard.last_updated = chrono::Utc::now();
         }
 
-        self.lock_manager.release_lock(lock).await?;
+        (*self.lock_manager).release_lock(lock).await?;
         Ok(())
     }
 
@@ -153,7 +162,7 @@ impl ShardManager {
             self.perform_rebalancing(&instance_shards).await?;
         }
 
-        self.lock_manager.release_lock(lock).await?;
+        (*self.lock_manager).release_lock(lock).await?;
         Ok(())
     }
 
@@ -201,7 +210,6 @@ impl ShardManager {
     }
 }
 
-#[derive(Debug)]
 pub struct LockManager {
     redis_client: Arc<dyn RedisClientTrait>,
 }
@@ -211,13 +219,17 @@ impl LockManager {
         Self { redis_client }
     }
 
+    pub async fn release_lock(&self, lock: DistributedLock) -> Result<()> {
+        lock.release_lock().await
+    }
+
     pub async fn acquire_lock(&self, key: &str, timeout: Duration) -> Result<DistributedLock> {
         let lock_key = format!("lock:{}", key);
         let lock_id = Uuid::new_v4().to_string();
         let mut retries = 0;
 
         while retries < 3 {
-            let mut conn = self.redis_client.get_async_connection().await?;
+            let mut conn = self.redis_client.get_connection().await?;
             
             let acquired: bool = redis::cmd("SET")
                 .arg(&lock_key)
@@ -225,7 +237,7 @@ impl LockManager {
                 .arg("NX")
                 .arg("PX")
                 .arg(timeout.as_millis() as u64)
-                .query_async(&mut *conn)
+                .query_async(&mut conn)
                 .await?;
 
             if acquired {
@@ -244,7 +256,6 @@ impl LockManager {
     }
 }
 
-#[derive(Debug)]
 pub struct DistributedLock {
     key: String,
     id: String,
@@ -253,7 +264,7 @@ pub struct DistributedLock {
 
 impl DistributedLock {
     pub async fn release_lock(self) -> Result<()> {
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_connection().await?;
         
         let script = redis::Script::new(
             r#"
@@ -268,7 +279,7 @@ impl DistributedLock {
         let result: i32 = script
             .key(&self.key)
             .arg(&self.id)
-            .invoke_async(&mut *conn)
+            .invoke_async(&mut conn)
             .await?;
 
         if result == 0 {
@@ -279,6 +290,37 @@ impl DistributedLock {
     }
 }
 
+impl ConnectionLike for dyn RedisConnectionCommands + Send {
+    fn get_db(&self) -> i64 {
+        0 // Default database
+    }
+
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a redis::Cmd) -> redis::RedisFuture<'a, redis::Value> {
+        Box::pin(async move {
+            unimplemented!("req_packed_command not implemented")
+        })
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        pipeline: &'a redis::Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> redis::RedisFuture<'a, Vec<redis::Value>> {
+        Box::pin(async move {
+            unimplemented!("req_packed_commands not implemented")
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceInstance {
+    pub id: String,
+    pub status: InstanceStatus,
+    pub shard_assignments: Vec<ShardId>,
+    pub last_heartbeat: chrono::DateTime<chrono::Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,7 +329,7 @@ mod tests {
     #[tokio::test]
     async fn test_shard_assignment() {
         let redis_client = Client::open("redis://127.0.0.1/").unwrap();
-        let redis_client = Arc::new(RedisClient::new(redis_client, None).unwrap());
+        let redis_client = RealRedisClient::new(redis_client, None);
         
         let config = ShardConfig::default();
         let shard_manager = ShardManager::new(redis_client, config);
@@ -305,7 +347,7 @@ mod tests {
     #[tokio::test]
     async fn test_distributed_lock() {
         let redis_client = Client::open("redis://127.0.0.1/").unwrap();
-        let redis_client = Arc::new(RedisClient::new(redis_client, None).unwrap());
+        let redis_client = RealRedisClient::new(redis_client, None);
         
         let lock_manager = LockManager::new(redis_client.clone());
         

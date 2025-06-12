@@ -207,9 +207,16 @@ impl KafkaEventProcessor {
             .save_events(batch.account_id, batch.events.clone(), batch.version)
             .await?;
 
+        // Convert events to versioned format
+        let versioned_events: Vec<(i64, AccountEvent)> = batch.events
+            .iter()
+            .enumerate()
+            .map(|(i, event)| (batch.version + i as i64, event.clone()))
+            .collect();
+
         // Cache the events
         self.cache_service
-            .set_account_events(batch.account_id, &batch.events, None)
+            .set_account_events(batch.account_id, &versioned_events, None)
             .await?;
 
         // Get account from projections

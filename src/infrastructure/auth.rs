@@ -1,11 +1,16 @@
 use axum::{
-    async_trait,
     extract::FromRequestParts,
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Response},
-    Json,
+    routing::{get, post},
+    Json, RequestPartsExt, Router,
 };
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use axum_extra::{
+    headers::{authorization::Bearer, Authorization},
+    TypedHeader,
+};
+use async_trait::async_trait;
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation, Algorithm};
 use redis::{aio::Connection, AsyncCommands, RedisError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -17,6 +22,15 @@ use argon2::{
     Argon2,
 };
 use chrono::{DateTime, Duration, Utc};
+use serde_json::json;
+use std::fmt::Display;
+use std::sync::LazyLock;
+use std::future::Future;
+
+static KEYS: LazyLock<Keys> = LazyLock::new(|| {
+    let secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+    Keys::new(secret.as_bytes())
+});
 
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -40,6 +54,12 @@ pub enum AuthError {
     JwtError(#[from] jsonwebtoken::errors::Error),
     #[error("Internal error: {0}")]
     InternalError(String),
+    #[error("Wrong credentials")]
+    WrongCredentials,
+    #[error("Missing credentials")]
+    MissingCredentials,
+    #[error("Token creation error")]
+    TokenCreation,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,6 +70,7 @@ pub struct Claims {
     pub roles: Vec<UserRole>,
     pub token_type: TokenType,
     pub jti: String,
+    pub company: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -65,7 +86,7 @@ pub enum UserRole {
     Customer,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {
     pub id: String,
     pub username: String,
@@ -77,7 +98,7 @@ pub struct User {
     pub locked_until: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub jwt_secret: String,
     pub refresh_token_secret: String,
@@ -127,6 +148,12 @@ pub struct PasswordResetResponse {
     pub expires_in: i64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LogoutRequest {
+    pub token: String,
+}
+
+#[derive(Clone)]
 pub struct AuthService {
     redis_client: Arc<redis::Client>,
     config: AuthConfig,
@@ -301,7 +328,7 @@ impl AuthService {
         conn.set_ex(
             format!("reset_token:{}", user.id),
             &reset_token,
-            self.config.access_token_expiry as usize,
+            self.config.access_token_expiry as u64,
         )
         .await?;
 
@@ -330,9 +357,10 @@ impl AuthService {
             roles: roles.to_vec(),
             token_type,
             jti: Uuid::new_v4().to_string(),
+            company: "ACME".to_string(),
         };
 
-        let secret = match token_type {
+        let secret = match claims.token_type {
             TokenType::Access => &self.config.jwt_secret,
             TokenType::Refresh => &self.config.refresh_token_secret,
         };
@@ -358,14 +386,11 @@ impl AuthService {
         }
 
         // Validate token
+        let validation = Validation::new(Algorithm::HS256);
+
         let secret = match expected_type {
             TokenType::Access => &self.config.jwt_secret,
             TokenType::Refresh => &self.config.refresh_token_secret,
-        };
-
-        let validation = Validation {
-            validate_exp: true,
-            ..Validation::default()
         };
 
         let token_data = decode::<Claims>(
@@ -388,7 +413,7 @@ impl AuthService {
         // Blacklist token until it expires
         let ttl = claims.exp - Utc::now().timestamp();
         if ttl > 0 {
-            conn.set_ex(format!("blacklist:{}", token), true, ttl as usize)
+            conn.set_ex(format!("blacklist:{}", token), true, ttl as u64)
                 .await?;
         }
 
@@ -397,16 +422,16 @@ impl AuthService {
 
     pub async fn check_rate_limit(&self, key: &str) -> Result<(), AuthError> {
         let mut conn = self.redis_client.get_async_connection().await?;
-        let current = conn
+        let current: i64 = conn
             .incr(format!("rate_limit:{}", key), 1)
             .await?;
 
         if current == 1 {
-            conn.expire(format!("rate_limit:{}", key), self.config.rate_limit_window as usize)
+            conn.expire(format!("rate_limit:{}", key), self.config.rate_limit_window as i64)
                 .await?;
         }
 
-        if current > self.config.rate_limit_requests {
+        if current > self.config.rate_limit_requests as i64 {
             return Err(AuthError::RateLimitExceeded);
         }
 
@@ -421,25 +446,18 @@ where
 {
     type Rejection = AuthError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
-            .headers
-            .get("Authorization")
-            .ok_or(AuthError::InvalidToken)?
-            .to_str()
-            .map_err(|_| AuthError::InvalidToken)?;
+    fn from_request_parts<'a, 'b>(parts: &'a mut Parts, _state: &'b S) -> impl Future<Output = Result<Self, Self::Rejection>> + Send + 'a {
+        async move {
+            let TypedHeader(Authorization(bearer)) = parts
+                .extract::<TypedHeader<Authorization<Bearer>>>()
+                .await
+                .map_err(|_| AuthError::InvalidToken)?;
+            // Decode the user data
+            let token_data = decode::<Claims>(bearer.token(), &KEYS.decoding, &Validation::default())
+                .map_err(|_| AuthError::InvalidToken)?;
 
-        if !auth_header.starts_with("Bearer ") {
-            return Err(AuthError::InvalidToken);
+            Ok(token_data.claims)
         }
-
-        let token = auth_header.trim_start_matches("Bearer ");
-        let auth_service = parts
-            .extensions
-            .get::<Arc<AuthService>>()
-            .ok_or_else(|| AuthError::InternalError("Auth service not found".into()))?;
-
-        auth_service.validate_token(token, TokenType::Access).await
     }
 }
 
@@ -455,7 +473,10 @@ impl IntoResponse for AuthError {
             AuthError::PasswordHashError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Password processing error"),
             AuthError::RedisError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
             AuthError::JwtError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Token processing error"),
-            AuthError::InternalError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.as_str()),
+            AuthError::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+            AuthError::WrongCredentials => (StatusCode::UNAUTHORIZED, "Wrong credentials"),
+            AuthError::MissingCredentials => (StatusCode::BAD_REQUEST, "Missing credentials"),
+            AuthError::TokenCreation => (StatusCode::INTERNAL_SERVER_ERROR, "Token creation error"),
         };
 
         let body = Json(serde_json::json!({
@@ -463,5 +484,72 @@ impl IntoResponse for AuthError {
         }));
 
         (status, body).into_response()
+    }
+}
+
+struct Keys {
+    encoding: EncodingKey,
+    decoding: DecodingKey,
+}
+
+impl Keys {
+    fn new(secret: &[u8]) -> Self {
+        Self {
+            encoding: EncodingKey::from_secret(secret),
+            decoding: DecodingKey::from_secret(secret),
+        }
+    }
+}
+
+pub async fn authorize(Json(payload): Json<AuthPayload>) -> Result<Json<AuthBody>, AuthError> {
+    if payload.client_id.is_empty() || payload.client_secret.is_empty() {
+        return Err(AuthError::MissingCredentials);
+    }
+
+    // Here you would typically validate against a database
+    if payload.client_id != "foo" || payload.client_secret != "bar" {
+        return Err(AuthError::WrongCredentials);
+    }
+
+    let claims = Claims {
+        sub: "b@b.com".to_owned(),
+        company: "ACME".to_owned(),
+        exp: 2000000000, // May 2033
+        iat: chrono::Utc::now().timestamp(),
+        roles: vec![UserRole::Customer],
+        token_type: TokenType::Access,
+        jti: Uuid::new_v4().to_string(),
+    };
+
+    let token = encode(&Header::default(), &claims, &KEYS.encoding)
+        .map_err(|_| AuthError::TokenCreation)?;
+
+    Ok(Json(AuthBody::new(token)))
+}
+
+pub async fn protected(claims: Claims) -> Result<String, AuthError> {
+    Ok(format!(
+        "Welcome to the protected area :)\nYour data:\n{claims:?}",
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthPayload {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthBody {
+    access_token: String,
+    token_type: String,
+}
+
+impl AuthBody {
+    pub fn new(access_token: String) -> Self {
+        Self {
+            access_token,
+            token_type: "Bearer".to_string(),
+        }
     }
 } 

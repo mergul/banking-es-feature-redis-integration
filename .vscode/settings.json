@@ -1,3 +1,7 @@
 {
-  "cmake.sourceDirectory": "/home/mesut/RustroverProjects/banking-es-feature-redis-integration/librdkafka"
+  "cmake.sourceDirectory": "C:\\Users\\Yenimedya\\integrations\\banking-es-feature-redis-integration\\librdkafka",
+  "rust-analyzer.checkOnSave": true,
+  "rust-analyzer.checkOnSave.command": "clippy",
+  "rust-analyzer.cargo.loadOutDirsFromCheck": true,
+  "rust-analyzer.procMacro.enable": true
 }
