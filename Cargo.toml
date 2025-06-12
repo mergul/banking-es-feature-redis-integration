@@ -5,38 +5,28 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.45.0", features = ["full"] }
-axum = "0.8.4"
+axum = { version = "0.8.4", features = ["macros"] }
 async-trait = "0.1"
-
-sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "macros", "rust_decimal", "chrono", "uuid", "json", "sqlite"] }
+jsonwebtoken = "9.2"
+argon2 = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-uuid = { version = "1.17", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-anyhow = "1.0"
-thiserror = "2.0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tower = "0.5.2"
-tower-http = { version = "0.6.6", features = ["cors","compression-full", "trace"] }
-rust_decimal = { version = "1.37.1", features = ["serde"] }
-litemap = "0.8.0"
-zerotrie = "0.2.2"
-writeable = "0.6.1"
-home = "0.5.11"
-tinystr = "0.8.1"
-zerofrom = "0.1.5"
-zerovec = "0.11.0"
-base64ct = "1.6.0"
-icu_properties = "2.0.1"
-icu_properties_data = "2.0.1"
-icu_locale_core = "2.0.0"
-icu_collections = "2.0.0"
-redis = { version = "0.25", features = ["tokio-comp"] }
-dotenv = "0.15"
-zstd = "0.13.3"
+anyhow = "1.0"
+thiserror = "1.0"
+uuid = { version = "1.7", features = ["v4", "serde"] }
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
+dashmap = "5.5"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1.32", features = ["serde"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "macros", "rust_decimal", "chrono", "uuid", "json", "sqlite"] }
 rdkafka = { version = "0.37.0" }
-# Web framework
+opentelemetry = { version = "0.20", features = ["rt-tokio"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+validator = { version = "0.16", features = ["derive"] }
+dotenv = "0.15"
 
 # Serialization
 
@@ -44,7 +34,6 @@ rdkafka = { version = "0.37.0" }
 # Database and persistence
 
 # Concurrency and performance
-dashmap = "6.1.0"  # High-performance concurrent HashMap
 rayon = "1.7"    # Data parallelism
 crossbeam = "0.8" # Lock-free data structures
 
@@ -62,9 +51,9 @@ mimalloc = { version = "0.1", optional = true }
 jemalloc = { version = "0.3", optional = true }
 mockall = { version = "0.13.1", features = ["nightly"] }
 futures = "0.3.31"
-opentelemetry = { version = "0.20.0", features = ["rt-tokio"] }
 opentelemetry-jaeger = { version = "0.19.0", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.20.0"
+axum-extra = { version = "0.10.1", features = ["typed-header"] }
 
 [features]
 default = []

@@ -1,14 +1,16 @@
-use crate::{application::AccountService, web::handlers::*};
+use crate::{application::AccountService, infrastructure::auth::AuthService, web::handlers::*};
 use axum::{
     routing::{get, post, put},
     Router,
 };
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
-pub fn create_routes(service: AccountService) -> Router {
-    // Wrap the service in rate limiting (adjust max_requests as needed)
-    let rate_limited_service = RateLimitedService::new(service, 1000);
-
+// New function that only sets up the router with routes, expecting services to be passed in
+pub fn create_router(
+    service: Arc<AccountService>,
+    auth_service: Arc<AuthService>,
+) -> Router<(Arc<AccountService>, Arc<AuthService>)> {
     Router::new()
         .route("/accounts", post(create_account))
         .route("/accounts", get(get_all_accounts))
@@ -19,6 +21,6 @@ pub fn create_routes(service: AccountService) -> Router {
         .route("/accounts/batch", post(batch_transactions)) // New batch endpoint
         .route("/health", get(health_check))
         .route("/metrics", get(metrics))
-        .with_state(rate_limited_service)
+        .with_state((service, auth_service))
         .layer(CorsLayer::permissive())
 }

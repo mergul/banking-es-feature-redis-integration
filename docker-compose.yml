@@ -23,19 +23,20 @@ services:
       - "3000:3000"
     environment:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/banking_es
-      REDIS_URL: redis://redis:6379 # Added Redis URL
+      REDIS_URL: redis://redis:6379
+      KAFKA_BOOTSTRAP_SERVERS: localhost:9092
       RUST_LOG: info
     depends_on:
       postgres:
         condition: service_healthy
-      redis: # Add redis dependency
-        condition: service_started # Wait for redis to start
+      redis:
+        condition: service_started
 
-  redis: # Add redis service
+  redis:
     image: redis:alpine
     ports:
       - "6379:6379"
-    healthcheck: # Add healthcheck for redis
+    healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s

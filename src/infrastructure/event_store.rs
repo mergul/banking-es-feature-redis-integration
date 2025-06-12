@@ -1,16 +1,20 @@
 use crate::domain::{Account, AccountEvent};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Row, Transaction};
+use sqlx::{postgres::{PgPoolOptions, PgValue}, PgPool, Postgres, Row, Transaction};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
+use tokio::sync::{mpsc, Mutex, RwLock, Semaphore, OnceCell};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+// Global connection pool
+pub static DB_POOL: OnceCell<Arc<PgPool>> = OnceCell::const_new();
 
 #[derive(Debug, Clone)]
 pub struct Event {
@@ -20,6 +24,24 @@ pub struct Event {
     pub event_data: Value,
     pub version: i64,
     pub timestamp: DateTime<Utc>,
+    pub metadata: EventMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventMetadata {
+    pub correlation_id: Option<Uuid>,
+    pub causation_id: Option<Uuid>,
+    pub user_id: Option<String>,
+    pub source: String,
+    pub schema_version: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EventValidationResult {
+    pub is_valid: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -28,9 +50,11 @@ pub struct EventStore {
     batch_sender: mpsc::UnboundedSender<BatchedEvent>,
     snapshot_cache: Arc<RwLock<HashMap<Uuid, CachedSnapshot>>>,
     config: EventStoreConfig,
-    // Add semaphore for backpressure control
     batch_semaphore: Arc<Semaphore>,
     metrics: Arc<EventStoreMetrics>,
+    event_validators: Arc<DashMap<String, Box<dyn EventValidator + Send + Sync>>>,
+    event_handlers: Arc<DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>>,
+    version_cache: Arc<DashMap<Uuid, i64>>,
 }
 
 #[derive(Debug)]
@@ -57,7 +81,6 @@ struct CachedSnapshot {
     data: serde_json::Value,
     version: i64,
     created_at: Instant,
-    // Add TTL for cache invalidation
     ttl: Duration,
 }
 
@@ -98,34 +121,14 @@ impl EventStoreMetrics {
     }
 }
 
-// Add a new struct for retry events
-#[derive(Debug, Clone)]
-struct RetryEvent {
-    aggregate_id: Uuid,
-    events: Vec<AccountEvent>,
-    expected_version: i64,
-    created_at: Instant,
-    priority: EventPriority,
+#[async_trait::async_trait]
+pub trait EventValidator: Send + Sync {
+    async fn validate(&self, event: &Event) -> EventValidationResult;
 }
 
-// Add this struct for retry configuration
-#[derive(Debug, Clone)]
-pub struct RetryConfig {
-    pub max_retries: u32,
-    pub initial_delay: Duration,
-    pub max_delay: Duration,
-    pub backoff_factor: f64,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_retries: 3,
-            initial_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(10),
-            backoff_factor: 2.0,
-        }
-    }
+#[async_trait::async_trait]
+pub trait EventHandler: Send + Sync {
+    async fn handle(&self, event: &Event) -> Result<()>;
 }
 
 impl EventStore {
@@ -134,12 +137,15 @@ impl EventStore {
         Self::new_with_config_and_pool(pool, EventStoreConfig::default())
     }
 
+    /// Create EventStore with custom config and existing pool
     pub fn new_with_config_and_pool(pool: PgPool, config: EventStoreConfig) -> Self {
         let (batch_sender, batch_receiver) = mpsc::unbounded_channel();
-        let shared_receiver = Arc::new(Mutex::new(batch_receiver));
         let snapshot_cache = Arc::new(RwLock::new(HashMap::new()));
         let batch_semaphore = Arc::new(Semaphore::new(config.max_batch_queue_size));
         let metrics = Arc::new(EventStoreMetrics::default());
+        let event_validators = Arc::new(DashMap::new());
+        let event_handlers = Arc::new(DashMap::new());
+        let version_cache = Arc::new(DashMap::new());
 
         let store = Self {
             pool: pool.clone(),
@@ -148,21 +154,23 @@ impl EventStore {
             config: config.clone(),
             batch_semaphore: batch_semaphore.clone(),
             metrics: metrics.clone(),
+            event_validators,
+            event_handlers: event_handlers.clone(),
+            version_cache,
         };
 
-        // Start multiple batch processors for better throughput
-        for i in 0..config.batch_processor_count {
-            tokio::spawn(Self::batch_processor(
-                pool.clone(),
-                shared_receiver.clone(),
-                config.clone(),
-                batch_semaphore.clone(),
-                metrics.clone(),
-                i,
-            ));
-        }
+        // Start background batch processor
+        tokio::spawn(Self::batch_processor(
+            pool.clone(),
+            batch_receiver,
+            config.clone(),
+            batch_semaphore,
+            metrics.clone(),
+            event_handlers.clone(),
+            0,
+        ));
 
-        // Start snapshot worker with lower priority
+        // Start periodic snapshot creation
         tokio::spawn(Self::snapshot_worker(
             pool.clone(),
             snapshot_cache.clone(),
@@ -173,58 +181,86 @@ impl EventStore {
         tokio::spawn(Self::cache_cleanup_worker(snapshot_cache));
 
         // Start metrics reporter
-        tokio::spawn(Self::metrics_reporter(metrics.clone()));
+        let reporter_metrics = metrics.clone();
+        tokio::spawn(async move {
+            Self::metrics_reporter(reporter_metrics).await;
+        });
 
         store
     }
 
     /// Create EventStore with a specific pool size
+    pub async fn new_with_pool_size(pool_size: u32) -> Result<Self> {
+        let database_url = std::env::var("DATABASE_URL")
+            .context("DATABASE_URL environment variable is required")?;
+
+        Self::new_with_pool_size_and_url(pool_size, &database_url).await
+    }
+
+    /// Create EventStore with a specific pool size and database URL
+    pub async fn new_with_pool_size_and_url(pool_size: u32, database_url: &str) -> Result<Self> {
+        let mut config = EventStoreConfig::default();
+        config.database_url = database_url.to_string();
+        config.max_connections = pool_size;
+
+        Self::new_with_config(config).await
+    }
+
+    /// Create EventStore with full configuration options
     pub async fn new_with_config(config: EventStoreConfig) -> Result<Self> {
-        let pool = PgPoolOptions::new()
-            .max_connections(config.max_connections)
-            .min_connections(config.min_connections)
-            .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
-            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-            .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-            // Enable prepared statement caching
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    sqlx::query("SET SESSION synchronous_commit = 'off'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION work_mem = '64MB'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION maintenance_work_mem = '256MB'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION effective_cache_size = '4GB'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION random_page_cost = 1.1")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET SESSION effective_io_concurrency = 200")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SELECT 1").execute(&mut *conn).await?;
+        // Get or initialize the global connection pool
+        let pool = DB_POOL.get_or_try_init(|| async {
+            let pool = PgPoolOptions::new()
+                .max_connections(config.max_connections)
+                .min_connections(config.min_connections)
+                .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
+                .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+                .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
+                // Enable prepared statement caching and optimize connection settings
+                .after_connect(|conn, _meta| {
+                    Box::pin(async move {
+                        // Optimize session settings for better performance
+                        sqlx::query("SET SESSION synchronous_commit = 'off'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION work_mem = '32MB'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION maintenance_work_mem = '128MB'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION effective_cache_size = '2GB'")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION random_page_cost = 1.1")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SET SESSION effective_io_concurrency = 100")
+                            .execute(&mut *conn)
+                            .await?;
+                        // Set statement timeout to prevent long-running queries
+                        sqlx::query("SET SESSION statement_timeout = '5s'")
+                            .execute(&mut *conn)
+                            .await?;
+                        // Enable connection pooling
+                        sqlx::query("SET SESSION pool_mode = 'transaction'")
+                            .execute(&mut *conn)
+                            .await?;
+                        // Test connection
+                        sqlx::query("SELECT 1").execute(&mut *conn).await?;
 
-                    Ok(())
+                        Ok(())
+                    })
                 })
-            })
-            .connect(&config.database_url)
-            .await
-            .context("Failed to connect to database")?;
+                .connect(&config.database_url)
+                .await
+                .context("Failed to connect to database")?;
 
-        let store = Self::new_with_config_and_pool(pool, config);
+            Ok::<_, anyhow::Error>(Arc::new(pool))
+        })
+        .await?;
 
-        // Start connection monitoring
-        let store_clone = store.clone();
-        tokio::spawn(async move {
-            store_clone.monitor_connection_pool().await;
-        });
-
-        Ok(store)
+        Ok(Self::new_with_config_and_pool(pool.as_ref().clone(), config))
     }
 
     // Enhanced event saving with priority support
@@ -235,14 +271,10 @@ impl EventStore {
         expected_version: i64,
         priority: EventPriority,
     ) -> Result<()> {
-        let _permit = self
-            .batch_semaphore
-            .acquire()
-            .await
-            .context("Failed to acquire batch semaphore")?;
+        let start_time = Instant::now();
+        let permit = self.batch_semaphore.clone().acquire_owned().await?;
 
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
         let batched_event = BatchedEvent {
             aggregate_id,
             events,
@@ -252,13 +284,20 @@ impl EventStore {
             priority,
         };
 
-        self.batch_sender
-            .send(batched_event)
-            .context("Failed to send event to batch processor")?;
+        self.batch_sender.send(batched_event)?;
+        self.metrics.batch_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        response_rx
-            .await
-            .context("Failed to receive response from batch processor")?
+        match response_rx.await {
+            Ok(result) => {
+                let duration = start_time.elapsed();
+                self.metrics.connection_acquire_time.fetch_add(
+                    duration.as_millis() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                result
+            }
+            Err(_) => Err(anyhow::anyhow!("Failed to receive batch processing response")),
+        }
     }
 
     // Modify the with_retry method to handle lifetimes correctly
@@ -310,393 +349,191 @@ impl EventStore {
         events: Vec<AccountEvent>,
         expected_version: i64,
     ) -> Result<()> {
-        let config = RetryConfig::default();
-        let events = events.clone(); // Clone events before moving into the closure
-
-        self.with_retry(
-            move || {
-                let events = events.clone(); // Clone again inside the closure
-                async move {
-                    self.save_events_with_priority(
-                        aggregate_id,
-                        events,
-                        expected_version,
-                        EventPriority::Normal,
-                    )
-                    .await
-                }
-            },
-            &config,
-        )
-        .await
+        self.save_events_with_priority(aggregate_id, events, expected_version, EventPriority::Normal)
+            .await
     }
 
     // Multi-threaded batch processor with priority queuing
     async fn batch_processor(
         pool: PgPool,
-        receiver: Arc<Mutex<mpsc::UnboundedReceiver<BatchedEvent>>>,
+        mut receiver: mpsc::UnboundedReceiver<BatchedEvent>,
         config: EventStoreConfig,
         semaphore: Arc<Semaphore>,
         metrics: Arc<EventStoreMetrics>,
+        event_handlers: Arc<DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>>,
         worker_id: usize,
     ) {
-        let batch_size = config.batch_size;
-        let batch_timeout = Duration::from_millis(config.batch_timeout_ms);
-        let mut retry_queue: Vec<RetryEvent> = Vec::new();
-        let mut retry_interval = tokio::time::interval(Duration::from_secs(1));
-
-        let mut priority_batches: HashMap<EventPriority, Vec<BatchedEvent>> = HashMap::new();
+        let mut batch = Vec::new();
         let mut last_flush = Instant::now();
 
-        debug!("Starting batch processor worker {}", worker_id);
-
         loop {
+            let timeout = tokio::time::sleep(Duration::from_millis(config.batch_timeout_ms));
+
             tokio::select! {
-                // Process retries
-                _ = retry_interval.tick() => {
-                    if !retry_queue.is_empty() {
-                        let retry_batch = std::mem::replace(&mut retry_queue, Vec::new());
-                        for retry_event in retry_batch {
-                            let (response_tx, _) = tokio::sync::oneshot::channel();
-                            let batched_event = BatchedEvent {
-                                aggregate_id: retry_event.aggregate_id,
-                                events: retry_event.events,
-                                expected_version: retry_event.expected_version,
-                                response_tx,
-                                created_at: retry_event.created_at,
-                                priority: retry_event.priority,
-                            };
-                            priority_batches
-                                .entry(batched_event.priority)
-                                .or_insert_with(Vec::new)
-                                .push(batched_event);
-                        }
-                    }
-                }
-                // Process new events
-                event = async {
-                    let mut rx = receiver.lock().await;
-                    match rx.try_recv() {
-                        Ok(event) => Some(event),
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            if !priority_batches.is_empty() && last_flush.elapsed() >= batch_timeout {
-                                None
-                            } else {
-                                tokio::time::sleep(Duration::from_millis(1)).await;
-                                None
+                Some(event) = receiver.recv() => {
+                    batch.push(event);
+                    
+                    if batch.len() >= config.batch_size {
+                        let batch_to_process = std::mem::replace(&mut batch, Vec::new());
+                        let pool = pool.clone();
+                        let metrics = metrics.clone();
+                        let event_handlers = event_handlers.clone();
+                        
+                        tokio::spawn(async move {
+                            if let Err(e) = Self::flush_batch(&pool, batch_to_process, &metrics, &event_handlers).await {
+                                error!("Worker {} failed to flush batch: {}", worker_id, e);
                             }
-                        }
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            debug!("Worker {} shutting down - channel closed", worker_id);
-                            None
-                        }
-                    }
-                } => {
-                    if let Some(event) = event {
-                        priority_batches
-                            .entry(event.priority)
-                            .or_insert_with(Vec::new)
-                            .push(event);
+                        });
+                        last_flush = Instant::now();
                     }
                 }
-            }
-
-            let total_events: usize = priority_batches.values().map(|v| v.len()).sum();
-
-            // Enhanced flush conditions
-            let should_flush = total_events >= batch_size
-                || last_flush.elapsed() >= batch_timeout
-                || priority_batches.contains_key(&EventPriority::Critical)
-                || priority_batches
-                    .values()
-                    .flatten()
-                    .any(|e| e.created_at.elapsed() >= batch_timeout * 2);
-
-            if should_flush && !priority_batches.is_empty() {
-                let mut priorities: Vec<_> = priority_batches.keys().copied().collect();
-                priorities.sort_by(|a, b| b.cmp(a));
-
-                for priority in priorities {
-                    if let Some(batch) = priority_batches.remove(&priority) {
-                        if !batch.is_empty() {
-                            let batch_count = batch.len();
-                            // Create retry events before processing the batch
-                            let retry_events: Vec<_> = batch
-                                .iter()
-                                .map(|b| RetryEvent {
-                                    aggregate_id: b.aggregate_id,
-                                    events: b.events.clone(),
-                                    expected_version: b.expected_version,
-                                    created_at: b.created_at,
-                                    priority: b.priority,
-                                })
-                                .collect();
-
-                            match Self::flush_batch(&pool, batch).await {
-                                Ok(()) => {
-                                    metrics
-                                        .events_processed
-                                        .fetch_add(batch_count as u64, Ordering::Relaxed);
-                                    metrics.batch_count.fetch_add(1, Ordering::Relaxed);
-                                    debug!(
-                                        "Worker {} processed batch of {} events with priority {:?}",
-                                        worker_id, batch_count, priority
-                                    );
-                                }
-                                Err(e) => {
-                                    metrics
-                                        .events_failed
-                                        .fetch_add(batch_count as u64, Ordering::Relaxed);
-                                    error!("Worker {} failed to process batch: {}", worker_id, e);
-
-                                    // Add all retry events to the queue
-                                    retry_queue.extend(retry_events);
-                                }
+                _ = timeout => {
+                    if !batch.is_empty() {
+                        let batch_to_process = std::mem::replace(&mut batch, Vec::new());
+                        let pool = pool.clone();
+                        let metrics = metrics.clone();
+                        let event_handlers = event_handlers.clone();
+                        
+                        tokio::spawn(async move {
+                            if let Err(e) = Self::flush_batch(&pool, batch_to_process, &metrics, &event_handlers).await {
+                                error!("Worker {} failed to flush batch: {}", worker_id, e);
                             }
-                            semaphore.add_permits(batch_count);
-                        }
+                        });
+                        last_flush = Instant::now();
                     }
                 }
-
-                last_flush = Instant::now();
             }
         }
     }
+
     // Optimized batch flushing with prepared statements and COPY
-    async fn flush_batch(pool: &PgPool, mut batch: Vec<BatchedEvent>) -> Result<()> {
-        if batch.is_empty() {
-            return Ok(());
-        }
-
-        let start_time = Instant::now();
-
-        // Sort batch by aggregate_id to improve locality and reduce locks
-        batch.sort_by_key(|e| e.aggregate_id);
-
-        let mut tx = pool.begin().await.context("Failed to begin transaction")?;
-
-        let mut all_event_data = Vec::new();
-        let mut responses = Vec::new();
-        let mut failed_responses = Vec::new();
-
-        // Pre-allocate capacity based on estimated event count
-        let estimated_events: usize = batch.iter().map(|b| b.events.len()).sum();
-        all_event_data.reserve(estimated_events);
+    async fn flush_batch(
+        pool: &PgPool,
+        batch: Vec<BatchedEvent>,
+        metrics: &EventStoreMetrics,
+        event_handlers: &DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>,
+    ) -> Result<()> {
+        let mut tx = pool.begin().await?;
 
         for batched_event in batch {
-            match Self::prepare_events_for_insert_optimized(&batched_event) {
-                Ok(event_data) => {
-                    all_event_data.extend(event_data);
-                    responses.push(batched_event.response_tx);
+            let event_data = Self::prepare_events_for_insert_optimized(&batched_event)?;
+
+            // Validate events
+            for event in &event_data {
+                let validation = Self::validate_event(event).await;
+                if !validation.is_valid {
+                    return Err(anyhow::anyhow!(
+                        "Event validation failed: {:?}",
+                        validation.errors
+                    ));
                 }
-                Err(e) => {
-                    failed_responses.push((batched_event.response_tx, e));
-                }
+            }
+
+            // Handle events
+            for event in &event_data {
+                Self::handle_event(event, event_handlers).await?;
+            }
+
+            Self::bulk_insert_events_optimized(&mut tx, event_data).await?;
+
+            if let Err(e) = batched_event.response_tx.send(Ok(())) {
+                warn!("Failed to send batch response: {:?}", e);
             }
         }
 
-        // Send errors for failed preparations
-        for (response_tx, error) in failed_responses {
-            let _ = response_tx.send(Err(error));
-        }
-
-        if all_event_data.is_empty() {
-            return Ok(());
-        }
-
-        // Use COPY for maximum throughput on large batches
-        let result = if all_event_data.len() > 100 {
-            Self::bulk_copy_events(&mut tx, all_event_data).await
-        } else {
-            Self::bulk_insert_events_optimized(&mut tx, all_event_data).await
-        };
-
-        match result {
-            Ok(_) => {
-                tx.commit().await.context("Failed to commit transaction")?;
-                for response_tx in responses {
-                    let _ = response_tx.send(Ok(()));
-                }
-                debug!("Batch flush completed in {:?}", start_time.elapsed());
-            }
-            Err(e) => {
-                let _ = tx.rollback().await;
-                let error_msg = e.to_string();
-                for response_tx in responses {
-                    let _ = response_tx.send(Err(anyhow::anyhow!(error_msg.clone())));
-                }
-                return Err(e);
-            }
-        }
-
+        tx.commit().await?;
         Ok(())
     }
+
     // Pre-calculate event data to reduce serialization overhead
-    fn prepare_events_for_insert_optimized(batched_event: &BatchedEvent) -> Result<Vec<EventData>> {
-        let mut event_data = Vec::with_capacity(batched_event.events.len());
-        let base_time = Utc::now();
+    fn prepare_events_for_insert_optimized(batched_event: &BatchedEvent) -> Result<Vec<Event>> {
+        let mut events = Vec::with_capacity(batched_event.events.len());
+        let mut version = batched_event.expected_version;
 
-        for (i, event) in batched_event.events.iter().enumerate() {
-            let event_id = Uuid::new_v4();
-            let version = batched_event.expected_version + i as i64 + 1;
-
-            // Pre-serialize to avoid repeated serialization
-            let event_json =
-                serde_json::to_value(event).context("Failed to serialize event to JSON")?;
-
-            event_data.push(EventData {
-                id: event_id,
+        for event in &batched_event.events {
+            version += 1;
+            let event = Event {
+                id: Uuid::new_v4(),
                 aggregate_id: batched_event.aggregate_id,
                 event_type: event.event_type().to_string(),
-                event_data: event_json,
+                event_data: serde_json::to_value(event)?,
                 version,
-                timestamp: base_time,
-            });
+                timestamp: Utc::now(),
+                metadata: EventMetadata {
+                    correlation_id: None,
+                    causation_id: None,
+                    user_id: None,
+                    source: "event_store".to_string(),
+                    schema_version: "1.0".to_string(),
+                    tags: Vec::new(),
+                },
+            };
+            events.push(event);
         }
 
-        Ok(event_data)
+        Ok(events)
     }
 
     // Use PostgreSQL COPY for maximum insert performance
-    async fn bulk_copy_events(
-        tx: &mut Transaction<'_, Postgres>,
-        event_data: Vec<EventData>,
-    ) -> Result<()> {
-        // Group by aggregate for version checking
-        let mut aggregates: HashMap<Uuid, (i64, i64)> = HashMap::new();
-        for event in &event_data {
-            let entry = aggregates
-                .entry(event.aggregate_id)
-                .or_insert((i64::MAX, i64::MIN));
-            entry.0 = entry.0.min(event.version);
-            entry.1 = entry.1.max(event.version);
-        }
-
-        // Optimized version conflict check with a single query
-        if !aggregates.is_empty() {
-            let aggregate_ids: Vec<Uuid> = aggregates.keys().copied().collect();
-            let current_versions = sqlx::query(
-                r#"
-                WITH latest_versions AS (
-                    SELECT DISTINCT ON (aggregate_id) 
-                        aggregate_id, 
-                        version
-                    FROM events 
-                    WHERE aggregate_id = ANY($1)
-                    ORDER BY aggregate_id, version DESC
-                )
-                SELECT aggregate_id, version FROM latest_versions
-                "#,
-            )
-            .bind(&aggregate_ids)
-            .fetch_all(&mut **tx)
-            .await
-            .context("Failed to check current versions")?;
-
-            for row in current_versions {
-                let aggregate_id: Uuid = row.get("aggregate_id");
-                let current_version: i64 = row.get("version");
-
-                if let Some((min_version, _)) = aggregates.get(&aggregate_id) {
-                    if current_version >= *min_version {
-                        return Err(anyhow::anyhow!(
-                            "Version conflict for aggregate {}: expected {}, found {}",
-                            aggregate_id,
-                            min_version - 1,
-                            current_version
-                        ));
-                    }
-                }
-            }
-        }
-
-        // Use COPY with optimized buffer size
-        let mut copy_writer = tx
-            .copy_in_raw(
-                "COPY events (id, aggregate_id, event_type, event_data, version, timestamp) FROM STDIN WITH (FORMAT CSV, QUOTE '\"', ESCAPE '\"', BUFFER_SIZE 1048576)"
-            )
-            .await
-            .context("Failed to start COPY operation")?;
-
-        // Pre-allocate buffer for better performance
-        let mut buffer = Vec::with_capacity(1024 * 1024); // 1MB buffer
-
-        for event in event_data {
-            // Optimize CSV formatting
-            let event_data_str = event.event_data.to_string();
-            let escaped_data = event_data_str.replace("\"", "\"\"");
-
-            buffer.extend_from_slice(
-                format!(
-                    "{},{},{},\"{}\",{},{}\n",
-                    event.id,
-                    event.aggregate_id,
-                    event.event_type,
-                    escaped_data,
-                    event.version,
-                    event.timestamp.format("%Y-%m-%d %H:%M:%S%.6f UTC")
-                )
-                .as_bytes(),
-            );
-
-            // Flush buffer when it gets large
-            if buffer.len() >= 1024 * 1024 {
-                copy_writer
-                    .send(buffer.as_slice())
-                    .await
-                    .context("Failed to send data to COPY")?;
-                buffer.clear();
-            }
-        }
-
-        // Send remaining data
-        if !buffer.is_empty() {
-            copy_writer
-                .send(buffer.as_slice())
-                .await
-                .context("Failed to send data to COPY")?;
-        }
-
-        copy_writer
-            .finish()
-            .await
-            .context("Failed to finish COPY operation")?;
-
-        Ok(())
-    }
-
-    // Optimized bulk insert for smaller batches
     async fn bulk_insert_events_optimized(
         tx: &mut Transaction<'_, Postgres>,
-        event_data: Vec<EventData>,
+        events: Vec<Event>,
     ) -> Result<()> {
-        if event_data.is_empty() {
+        if events.is_empty() {
             return Ok(());
         }
 
-        // Prepare arrays for bulk insert
-        let ids: Vec<Uuid> = event_data.iter().map(|e| e.id).collect();
-        let aggregate_ids: Vec<Uuid> = event_data.iter().map(|e| e.aggregate_id).collect();
-        let event_types: Vec<String> = event_data.iter().map(|e| e.event_type.clone()).collect();
-        let event_jsons: Vec<Value> = event_data.iter().map(|e| e.event_data.clone()).collect();
-        let versions: Vec<i64> = event_data.iter().map(|e| e.version).collect();
-        let timestamps: Vec<DateTime<Utc>> = event_data.iter().map(|e| e.timestamp).collect();
+        let mut query = String::from(
+            r#"
+            INSERT INTO events (id, aggregate_id, event_type, event_data, version, timestamp, metadata)
+            VALUES
+            "#,
+        );
 
-        sqlx::query!(
-        r#"
-        INSERT INTO events (id, aggregate_id, event_type, event_data, version, timestamp)
-        SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::bigint[], $6::timestamptz[])
-        "#,
-        &ids,
-        &aggregate_ids,
-        &event_types,
-        &event_jsons as &[Value],
-        &versions,
-        &timestamps
-    )
-    .execute(&mut **tx)
-    .await
-    .context("Failed to insert events")?;
+        let mut values = Vec::new();
+        let mut params: Vec<(Uuid, Uuid, String, Value, i64, DateTime<Utc>, Value)> = Vec::new();
+        let mut param_index = 1;
+
+        for event in events {
+            values.push(format!(
+                "(${},${},${},${},${},${},${})",
+                param_index,
+                param_index + 1,
+                param_index + 2,
+                param_index + 3,
+                param_index + 4,
+                param_index + 5,
+                param_index + 6
+            ));
+
+            params.push((
+                event.id,
+                event.aggregate_id,
+                event.event_type,
+                event.event_data,
+                event.version,
+                event.timestamp,
+                serde_json::to_value(event.metadata)?,
+            ));
+
+            param_index += 7;
+        }
+
+        query.push_str(&values.join(","));
+
+        let mut query = sqlx::query(&query);
+        for (id, aggregate_id, event_type, event_data, version, timestamp, metadata) in params {
+            query = query
+                .bind(id)
+                .bind(aggregate_id)
+                .bind(event_type)
+                .bind(event_data)
+                .bind(version)
+                .bind(timestamp)
+                .bind(metadata);
+        }
+
+        query.execute(&mut **tx).await?;
 
         Ok(())
     }
@@ -707,97 +544,41 @@ impl EventStore {
         aggregate_id: Uuid,
         from_version: Option<i64>,
     ) -> Result<Vec<Event>> {
-        let config = RetryConfig::default();
-        let store = self.clone();
+        let start_time = Instant::now();
+        let mut conn = self.pool.acquire().await?;
 
-        self.with_retry(
-            move || {
-                let store = store.clone();
-                async move {
-                    // Check cache first
-                    let snapshot = {
-                        let cache = store.snapshot_cache.read().await;
-                        let cached = cache
-                            .get(&aggregate_id)
-                            .filter(|s| s.created_at.elapsed() < s.ttl)
-                            .cloned();
-
-                        if cached.is_some() {
-                            store.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            store.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-                        }
-
-                        cached
-                    };
-
-                    let (start_version, mut events) = if let Some(snapshot) = &snapshot {
-                        if let Some(from_ver) = from_version {
-                            if from_ver <= snapshot.version {
-                                (
-                                    Some(snapshot.version),
-                                    vec![store.create_snapshot_event(snapshot)],
-                                )
-                            } else {
-                                (from_version, vec![])
-                            }
-                        } else {
-                            (
-                                Some(snapshot.version),
-                                vec![store.create_snapshot_event(snapshot)],
-                            )
-                        }
-                    } else {
-                        (from_version, vec![])
-                    };
-
-                    // Fetch events with prepared statement
-                    let db_events = if let Some(version) = start_version {
-                        sqlx::query_as!(
-                            EventRow,
-                            r#"
-                            SELECT id, aggregate_id, event_type, event_data, version, timestamp
-                            FROM events
-                            WHERE aggregate_id = $1 AND version > $2
-                            ORDER BY version
-                            "#,
-                            aggregate_id,
-                            version
-                        )
-                        .fetch_all(&store.pool)
-                        .await
-                        .context("Failed to fetch events from database")?
-                    } else {
-                        sqlx::query_as!(
-                            EventRow,
-                            r#"
-                            SELECT id, aggregate_id, event_type, event_data, version, timestamp
-                            FROM events
-                            WHERE aggregate_id = $1
-                            ORDER BY version
-                            "#,
-                            aggregate_id
-                        )
-                        .fetch_all(&store.pool)
-                        .await
-                        .context("Failed to fetch events from database")?
-                    };
-
-                    events.extend(db_events.into_iter().map(|row| Event {
-                        id: row.id,
-                        aggregate_id: row.aggregate_id,
-                        event_type: row.event_type,
-                        event_data: row.event_data,
-                        version: row.version,
-                        timestamp: row.timestamp,
-                    }));
-
-                    Ok::<Vec<Event>, anyhow::Error>(events)
-                }
-            },
-            &config,
+        let events = sqlx::query!(
+            r#"
+            SELECT id, aggregate_id, event_type, event_data, version, timestamp
+            FROM events
+            WHERE aggregate_id = $1
+            AND version > $2
+            ORDER BY version ASC
+            "#,
+            aggregate_id,
+            from_version
         )
-        .await
+        .fetch_all(&mut *conn)
+        .await?;
+
+        let duration = start_time.elapsed();
+        self.metrics.connection_acquire_time.fetch_add(
+            duration.as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(events
+            .into_iter()
+            .map(|row| Event {
+                id: row.id,
+                aggregate_id: row.aggregate_id,
+                event_type: row.event_type,
+                event_data: row.event_data,
+                version: row.version,
+                timestamp: row.timestamp,
+                metadata: EventMetadata::default(),
+            })
+            .collect())
     }
 
     fn create_snapshot_event(&self, snapshot: &CachedSnapshot) -> Event {
@@ -808,6 +589,7 @@ impl EventStore {
             event_data: snapshot.data.clone(),
             version: snapshot.version,
             timestamp: Utc::now(),
+            metadata: EventMetadata::default(),
         }
     }
 
@@ -1201,7 +983,82 @@ impl EventStore {
 
         Ok(accounts)
     }
+
+    pub async fn register_validator(
+        &self,
+        event_type: String,
+        validator: Box<dyn EventValidator + Send + Sync>,
+    ) {
+        self.event_validators.insert(event_type, validator);
+    }
+
+    pub async fn register_handler(
+        &self,
+        event_type: String,
+        handler: Box<dyn EventHandler + Send + Sync>,
+    ) {
+        self.event_handlers
+            .entry(event_type)
+            .or_insert_with(Vec::new)
+            .push(handler);
+    }
+
+    async fn validate_event(event: &Event) -> EventValidationResult {
+        let mut result = EventValidationResult {
+            is_valid: true,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        // Basic validation
+        if event.event_type.is_empty() {
+            result.is_valid = false;
+            result.errors.push("Event type cannot be empty".to_string());
+        }
+
+        if event.version <= 0 {
+            result.is_valid = false;
+            result.errors.push("Event version must be positive".to_string());
+        }
+
+        result
+    }
+
+    async fn handle_event(
+        event: &Event,
+        event_handlers: &DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>,
+    ) -> Result<()> {
+        if let Some(handlers) = event_handlers.get(&event.event_type) {
+            for handler in handlers.iter() {
+                handler.handle(event).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn get_current_version(&self, aggregate_id: Uuid) -> Result<i64> {
+        let version = sqlx::query!(
+            r#"
+            SELECT COALESCE(MAX(version), 0) as version
+            FROM events
+            WHERE aggregate_id = $1
+            "#,
+            aggregate_id
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .version
+        .unwrap_or(0);
+
+        self.version_cache.insert(aggregate_id, version);
+        Ok(version)
+    }
+
+    pub async fn update_version(&self, aggregate_id: Uuid, version: i64) {
+        self.version_cache.insert(aggregate_id, version);
+    }
 }
+
 /// Health check response
 #[derive(Debug, serde::Serialize)]
 pub struct EventStoreHealth {
@@ -1214,6 +1071,7 @@ pub struct EventStoreHealth {
     pub batch_queue_metrics: String,
     pub health_check_duration: Duration,
 }
+
 // Helper structs
 #[derive(Debug)]
 struct EventData {
@@ -1233,6 +1091,7 @@ struct EventRow {
     version: i64,
     timestamp: DateTime<Utc>,
 }
+
 /// Enhanced configuration struct for EventStore
 #[derive(Debug, Clone)]
 pub struct EventStoreConfig {
@@ -1262,21 +1121,21 @@ impl Default for EventStoreConfig {
                 "postgresql://postgres:password@localhost:5432/banking_es".to_string()
             }),
             // Optimized connection pool settings
-            max_connections: 100, // Increased for better concurrency
-            min_connections: 20,  // Increased to maintain a healthy pool
-            acquire_timeout_secs: 30,
-            idle_timeout_secs: 600,
-            max_lifetime_secs: 1800,
+            max_connections: 20,  // Reduced from 100 to prevent connection overload
+            min_connections: 5,   // Reduced from 20 to maintain a smaller pool
+            acquire_timeout_secs: 5,  // Reduced from 30 to fail fast
+            idle_timeout_secs: 300,   // Reduced from 600 to recycle connections faster
+            max_lifetime_secs: 900,   // Reduced from 1800 to prevent stale connections
 
             // Optimized batching settings
-            batch_size: 5000,
-            batch_timeout_ms: 5,
-            max_batch_queue_size: 50000,
-            batch_processor_count: 8,
-            snapshot_threshold: 1000,
+            batch_size: 1000,         // Reduced from 5000 for better responsiveness
+            batch_timeout_ms: 10,     // Increased from 5 for better batching
+            max_batch_queue_size: 10000, // Reduced from 50000 to prevent memory issues
+            batch_processor_count: 4,  // Reduced from 8 to prevent CPU overload
+            snapshot_threshold: 500,   // Reduced from 1000 for more frequent snapshots
             snapshot_interval_secs: 300,
             snapshot_cache_ttl_secs: 3600,
-            max_snapshots_per_run: 500,
+            max_snapshots_per_run: 100, // Reduced from 500 to prevent overload
         }
     }
 }
@@ -1302,5 +1161,37 @@ impl EventStoreConfig {
             snapshot_cache_ttl_secs: 300,
             max_snapshots_per_run: 10,
         })
+    }
+}
+
+impl Default for EventMetadata {
+    fn default() -> Self {
+        Self {
+            correlation_id: None,
+            causation_id: None,
+            user_id: None,
+            source: "system".to_string(),
+            schema_version: "1.0".to_string(),
+            tags: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub initial_delay: std::time::Duration,
+    pub max_delay: std::time::Duration,
+    pub backoff_factor: f64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            initial_delay: std::time::Duration::from_millis(100),
+            max_delay: std::time::Duration::from_secs(5),
+            backoff_factor: 2.0,
+        }
     }
 }

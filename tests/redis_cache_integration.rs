@@ -1,10 +1,13 @@
 use ::banking_es::domain::{Account, AccountEvent};
+use ::banking_es::infrastructure::cache_service::CacheService;
+use ::banking_es::infrastructure::middleware::RequestMiddleware;
 use ::banking_es::{
     AccountError, AccountRepository, AccountRepositoryTrait, AccountService, EventStore,
     EventStoreConfig, ProjectionStore,
 };
 use banking_es::KafkaConfig;
 use dotenv;
+use redis;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::env;
@@ -38,8 +41,15 @@ async fn setup_test_environment() -> Result<TestContext, Box<dyn std::error::Err
         event_store,
         KafkaConfig::default(),
         projection_store.clone(),
+        redis::Client::open("redis://localhost:6379").expect("Failed to connect to Redis"),
     )?);
-    let account_service = AccountService::new(account_repository.clone(), projection_store);
+    let account_service = AccountService::new(
+        account_repository.clone(),
+        projection_store,
+        CacheService::default(),
+        Arc::new(RequestMiddleware::default()),
+        100,
+    );
 
     Ok(TestContext {
         account_service,

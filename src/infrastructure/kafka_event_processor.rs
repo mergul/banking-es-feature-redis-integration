@@ -10,6 +10,7 @@ use crate::infrastructure::kafka_recovery::KafkaRecovery;
 use crate::infrastructure::kafka_recovery_strategies::{RecoveryStrategies, RecoveryStrategy};
 use crate::infrastructure::kafka_tracing::KafkaTracing;
 use crate::infrastructure::projections::ProjectionStore;
+use crate::infrastructure::cache_service::CacheService;
 use anyhow::{Context, Result};
 use rdkafka::error::KafkaError;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ pub struct KafkaEventProcessor {
     metrics: Arc<KafkaMetrics>,
     monitoring: MonitoringDashboard,
     tracing: KafkaTracing,
+    cache_service: CacheService,
     processing_state: Arc<RwLock<ProcessingState>>,
 }
 
@@ -46,6 +48,7 @@ impl KafkaEventProcessor {
         config: KafkaConfig,
         event_store: EventStore,
         projections: ProjectionStore,
+        cache_service: CacheService,
     ) -> Result<Self> {
         let metrics = Arc::new(KafkaMetrics::default());
         let producer = KafkaProducer::new(config.clone())?;
@@ -89,6 +92,7 @@ impl KafkaEventProcessor {
             metrics,
             monitoring,
             tracing,
+            cache_service,
             processing_state: Arc::new(RwLock::new(ProcessingState::default())),
         })
     }
@@ -203,6 +207,18 @@ impl KafkaEventProcessor {
             .save_events(batch.account_id, batch.events.clone(), batch.version)
             .await?;
 
+        // Convert events to versioned format
+        let versioned_events: Vec<(i64, AccountEvent)> = batch.events
+            .iter()
+            .enumerate()
+            .map(|(i, event)| (batch.version + i as i64, event.clone()))
+            .collect();
+
+        // Cache the events
+        self.cache_service
+            .set_account_events(batch.account_id, &versioned_events, None)
+            .await?;
+
         // Get account from projections
         let account = self.projections.get_account(batch.account_id).await?;
         if let Some(account_proj) = account {
@@ -214,6 +230,11 @@ impl KafkaEventProcessor {
                 is_active: account_proj.is_active,
                 version: batch.version,
             };
+
+            // Cache the account
+            self.cache_service
+                .set_account(&account, Some(Duration::from_secs(3600)))
+                .await?;
 
             self.producer
                 .send_cache_update(batch.account_id, &account)
