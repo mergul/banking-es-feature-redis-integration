@@ -179,9 +179,13 @@ mod tests {
     #[tokio::test]
     async fn test_get_by_id_not_found() {
         // Create test database pools
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        });
+
         let pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect("postgres://postgres:postgres@localhost:5432/banking_test")
+            .connect(&database_url)
             .await
             .expect("Failed to create test database pool");
 
@@ -204,6 +208,9 @@ impl Default for AccountRepository {
         let event_store = EventStore::default();
         let kafka_config = KafkaConfig::default();
         let projection_store = ProjectionStore::default();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        });
         let redis_client =
             redis::Client::open("redis://localhost:6379").expect("Failed to connect to Redis");
         AccountRepository::new(event_store, kafka_config, projection_store, redis_client)

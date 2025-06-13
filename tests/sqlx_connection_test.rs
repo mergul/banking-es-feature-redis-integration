@@ -2,8 +2,9 @@ use sqlx::{PgPool, Row};
 
 #[tokio::test]
 async fn test_sqlx_postgres_connection() {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:password@localhost:5432/banking_es".to_string());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+    });
 
     let pool = PgPool::connect(&database_url)
         .await

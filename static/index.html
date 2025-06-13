@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Banking API Test Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .section {
+            margin-bottom: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        .form-group {
+            margin-bottom: 10px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        input {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+        }
+
+        button {
+            padding: 8px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        #response {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Banking API Test Client</h1>
+
+    <div class="section">
+        <h2>Authentication</h2>
+        <div class="form-group">
+            <label for="username">Username:</label>
+            <input type="text" id="username" value="test_user">
+        </div>
+        <div class="form-group">
+            <label for="password">Password:</label>
+            <input type="password" id="password" value="test_password">
+        </div>
+        <button onclick="login()">Login</button>
+        <button onclick="logout()">Logout</button>
+        <div id="auth-response"></div>
+    </div>
+
+    <div class="section">
+        <h2>Account Management</h2>
+        <div class="form-group">
+            <label for="ownerName">Owner Name:</label>
+            <input type="text" id="ownerName" value="John Doe">
+        </div>
+        <div class="form-group">
+            <label for="initialBalance">Initial Balance:</label>
+            <input type="number" id="initialBalance" value="1000">
+        </div>
+        <button onclick="createAccount()">Create Account</button>
+        <div id="account-response"></div>
+    </div>
+
+    <div class="section">
+        <h2>Transactions</h2>
+        <div class="form-group">
+            <label for="accountId">Account ID:</label>
+            <input type="text" id="accountId">
+        </div>
+        <div class="form-group">
+            <label for="amount">Amount:</label>
+            <input type="number" id="amount" value="100">
+        </div>
+        <button onclick="deposit()">Deposit</button>
+        <button onclick="withdraw()">Withdraw</button>
+        <div id="transaction-response"></div>
+    </div>
+
+    <div class="section">
+        <h2>Account Information</h2>
+        <button onclick="getAccount()">Get Account</button>
+        <button onclick="getAllAccounts()">Get All Accounts</button>
+        <div id="info-response"></div>
+    </div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8080';
+        let authToken = localStorage.getItem('authToken');
+
+        async function makeRequest(endpoint, method = 'GET', body = null) {
+            const headers = {
+                'Content-Type': 'application/json'
+            };
+
+            if (authToken) {
+                headers['Authorization'] = `Bearer ${authToken}`;
+            }
+
+            const options = {
+                method,
+                headers,
+                body: body ? JSON.stringify(body) : null
+            };
+
+            try {
+                const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
+                const data = await response.json();
+                return { success: response.ok, data };
+            } catch (error) {
+                return { success: false, error: error.message };
+            }
+        }
+
+        async function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            const result = await makeRequest('/auth/login', 'POST', {
+                username,
+                password
+            });
+
+            if (result.success) {
+                authToken = result.data.token;
+                localStorage.setItem('authToken', authToken);
+                document.getElementById('auth-response').textContent = 'Login successful!';
+            } else {
+                document.getElementById('auth-response').textContent = `Login failed: ${result.error}`;
+            }
+        }
+
+        async function logout() {
+            const result = await makeRequest('/auth/logout', 'POST', {
+                token: authToken
+            });
+
+            if (result.success) {
+                authToken = null;
+                localStorage.removeItem('authToken');
+                document.getElementById('auth-response').textContent = 'Logout successful!';
+            } else {
+                document.getElementById('auth-response').textContent = `Logout failed: ${result.error}`;
+            }
+        }
+
+        async function createAccount() {
+            const ownerName = document.getElementById('ownerName').value;
+            const initialBalance = parseFloat(document.getElementById('initialBalance').value);
+
+            const result = await makeRequest('/accounts', 'POST', {
+                owner_name: ownerName,
+                initial_balance: initialBalance
+            });
+
+            if (result.success) {
+                document.getElementById('accountId').value = result.data.account_id;
+                document.getElementById('account-response').textContent =
+                    `Account created successfully! ID: ${result.data.account_id}`;
+            } else {
+                document.getElementById('account-response').textContent =
+                    `Account creation failed: ${result.error}`;
+            }
+        }
+
+        async function deposit() {
+            const accountId = document.getElementById('accountId').value;
+            const amount = parseFloat(document.getElementById('amount').value);
+
+            const result = await makeRequest(`/accounts/${accountId}/deposit`, 'PUT', {
+                amount
+            });
+
+            if (result.success) {
+                document.getElementById('transaction-response').textContent = 'Deposit successful!';
+            } else {
+                document.getElementById('transaction-response').textContent =
+                    `Deposit failed: ${result.error}`;
+            }
+        }
+
+        async function withdraw() {
+            const accountId = document.getElementById('accountId').value;
+            const amount = parseFloat(document.getElementById('amount').value);
+
+            const result = await makeRequest(`/accounts/${accountId}/withdraw`, 'PUT', {
+                amount
+            });
+
+            if (result.success) {
+                document.getElementById('transaction-response').textContent = 'Withdrawal successful!';
+            } else {
+                document.getElementById('transaction-response').textContent =
+                    `Withdrawal failed: ${result.error}`;
+            }
+        }
+
+        async function getAccount() {
+            const accountId = document.getElementById('accountId').value;
+            const result = await makeRequest(`/accounts/${accountId}`);
+
+            if (result.success) {
+                document.getElementById('info-response').textContent =
+                    JSON.stringify(result.data, null, 2);
+            } else {
+                document.getElementById('info-response').textContent =
+                    `Failed to get account: ${result.error}`;
+            }
+        }
+
+        async function getAllAccounts() {
+            const result = await makeRequest('/accounts');
+
+            if (result.success) {
+                document.getElementById('info-response').textContent =
+                    JSON.stringify(result.data, null, 2);
+            } else {
+                document.getElementById('info-response').textContent =
+                    `Failed to get accounts: ${result.error}`;
+            }
+        }
+    </script>
+</body>
+
+</html>

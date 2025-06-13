@@ -22,11 +22,13 @@ chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1.32", features = ["serde"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "macros", "rust_decimal", "chrono", "uuid", "json", "sqlite"] }
 rdkafka = { version = "0.37.0" }
-opentelemetry = { version = "0.20", features = ["rt-tokio"] }
+opentelemetry = { version = "0.21.0" }
+opentelemetry_sdk = { version = "0.21.0" }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 validator = { version = "0.16", features = ["derive"] }
 dotenv = "0.15"
+rand = "0.8.5"
 
 # Serialization
 
@@ -51,12 +53,13 @@ mimalloc = { version = "0.1", optional = true }
 jemalloc = { version = "0.3", optional = true }
 mockall = { version = "0.13.1", features = ["nightly"] }
 futures = "0.3.31"
-opentelemetry-jaeger = { version = "0.19.0", features = ["rt-tokio"] }
-tracing-opentelemetry = "0.20.0"
+opentelemetry-jaeger = { version = "0.21.0" }
+tracing-opentelemetry = { version = "0.21.0" }
 axum-extra = { version = "0.10.1", features = ["typed-header"] }
 
 [features]
 default = []
+tokio_allow_from_blocking_fd = []
 mimalloc = ["dep:mimalloc"]
 jemalloc = ["dep:jemalloc"]
 
@@ -76,3 +79,5 @@ debug = true
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 mockall = "0.13.1"
+banking-es = { path = "." }
+once_cell = "1.19"

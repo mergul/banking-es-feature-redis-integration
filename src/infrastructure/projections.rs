@@ -115,6 +115,14 @@ impl ProjectionStore {
         Self::from_pool_with_config(pool, ProjectionConfig::default())
     }
 
+    pub fn new_test(pool: PgPool) -> Self {
+        let mut config = ProjectionConfig::default();
+        config.batch_size = 1; // Process immediately in test mode
+        config.batch_timeout_ms = 0; // No batching in test mode
+        let store = Self::from_pool_with_config(pool, config);
+        store
+    }
+
     pub fn from_pool_with_config(pool: PgPool, config: ProjectionConfig) -> Self {
         let account_cache = Arc::new(RwLock::new(HashMap::new()));
         let transaction_cache = Arc::new(RwLock::new(HashMap::new()));
@@ -132,14 +140,16 @@ impl ProjectionStore {
             config: config.clone(),
         };
 
-        // Start background update processor
-        tokio::spawn(Self::update_processor(
-            pool,
-            update_receiver,
-            account_cache,
-            transaction_cache,
-            config,
-        ));
+        // Only start background processor if not in test mode
+        if std::env::var("RUST_TEST").is_err() {
+            tokio::spawn(Self::update_processor(
+                pool,
+                update_receiver,
+                account_cache,
+                transaction_cache,
+                config,
+            ));
+        }
 
         store
     }
@@ -233,7 +243,7 @@ impl ProjectionStore {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Cache miss - fetch from database with prepared statement
-        let account = sqlx::query_as!(
+        let account: Option<AccountProjection> = sqlx::query_as!(
             AccountProjection,
             r#"
             SELECT id, owner_name, balance, is_active, created_at, updated_at
@@ -603,9 +613,12 @@ impl ProjectionStore {
 // Add Default implementation for ProjectionStore
 impl Default for ProjectionStore {
     fn default() -> Self {
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        });
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_lazy("postgres://postgres:postgres@localhost:5432/banking_test")
+            .connect_lazy(&database_url)
             .expect("Failed to connect to database");
         ProjectionStore::new(pool)
     }

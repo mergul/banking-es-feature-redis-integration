@@ -52,30 +52,16 @@ pub struct CacheMetrics {
     pub shard_misses: std::sync::atomic::AtomicU64,
 }
 
-impl Clone for CacheMetrics {
-    fn clone(&self) -> Self {
+impl Default for CacheMetrics {
+    fn default() -> Self {
         Self {
-            hits: std::sync::atomic::AtomicU64::new(
-                self.hits.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            misses: std::sync::atomic::AtomicU64::new(
-                self.misses.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            evictions: std::sync::atomic::AtomicU64::new(
-                self.evictions.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            errors: std::sync::atomic::AtomicU64::new(
-                self.errors.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            warmups: std::sync::atomic::AtomicU64::new(
-                self.warmups.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            shard_hits: std::sync::atomic::AtomicU64::new(
-                self.shard_hits.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            shard_misses: std::sync::atomic::AtomicU64::new(
-                self.shard_misses.load(std::sync::atomic::Ordering::Relaxed),
-            ),
+            hits: std::sync::atomic::AtomicU64::new(0),
+            misses: std::sync::atomic::AtomicU64::new(0),
+            evictions: std::sync::atomic::AtomicU64::new(0),
+            errors: std::sync::atomic::AtomicU64::new(0),
+            warmups: std::sync::atomic::AtomicU64::new(0),
+            shard_hits: std::sync::atomic::AtomicU64::new(0),
+            shard_misses: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -87,6 +73,12 @@ pub struct CacheEntry<T> {
     pub last_accessed: Instant,
     pub access_count: u64,
     pub ttl: Duration,
+}
+
+impl<T> CacheEntry<T> {
+    fn is_expired(&self) -> bool {
+        self.last_accessed.elapsed() > self.ttl
+    }
 }
 
 #[derive(Clone)]
@@ -108,24 +100,88 @@ struct WarmingState {
 
 impl CacheService {
     pub fn new(redis_client: Arc<dyn RedisClientTrait>, config: CacheConfig) -> Self {
-        let shards = (0..config.shard_count).map(|_| DashMap::new()).collect();
+        let shards = Arc::new(
+            (0..config.shard_count)
+                .map(|_| DashMap::new())
+                .collect::<Vec<_>>(),
+        );
+        let event_cache = DashMap::new();
+        let warming_state = Arc::new(RwLock::new(WarmingState {
+            is_warming: false,
+            last_warmup: None,
+            accounts_to_warm: Vec::new(),
+        }));
+        let metrics = Arc::new(CacheMetrics::default());
 
-        Self {
+        let service = Self {
             redis_client,
             config,
-            metrics: Arc::new(CacheMetrics {
-                hits: std::sync::atomic::AtomicU64::new(0),
-                misses: std::sync::atomic::AtomicU64::new(0),
-                evictions: std::sync::atomic::AtomicU64::new(0),
-                errors: std::sync::atomic::AtomicU64::new(0),
-                warmups: std::sync::atomic::AtomicU64::new(0),
-                shard_hits: std::sync::atomic::AtomicU64::new(0),
-                shard_misses: std::sync::atomic::AtomicU64::new(0),
-            }),
-            shards: Arc::new(shards),
-            event_cache: DashMap::new(),
-            warming_state: Arc::new(RwLock::new(WarmingState::default())),
+            metrics,
+            shards,
+            event_cache,
+            warming_state,
+        };
+
+        // Only start background tasks if not in test mode
+        if std::env::var("RUST_TEST").is_err() {
+            // Start cache cleanup task
+            let shards_clone = service.shards.clone();
+            let config_clone = service.config.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(300)); // Every 5 minutes
+                loop {
+                    interval.tick().await;
+                    for shard in shards_clone.iter() {
+                        shard.retain(|_, entry| !entry.is_expired());
+                    }
+                }
+            });
+
+            // Start metrics reporter
+            let metrics_clone = service.metrics.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let hits = metrics_clone
+                        .hits
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let misses = metrics_clone
+                        .misses
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let evictions = metrics_clone
+                        .evictions
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let errors = metrics_clone
+                        .errors
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let warmups = metrics_clone
+                        .warmups
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let hit_rate = if hits + misses > 0 {
+                        (hits as f64 / (hits + misses) as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    info!(
+                        "Cache Metrics - Hit Rate: {:.1}%, Evictions: {}, Errors: {}, Warmups: {}",
+                        hit_rate, evictions, errors, warmups
+                    );
+                }
+            });
         }
+
+        service
+    }
+
+    pub fn new_test(redis_client: Arc<dyn RedisClientTrait>) -> Self {
+        let mut config = CacheConfig::default();
+        config.default_ttl = Duration::from_secs(60); // Shorter TTL for tests
+        config.max_size = 1000;
+        config.shard_count = 4;
+        config.warmup_batch_size = 50;
+        config.warmup_interval = Duration::from_secs(60);
+        Self::new(redis_client, config)
     }
 
     pub async fn initialize(&self) -> Result<()> {
@@ -394,7 +450,7 @@ impl CacheService {
     }
 
     fn is_expired(&self, entry: &CacheEntry<Account>) -> bool {
-        entry.created_at.elapsed() >= entry.ttl
+        entry.last_accessed.elapsed() >= entry.ttl
     }
 
     fn update_in_memory_cache(&self, account_id: Uuid, account: Account) {
@@ -444,8 +500,8 @@ impl CacheService {
         }
     }
 
-    pub fn get_metrics(&self) -> CacheMetrics {
-        self.metrics.as_ref().clone()
+    pub fn get_metrics(&self) -> &CacheMetrics {
+        self.metrics.as_ref()
     }
 }
 

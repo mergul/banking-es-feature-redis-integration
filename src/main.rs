@@ -33,6 +33,10 @@ use crate::application::AccountService;
 use crate::infrastructure::middleware::RequestMiddleware;
 use crate::infrastructure::{AccountRepository, EventStoreConfig};
 
+use opentelemetry::sdk::export::trace::SpanExporter;
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_stdout::SpanExporter as StdoutExporter;
+
 #[derive(Debug)]
 struct AppConfig {
     database_pool_size: u32,
@@ -59,8 +63,30 @@ impl Default for AppConfig {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
+
+    // Initialize tracing with OpenTelemetry
+    let tracer = opentelemetry_jaeger::new_agent_pipeline()
+        .with_service_name("banking-es")
+        .with_endpoint("localhost:6831")
+        .with_trace_config(
+            opentelemetry::sdk::trace::config()
+                .with_sampler(opentelemetry::sdk::trace::Sampler::AlwaysOn)
+                .with_id_generator(opentelemetry::sdk::trace::RandomIdGenerator::default())
+                .with_resource(opentelemetry::sdk::Resource::new(vec![
+                    opentelemetry::KeyValue::new("service.name", "banking-es"),
+                    opentelemetry::KeyValue::new("deployment.environment", "production"),
+                ])),
+        )
+        .install_batch(opentelemetry::runtime::Tokio)?;
+
+    let opentelemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,banking_es=debug"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(opentelemetry_layer)
+        .init();
 
     // Initialize Redis client
     let redis_client = Arc::new(redis::Client::open("redis://localhost:6379")?);

@@ -1128,7 +1128,7 @@ impl Default for EventStoreConfig {
     fn default() -> Self {
         Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://postgres:password@localhost:5432/banking_es".to_string()
+                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
             }),
             // Optimized connection pool settings
             max_connections: 20, // Reduced from 100 to prevent connection overload
@@ -1155,8 +1155,7 @@ impl EventStoreConfig {
     /// This uses an in-memory SQLite database URL and minimal settings.
     pub fn default_in_memory_for_tests() -> Result<Self, anyhow::Error> {
         Ok(Self {
-            database_url: "postgresql://postgres:password@localhost:5432/banking_es_test"
-                .to_string(),
+            database_url: "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string(),
             max_connections: 5,
             min_connections: 1,
             acquire_timeout_secs: 5,
@@ -1210,7 +1209,7 @@ impl Default for EventStore {
     fn default() -> Self {
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_lazy("postgres://postgres:postgres@localhost:5432/banking_test")
+            .connect_lazy("postgresql://postgres:Francisco1@localhost:5432/banking_es")
             .expect("Failed to connect to database");
         EventStore::new(pool)
     }
