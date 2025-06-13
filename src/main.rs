@@ -35,30 +35,8 @@ use crate::infrastructure::{AccountRepository, EventStoreConfig};
 
 use opentelemetry::sdk::export::trace::SpanExporter;
 use opentelemetry::trace::TracerProvider;
-use opentelemetry_stdout::SpanExporter as StdoutExporter;
 
-#[derive(Debug)]
-struct AppConfig {
-    database_pool_size: u32,
-    max_concurrent_operations: usize,
-    max_requests_per_second: usize,
-    batch_flush_interval_ms: u64,
-    cache_size: usize,
-    port: u16,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            database_pool_size: 10,
-            max_concurrent_operations: 100,
-            max_requests_per_second: 1000,
-            batch_flush_interval_ms: 1000,
-            cache_size: 1000,
-            port: 8080,
-        }
-    }
-}
+use infrastructure::config::AppConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     opentelemetry::KeyValue::new("deployment.environment", "production"),
                 ])),
         )
-        .install_batch(opentelemetry::runtime::Tokio)?;
+        .install_batch(opentelemetry_sdk::runtime::Tokio)?;
 
     let opentelemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -86,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(env_filter)
         .with(opentelemetry_layer)
+        .with(tracing_subscriber::fmt::layer())
         .init();
 
     // Initialize Redis client
@@ -154,7 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = web::routes::create_router(service, auth_service);
 
     // Start server
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let config = AppConfig::default();
+    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
     info!("Starting server on {}", addr);
 
     let listener = TcpListener::bind(addr).await?;
