@@ -20,14 +20,13 @@ use uuid::Uuid;
 
 // Service metrics
 #[derive(Debug, Default)]
-struct ServiceMetrics {
-    command_processing_time: std::sync::atomic::AtomicU64,
-    commands_processed: std::sync::atomic::AtomicU64,
-    commands_failed: std::sync::atomic::AtomicU64,
-    projection_updates: std::sync::atomic::AtomicU64,
-    projection_errors: std::sync::atomic::AtomicU64,
-    cache_hits: std::sync::atomic::AtomicU64,
-    cache_misses: std::sync::atomic::AtomicU64,
+pub struct ServiceMetrics {
+    pub commands_processed: std::sync::atomic::AtomicU64,
+    pub commands_failed: std::sync::atomic::AtomicU64,
+    pub projection_updates: std::sync::atomic::AtomicU64,
+    pub projection_errors: std::sync::atomic::AtomicU64,
+    pub cache_hits: std::sync::atomic::AtomicU64,
+    pub cache_misses: std::sync::atomic::AtomicU64,
 }
 
 pub struct AccountService {
@@ -162,10 +161,6 @@ impl AccountService {
         self.metrics
             .commands_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.metrics.command_processing_time.fetch_add(
-            start_time.elapsed().as_micros() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
 
         Ok(account_id)
     }
@@ -224,10 +219,6 @@ impl AccountService {
         self.metrics
             .commands_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.metrics.command_processing_time.fetch_add(
-            start_time.elapsed().as_micros() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
 
         Ok(())
     }
@@ -286,10 +277,6 @@ impl AccountService {
         self.metrics
             .commands_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.metrics.command_processing_time.fetch_add(
-            start_time.elapsed().as_micros() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
 
         Ok(())
     }
@@ -427,7 +414,17 @@ impl AccountService {
     }
 
     pub async fn is_duplicate_command(&self, command_id: Uuid) -> bool {
-        self.command_cache.read().await.contains_key(&command_id)
+        let mut cache = self.command_cache.write().await;
+        if cache.contains_key(&command_id) {
+            true
+        } else {
+            cache.insert(command_id, Instant::now());
+            false
+        }
+    }
+
+    pub fn get_metrics(&self) -> &ServiceMetrics {
+        &self.metrics
     }
 }
 
@@ -543,17 +540,8 @@ mod tests {
     fn account_service_with_mock_repo(
         mock_repo: Arc<dyn AccountRepositoryTrait + 'static>,
     ) -> AccountService {
-        let ps_pool = tokio::runtime::Runtime::new().unwrap().block_on(async {
-            sqlx::PgPool::connect("postgres://postgres:postgres@localhost:5432/banking_test")
-                .await
-                .unwrap()
-        });
-        let projection_store = ProjectionStore::new(ps_pool);
-        let cache_service = CacheService::new(
-            RealRedisClient::new(redis::Client::open("redis://127.0.0.1/").unwrap(), None),
-            Default::default(),
-        );
-
+        let projection_store = ProjectionStore::default();
+        let cache_service = CacheService::default();
         AccountService::new(
             mock_repo,
             projection_store,

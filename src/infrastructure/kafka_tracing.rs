@@ -1,8 +1,8 @@
 use crate::domain::{Account, AccountEvent};
 use crate::infrastructure::kafka_metrics::KafkaMetrics;
-use opentelemetry::sdk::trace::{self, IdGenerator, Sampler};
-use opentelemetry::sdk::Resource;
 use opentelemetry::KeyValue;
+use opentelemetry_sdk::trace::{self, IdGenerator, RandomIdGenerator, Sampler};
+use opentelemetry_sdk::Resource;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn, Level};
@@ -28,18 +28,18 @@ impl KafkaTracing {
             .with_service_name("banking-es-kafka")
             .with_endpoint("localhost:6831")
             .with_trace_config(
-                trace::config()
-                    .with_sampler(Sampler::AlwaysOn)
-                    .with_id_generator(opentelemetry::sdk::trace::RandomIdGenerator::default())
-                    .with_resource(Resource::new(vec![
-                        KeyValue::new("service.name", "banking-es-kafka"),
-                        KeyValue::new("deployment.environment", "production"),
+                opentelemetry_sdk::trace::config()
+                    .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+                    .with_id_generator(opentelemetry_sdk::trace::RandomIdGenerator::default())
+                    .with_resource(opentelemetry_sdk::Resource::new(vec![
+                        opentelemetry::KeyValue::new("service.name", "banking-es-kafka"),
+                        opentelemetry::KeyValue::new("deployment.environment", "production"),
                     ])),
             )
-            .install_batch(opentelemetry::runtime::Tokio)?;
+            .install_batch(opentelemetry_sdk::runtime::Tokio)?;
 
         // Create OpenTelemetry layer
-        let opentelemetry_layer = OpenTelemetryLayer::new(tracer);
+        let opentelemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
         // Configure logging
         let env_filter = EnvFilter::try_from_default_env()

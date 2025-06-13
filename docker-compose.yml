@@ -1,11 +1,11 @@
-version: '3.8'
+version: "3.8"
 
 services:
   postgres:
     image: postgres:15
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      POSTGRES_PASSWORD: Francisco1
       POSTGRES_DB: banking_es
     ports:
       - "5432:5432"
@@ -22,7 +22,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/banking_es
+      DATABASE_URL: postgresql://postgres:Francisco1@postgres:5432/banking_es
       REDIS_URL: redis://redis:6379
       KAFKA_BOOTSTRAP_SERVERS: localhost:9092
       RUST_LOG: info

@@ -4,12 +4,15 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{postgres::{PgPoolOptions, PgValue}, PgPool, Postgres, Row, Transaction};
+use sqlx::{
+    postgres::{PgPoolOptions, PgValue},
+    PgPool, Postgres, Row, Transaction,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex, RwLock, Semaphore, OnceCell};
+use tokio::sync::{mpsc, Mutex, OnceCell, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -209,58 +212,54 @@ impl EventStore {
     /// Create EventStore with full configuration options
     pub async fn new_with_config(config: EventStoreConfig) -> Result<Self> {
         // Get or initialize the global connection pool
-        let pool = DB_POOL.get_or_try_init(|| async {
-            let pool = PgPoolOptions::new()
-                .max_connections(config.max_connections)
-                .min_connections(config.min_connections)
-                .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
-                .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-                .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-                // Enable prepared statement caching and optimize connection settings
-                .after_connect(|conn, _meta| {
-                    Box::pin(async move {
-                        // Optimize session settings for better performance
-                        sqlx::query("SET SESSION synchronous_commit = 'off'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION work_mem = '32MB'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION maintenance_work_mem = '128MB'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION effective_cache_size = '2GB'")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION random_page_cost = 1.1")
-                            .execute(&mut *conn)
-                            .await?;
-                        sqlx::query("SET SESSION effective_io_concurrency = 100")
-                            .execute(&mut *conn)
-                            .await?;
-                        // Set statement timeout to prevent long-running queries
-                        sqlx::query("SET SESSION statement_timeout = '5s'")
-                            .execute(&mut *conn)
-                            .await?;
-                        // Enable connection pooling
-                        sqlx::query("SET SESSION pool_mode = 'transaction'")
-                            .execute(&mut *conn)
-                            .await?;
-                        // Test connection
-                        sqlx::query("SELECT 1").execute(&mut *conn).await?;
-
-                        Ok(())
+        let pool = DB_POOL
+            .get_or_try_init(|| async {
+                let pool = PgPoolOptions::new()
+                    .max_connections(config.max_connections)
+                    .min_connections(config.min_connections)
+                    .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
+                    .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+                    .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
+                    // Enable prepared statement caching and optimize connection settings
+                    .after_connect(|conn, _meta| {
+                        Box::pin(async move {
+                            // Set only essential and well-supported PostgreSQL parameters
+                            sqlx::query("SET SESSION synchronous_commit = 'off'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION work_mem = '32MB'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION maintenance_work_mem = '128MB'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION effective_cache_size = '2GB'")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION random_page_cost = 1.1")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION effective_io_concurrency = 100")
+                                .execute(&mut *conn)
+                                .await?;
+                            sqlx::query("SET SESSION statement_timeout = '5s'")
+                                .execute(&mut *conn)
+                                .await?;
+                            Ok(())
+                        })
                     })
-                })
-                .connect(&config.database_url)
-                .await
-                .context("Failed to connect to database")?;
+                    .connect(&config.database_url)
+                    .await
+                    .context("Failed to connect to database")?;
 
-            Ok::<_, anyhow::Error>(Arc::new(pool))
-        })
-        .await?;
+                Ok::<_, anyhow::Error>(Arc::new(pool))
+            })
+            .await?;
 
-        Ok(Self::new_with_config_and_pool(pool.as_ref().clone(), config))
+        Ok(Self::new_with_config_and_pool(
+            pool.as_ref().clone(),
+            config,
+        ))
     }
 
     // Enhanced event saving with priority support
@@ -285,7 +284,9 @@ impl EventStore {
         };
 
         self.batch_sender.send(batched_event)?;
-        self.metrics.batch_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .batch_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         match response_rx.await {
             Ok(result) => {
@@ -296,7 +297,9 @@ impl EventStore {
                 );
                 result
             }
-            Err(_) => Err(anyhow::anyhow!("Failed to receive batch processing response")),
+            Err(_) => Err(anyhow::anyhow!(
+                "Failed to receive batch processing response"
+            )),
         }
     }
 
@@ -349,8 +352,13 @@ impl EventStore {
         events: Vec<AccountEvent>,
         expected_version: i64,
     ) -> Result<()> {
-        self.save_events_with_priority(aggregate_id, events, expected_version, EventPriority::Normal)
-            .await
+        self.save_events_with_priority(
+            aggregate_id,
+            events,
+            expected_version,
+            EventPriority::Normal,
+        )
+        .await
     }
 
     // Multi-threaded batch processor with priority queuing
@@ -372,13 +380,13 @@ impl EventStore {
             tokio::select! {
                 Some(event) = receiver.recv() => {
                     batch.push(event);
-                    
+
                     if batch.len() >= config.batch_size {
                         let batch_to_process = std::mem::replace(&mut batch, Vec::new());
                         let pool = pool.clone();
                         let metrics = metrics.clone();
                         let event_handlers = event_handlers.clone();
-                        
+
                         tokio::spawn(async move {
                             if let Err(e) = Self::flush_batch(&pool, batch_to_process, &metrics, &event_handlers).await {
                                 error!("Worker {} failed to flush batch: {}", worker_id, e);
@@ -393,7 +401,7 @@ impl EventStore {
                         let pool = pool.clone();
                         let metrics = metrics.clone();
                         let event_handlers = event_handlers.clone();
-                        
+
                         tokio::spawn(async move {
                             if let Err(e) = Self::flush_batch(&pool, batch_to_process, &metrics, &event_handlers).await {
                                 error!("Worker {} failed to flush batch: {}", worker_id, e);
@@ -1018,7 +1026,9 @@ impl EventStore {
 
         if event.version <= 0 {
             result.is_valid = false;
-            result.errors.push("Event version must be positive".to_string());
+            result
+                .errors
+                .push("Event version must be positive".to_string());
         }
 
         result
@@ -1118,21 +1128,21 @@ impl Default for EventStoreConfig {
     fn default() -> Self {
         Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://postgres:password@localhost:5432/banking_es".to_string()
+                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
             }),
             // Optimized connection pool settings
-            max_connections: 20,  // Reduced from 100 to prevent connection overload
-            min_connections: 5,   // Reduced from 20 to maintain a smaller pool
-            acquire_timeout_secs: 5,  // Reduced from 30 to fail fast
-            idle_timeout_secs: 300,   // Reduced from 600 to recycle connections faster
-            max_lifetime_secs: 900,   // Reduced from 1800 to prevent stale connections
+            max_connections: 20, // Reduced from 100 to prevent connection overload
+            min_connections: 5,  // Reduced from 20 to maintain a smaller pool
+            acquire_timeout_secs: 5, // Reduced from 30 to fail fast
+            idle_timeout_secs: 300, // Reduced from 600 to recycle connections faster
+            max_lifetime_secs: 900, // Reduced from 1800 to prevent stale connections
 
             // Optimized batching settings
-            batch_size: 1000,         // Reduced from 5000 for better responsiveness
-            batch_timeout_ms: 10,     // Increased from 5 for better batching
+            batch_size: 1000,     // Reduced from 5000 for better responsiveness
+            batch_timeout_ms: 10, // Increased from 5 for better batching
             max_batch_queue_size: 10000, // Reduced from 50000 to prevent memory issues
-            batch_processor_count: 4,  // Reduced from 8 to prevent CPU overload
-            snapshot_threshold: 500,   // Reduced from 1000 for more frequent snapshots
+            batch_processor_count: 4, // Reduced from 8 to prevent CPU overload
+            snapshot_threshold: 500, // Reduced from 1000 for more frequent snapshots
             snapshot_interval_secs: 300,
             snapshot_cache_ttl_secs: 3600,
             max_snapshots_per_run: 100, // Reduced from 500 to prevent overload
@@ -1145,8 +1155,7 @@ impl EventStoreConfig {
     /// This uses an in-memory SQLite database URL and minimal settings.
     pub fn default_in_memory_for_tests() -> Result<Self, anyhow::Error> {
         Ok(Self {
-            database_url: "postgresql://postgres:password@localhost:5432/banking_es_test"
-                .to_string(),
+            database_url: "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string(),
             max_connections: 5,
             min_connections: 1,
             acquire_timeout_secs: 5,
@@ -1193,5 +1202,15 @@ impl Default for RetryConfig {
             max_delay: std::time::Duration::from_secs(5),
             backoff_factor: 2.0,
         }
+    }
+}
+
+impl Default for EventStore {
+    fn default() -> Self {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy("postgresql://postgres:Francisco1@localhost:5432/banking_es")
+            .expect("Failed to connect to database");
+        EventStore::new(pool)
     }
 }

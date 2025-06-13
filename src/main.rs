@@ -33,6 +33,10 @@ use crate::application::AccountService;
 use crate::infrastructure::middleware::RequestMiddleware;
 use crate::infrastructure::{AccountRepository, EventStoreConfig};
 
+use opentelemetry::sdk::export::trace::SpanExporter;
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_stdout::SpanExporter as StdoutExporter;
+
 #[derive(Debug)]
 struct AppConfig {
     database_pool_size: u32,
@@ -59,8 +63,30 @@ impl Default for AppConfig {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
+
+    // Initialize tracing with OpenTelemetry
+    let tracer = opentelemetry_jaeger::new_agent_pipeline()
+        .with_service_name("banking-es")
+        .with_endpoint("localhost:6831")
+        .with_trace_config(
+            opentelemetry::sdk::trace::config()
+                .with_sampler(opentelemetry::sdk::trace::Sampler::AlwaysOn)
+                .with_id_generator(opentelemetry::sdk::trace::RandomIdGenerator::default())
+                .with_resource(opentelemetry::sdk::Resource::new(vec![
+                    opentelemetry::KeyValue::new("service.name", "banking-es"),
+                    opentelemetry::KeyValue::new("deployment.environment", "production"),
+                ])),
+        )
+        .install_batch(opentelemetry::runtime::Tokio)?;
+
+    let opentelemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,banking_es=debug"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(opentelemetry_layer)
+        .init();
 
     // Initialize Redis client
     let redis_client = Arc::new(redis::Client::open("redis://localhost:6379")?);
@@ -121,44 +147,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Initialize other components
-    let event_store = EventStore::new_with_config(EventStoreConfig::default()).await?;
-    let kafka_config = KafkaConfig::default();
-    let projections = ProjectionStore::new(
-        crate::infrastructure::event_store::DB_POOL
-            .get()
-            .unwrap()
-            .as_ref()
-            .clone(),
-    );
-    let cache_config = CacheConfig {
-        default_ttl: Duration::from_secs(3600),
-        max_size: 10000,
-        shard_count: 16,
-        warmup_batch_size: 100,
-        warmup_interval: Duration::from_secs(300),
-        eviction_policy: EvictionPolicy::LRU,
-    };
-    let cache_service = CacheService::new(redis_client_trait.clone(), cache_config);
-    let middleware = Arc::new(RequestMiddleware::default());
-    let repository = Arc::new(AccountRepository::new(
-        event_store.clone(),
-        kafka_config,
-        projections.clone(),
-        redis_client.as_ref().clone(),
-    )?);
-
     // Initialize services
     let (service, auth_service) = web::handlers::initialize_services().await?;
 
-    // Create router without state
-    let app = web::routes::create_router(
-        Arc::new(AccountService::default()),
-        Arc::new(AuthService::default()),
-    );
-
-    // Add state to the router
-    let app = app.with_state((service, auth_service));
+    // Create router
+    let app = web::routes::create_router(service, auth_service);
 
     // Start server
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
