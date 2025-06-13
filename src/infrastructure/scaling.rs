@@ -10,6 +10,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use redis;
 use redis::Client;
+use std::time::Instant;
+use super::config::AppConfig;
 
 pub type ShardId = u32;
 
@@ -73,6 +75,8 @@ pub struct ScalingManager {
     last_scale_time: Arc<RwLock<DateTime<Utc>>>,
     metrics: Arc<RwLock<InstanceMetrics>>,
     instance_id: Arc<RwLock<Option<String>>>,
+    port: u16,
+    start_time: Instant,
 }
 
 impl ScalingManager {
@@ -84,6 +88,8 @@ impl ScalingManager {
             last_scale_time: Arc::new(RwLock::new(Utc::now())),
             metrics: Arc::new(RwLock::new(InstanceMetrics::default())),
             instance_id: Arc::new(RwLock::new(None)),
+            port: AppConfig::default().port,
+            start_time: Instant::now(),
         }
     }
 

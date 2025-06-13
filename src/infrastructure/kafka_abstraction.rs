@@ -30,6 +30,7 @@ use tracing::{error, info};
 
 #[derive(Debug, Clone)]
 pub struct KafkaConfig {
+    pub enabled: bool,
     pub bootstrap_servers: String,
     pub group_id: String,
     pub topic_prefix: String,
@@ -43,6 +44,7 @@ pub struct KafkaConfig {
 impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
+            enabled: false, // Disabled by default for development
             bootstrap_servers: "localhost:9092".to_string(),
             group_id: "banking-es-group".to_string(),
             topic_prefix: "banking-es".to_string(),
@@ -57,19 +59,29 @@ impl Default for KafkaConfig {
 
 #[derive(Clone)]
 pub struct KafkaProducer {
-    producer: FutureProducer,
+    producer: Option<FutureProducer>,
     config: KafkaConfig,
 }
 
 impl KafkaProducer {
     pub fn new(config: KafkaConfig) -> Result<Self, KafkaError> {
+        if !config.enabled {
+            return Ok(Self {
+                producer: None,
+                config,
+            });
+        }
+
         let producer: FutureProducer = ClientConfig::new()
             .set("bootstrap.servers", &config.bootstrap_servers)
             .set("acks", config.producer_acks.to_string())
             .set("retries", config.producer_retries.to_string())
             .create()?;
 
-        Ok(Self { producer, config })
+        Ok(Self {
+            producer: Some(producer),
+            config,
+        })
     }
 
     pub async fn send_event_batch(
@@ -78,6 +90,10 @@ impl KafkaProducer {
         events: Vec<AccountEvent>,
         version: i64,
     ) -> Result<(), KafkaError> {
+        if !self.config.enabled || self.producer.is_none() {
+            return Ok(());
+        }
+
         let topic = format!("{}-events", self.config.topic_prefix);
         let key = account_id.to_string();
         let batch = EventBatch {
@@ -90,7 +106,7 @@ impl KafkaProducer {
         let payload = serde_json::to_vec(&batch)
             .map_err(|e| KafkaError::MessageProduction(RDKafkaErrorCode::InvalidMessage))?;
 
-        self.producer
+        self.producer.as_ref().unwrap()
             .send(
                 FutureRecord::to(&topic)
                     .key(&key)
@@ -108,13 +124,17 @@ impl KafkaProducer {
         account_id: Uuid,
         account: &Account,
     ) -> Result<(), KafkaError> {
+        if !self.config.enabled || self.producer.is_none() {
+            return Ok(());
+        }
+
         let topic = format!("{}-cache", self.config.topic_prefix);
         let key = account_id.to_string();
 
         let payload = serde_json::to_vec(account)
             .map_err(|e| KafkaError::MessageProduction(RDKafkaErrorCode::InvalidMessage))?;
 
-        self.producer
+        self.producer.as_ref().unwrap()
             .send(
                 FutureRecord::to(&topic)
                     .key(&key)
@@ -128,13 +148,17 @@ impl KafkaProducer {
     }
 
     pub async fn send_dlq_message(&self, message: &DeadLetterMessage) -> Result<(), KafkaError> {
+        if !self.config.enabled || self.producer.is_none() {
+            return Ok(());
+        }
+
         let topic = format!("{}-dlq", self.config.topic_prefix);
         let key = message.account_id.to_string();
 
         let payload = serde_json::to_vec(message)
             .map_err(|e| KafkaError::MessageProduction(RDKafkaErrorCode::InvalidMessage))?;
 
-        self.producer
+        self.producer.as_ref().unwrap()
             .send(
                 FutureRecord::to(&topic)
                     .key(&key)
@@ -148,6 +172,10 @@ impl KafkaProducer {
     }
 
     pub async fn poll_dlq_message(&self) -> Result<Option<DeadLetterMessage>, KafkaError> {
+        if !self.config.enabled || self.producer.is_none() {
+            return Ok(None);
+        }
+
         let topic = format!("{}-dlq", self.config.topic_prefix);
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", &self.config.bootstrap_servers)
@@ -180,12 +208,19 @@ impl KafkaProducer {
 
 #[derive(Clone)]
 pub struct KafkaConsumer {
-    consumer: Arc<StreamConsumer>,
+    consumer: Option<Arc<StreamConsumer>>,
     config: KafkaConfig,
 }
 
 impl KafkaConsumer {
     pub fn new(config: KafkaConfig) -> Result<Self, KafkaError> {
+        if !config.enabled {
+            return Ok(Self {
+                consumer: None,
+                config,
+            });
+        }
+
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", &config.bootstrap_servers)
             .set("group.id", &config.group_id)
@@ -198,55 +233,73 @@ impl KafkaConsumer {
                 "session.timeout.ms",
                 config.consumer_session_timeout_ms.to_string(),
             )
-            .set(
-                "fetch.message.max.bytes",
-                "1048576", // 1MB
-            )
-            .set("fetch.wait.max.ms", "100")
             .create()?;
 
         Ok(Self {
-            consumer: Arc::new(consumer),
+            consumer: Some(Arc::new(consumer)),
             config,
         })
     }
 
     pub async fn subscribe_to_events(&self) -> Result<(), KafkaError> {
+        if !self.config.enabled || self.consumer.is_none() {
+            return Ok(());
+        }
+
         let topic = format!("{}-events", self.config.topic_prefix);
-        self.consumer.subscribe(&[&topic])
+        self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
+        Ok(())
     }
 
     pub async fn subscribe_to_cache(&self) -> Result<(), KafkaError> {
+        if !self.config.enabled || self.consumer.is_none() {
+            return Ok(());
+        }
+
         let topic = format!("{}-cache", self.config.topic_prefix);
-        self.consumer.subscribe(&[&topic])
+        self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
+        Ok(())
     }
 
     pub async fn get_last_processed_version(&self, account_id: Uuid) -> Result<i64, KafkaError> {
-        let topic = format!("{}-events", self.config.topic_prefix);
-        let partition = account_id.as_u128() as i32;
-
-        let last_offset = self.consumer.fetch_watermarks(
-            &topic,
-            partition,
-            Timeout::After(Duration::from_secs(5)),
-        )?;
-
-        let mut tpl = TopicPartitionList::new();
-        tpl.add_partition(&topic, partition);
-
-        let position = self.consumer.position()?;
-        let partition = position
-            .find_partition(&topic, partition)
-            .ok_or_else(|| KafkaError::MessageConsumption(RDKafkaErrorCode::InvalidMessage))?;
-
-        match partition.offset() {
-            Offset::Offset(offset) => Ok(offset),
-            _ => Ok(0), // Default to 0 for invalid offsets
+        if !self.config.enabled || self.consumer.is_none() {
+            return Ok(0);
         }
+
+        let topic = format!("{}-events", self.config.topic_prefix);
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition(&topic, 0);
+        self.consumer.as_ref().unwrap().assign(&tpl)?;
+
+        let mut version = 0;
+        let mut stream = self.consumer.as_ref().unwrap().stream();
+
+        while let Some(msg) = stream.next().await {
+            match msg {
+                Ok(msg) => {
+                    if let Some(key) = msg.key() {
+                        if key == account_id.to_string().as_bytes() {
+                            if let Some(payload) = msg.payload() {
+                                if let Ok(batch) = serde_json::from_slice::<EventBatch>(payload) {
+                                    version = batch.version;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(version)
     }
 
     pub async fn poll_events(&self) -> Result<Option<EventBatch>, KafkaError> {
-        let mut stream = self.consumer.stream();
+        if !self.config.enabled || self.consumer.is_none() {
+            return Ok(None);
+        }
+
+        let mut stream = self.consumer.as_ref().unwrap().stream();
         match timeout(Duration::from_millis(100), stream.next()).await {
             Ok(Some(Ok(msg))) => {
                 let payload = msg.payload().ok_or_else(|| {
@@ -266,7 +319,11 @@ impl KafkaConsumer {
     }
 
     pub async fn poll_cache_updates(&self) -> Result<Option<Account>, KafkaError> {
-        let mut stream = self.consumer.stream();
+        if !self.config.enabled || self.consumer.is_none() {
+            return Ok(None);
+        }
+
+        let mut stream = self.consumer.as_ref().unwrap().stream();
         match timeout(Duration::from_millis(100), stream.next()).await {
             Ok(Some(Ok(msg))) => {
                 let payload = msg.payload().ok_or_else(|| {

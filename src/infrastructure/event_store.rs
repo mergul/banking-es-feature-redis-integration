@@ -239,9 +239,9 @@ impl EventStore {
                             sqlx::query("SET SESSION random_page_cost = 1.1")
                                 .execute(&mut *conn)
                                 .await?;
-                            sqlx::query("SET SESSION effective_io_concurrency = 100")
-                                .execute(&mut *conn)
-                                .await?;
+                            // sqlx::query("SET SESSION effective_io_concurrency = 1")
+                            //     .execute(&mut *conn)
+                            //     .await?;
                             sqlx::query("SET SESSION statement_timeout = '5s'")
                                 .execute(&mut *conn)
                                 .await?;

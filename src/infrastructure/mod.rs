@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cache_service;
+pub mod config;
 pub mod event_store;
 pub mod kafka_abstraction;
 pub mod kafka_event_processor;
