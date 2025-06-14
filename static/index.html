@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Banking API Test Client</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -71,6 +72,7 @@
             <label for="password">Password:</label>
             <input type="password" id="password" value="test_password">
         </div>
+        <button onclick="register()">Register</button>
         <button onclick="login()">Login</button>
         <button onclick="logout()">Logout</button>
         <div id="auth-response"></div>
@@ -133,10 +135,31 @@
 
             try {
                 const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    return { success: false, error: errorData.error || 'Request failed' };
+                }
                 const data = await response.json();
-                return { success: response.ok, data };
+                return { success: true, data };
             } catch (error) {
                 return { success: false, error: error.message };
+            }
+        }
+
+        async function register() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            const result = await makeRequest('/api/auth/register', 'POST', {
+                username,
+                password,
+                roles: ["Customer"]
+            });
+
+            if (result.success) {
+                document.getElementById('auth-response').textContent = 'Registration successful! You can now login.';
+            } else {
+                document.getElementById('auth-response').textContent = `Registration failed: ${result.error}`;
             }
         }
 
@@ -144,13 +167,13 @@
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
 
-            const result = await makeRequest('/auth/login', 'POST', {
+            const result = await makeRequest('/api/auth/login', 'POST', {
                 username,
                 password
             });
 
             if (result.success) {
-                authToken = result.data.token;
+                authToken = result.data.access_token;
                 localStorage.setItem('authToken', authToken);
                 document.getElementById('auth-response').textContent = 'Login successful!';
             } else {
@@ -159,7 +182,7 @@
         }
 
         async function logout() {
-            const result = await makeRequest('/auth/logout', 'POST', {
+            const result = await makeRequest('/api/auth/logout', 'POST', {
                 token: authToken
             });
 
@@ -176,7 +199,7 @@
             const ownerName = document.getElementById('ownerName').value;
             const initialBalance = parseFloat(document.getElementById('initialBalance').value);
 
-            const result = await makeRequest('/accounts', 'POST', {
+            const result = await makeRequest('/api/accounts', 'POST', {
                 owner_name: ownerName,
                 initial_balance: initialBalance
             });
@@ -195,7 +218,7 @@
             const accountId = document.getElementById('accountId').value;
             const amount = parseFloat(document.getElementById('amount').value);
 
-            const result = await makeRequest(`/accounts/${accountId}/deposit`, 'PUT', {
+            const result = await makeRequest(`/api/accounts/${accountId}/deposit`, 'POST', {
                 amount
             });
 
@@ -211,7 +234,7 @@
             const accountId = document.getElementById('accountId').value;
             const amount = parseFloat(document.getElementById('amount').value);
 
-            const result = await makeRequest(`/accounts/${accountId}/withdraw`, 'PUT', {
+            const result = await makeRequest(`/api/accounts/${accountId}/withdraw`, 'POST', {
                 amount
             });
 
@@ -225,7 +248,7 @@
 
         async function getAccount() {
             const accountId = document.getElementById('accountId').value;
-            const result = await makeRequest(`/accounts/${accountId}`);
+            const result = await makeRequest(`/api/accounts/${accountId}`);
 
             if (result.success) {
                 document.getElementById('info-response').textContent =
@@ -237,7 +260,7 @@
         }
 
         async function getAllAccounts() {
-            const result = await makeRequest('/accounts');
+            const result = await makeRequest('/api/accounts');
 
             if (result.success) {
                 document.getElementById('info-response').textContent =

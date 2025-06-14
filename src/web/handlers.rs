@@ -95,6 +95,13 @@ pub struct AccountResponse {
     pub balance: f64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterRequest {
+    pub username: String,
+    pub password: String,
+    pub roles: Vec<UserRole>,
+}
+
 pub async fn create_account(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<CreateAccountRequest>,
@@ -290,19 +297,14 @@ pub async fn initialize_services() -> Result<(Arc<AccountService>, Arc<AuthServi
         Arc::new(ProjectionStore::new_with_config(ProjectionConfig::default()).await?);
 
     // Initialize AccountRepository
-    let repository = Arc::new(AccountRepository::new(
-        event_store.as_ref().clone(),
-        KafkaConfig::default(),
-        projection_store.as_ref().clone(),
-        redis_client.as_ref().clone(),
-    )?);
+    let repository = Arc::new(AccountRepository::new(event_store));
 
     // Initialize AccountService
     let service = Arc::new(AccountService::new(
-        repository.clone(),
-        projection_store.as_ref().clone(),
-        cache_service.as_ref().clone(),
-        middleware.clone(),
+        repository,
+        projection_store,
+        cache_service,
+        middleware,
         100,
     ));
 
@@ -375,6 +377,19 @@ pub async fn batch_transactions(
         failed,
         errors,
     }))
+}
+
+pub async fn register(
+    State((_, auth_service)): State<(Arc<AccountService>, Arc<AuthService>)>,
+    Json(payload): Json<RegisterRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    match auth_service
+        .register_user(&payload.username, &payload.password, payload.roles)
+        .await
+    {
+        Ok(user) => Ok(Json(user)),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
 }
 
 fn get_client_id(headers: &HeaderMap) -> String {

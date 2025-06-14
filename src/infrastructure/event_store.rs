@@ -1,5 +1,6 @@
 use crate::domain::{Account, AccountEvent};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -1064,8 +1065,9 @@ impl EventStore {
         Ok(version)
     }
 
-    pub async fn update_version(&self, aggregate_id: Uuid, version: i64) {
+    pub async fn update_version(&self, aggregate_id: Uuid, version: i64) -> Result<()> {
         self.version_cache.insert(aggregate_id, version);
+        Ok(())
     }
 }
 
@@ -1212,5 +1214,98 @@ impl Default for EventStore {
             .connect_lazy("postgresql://postgres:Francisco1@localhost:5432/banking_es")
             .expect("Failed to connect to database");
         EventStore::new(pool)
+    }
+}
+
+#[async_trait]
+pub trait EventStoreTrait: Send + Sync + 'static {
+    async fn save_events(
+        &self,
+        aggregate_id: Uuid,
+        events: Vec<AccountEvent>,
+        expected_version: i64,
+    ) -> Result<()>;
+    async fn get_events(&self, aggregate_id: Uuid, from_version: Option<i64>)
+        -> Result<Vec<Event>>;
+    async fn get_current_version(&self, aggregate_id: Uuid) -> Result<i64>;
+    async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>>;
+    async fn get_all_accounts(&self) -> Result<Vec<Account>>;
+}
+
+#[async_trait]
+pub trait EventStoreExt: EventStoreTrait {
+    async fn save_events_with_priority(
+        &self,
+        aggregate_id: Uuid,
+        events: Vec<AccountEvent>,
+        expected_version: i64,
+        priority: EventPriority,
+    ) -> Result<()>;
+    async fn update_version(&self, aggregate_id: Uuid, version: i64) -> Result<()>;
+    async fn health_check(&self) -> Result<EventStoreHealth>;
+    fn get_metrics(&self) -> EventStoreMetrics;
+    fn pool_stats(&self) -> (u32, u32);
+}
+
+#[async_trait]
+impl EventStoreTrait for EventStore {
+    async fn save_events(
+        &self,
+        aggregate_id: Uuid,
+        events: Vec<AccountEvent>,
+        expected_version: i64,
+    ) -> Result<()> {
+        self.save_events(aggregate_id, events, expected_version)
+            .await
+    }
+
+    async fn get_events(
+        &self,
+        aggregate_id: Uuid,
+        from_version: Option<i64>,
+    ) -> Result<Vec<Event>> {
+        self.get_events(aggregate_id, from_version).await
+    }
+
+    async fn get_current_version(&self, aggregate_id: Uuid) -> Result<i64> {
+        self.get_current_version(aggregate_id).await
+    }
+
+    async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>> {
+        self.get_account(account_id).await
+    }
+
+    async fn get_all_accounts(&self) -> Result<Vec<Account>> {
+        self.get_all_accounts().await
+    }
+}
+
+#[async_trait]
+impl EventStoreExt for EventStore {
+    async fn save_events_with_priority(
+        &self,
+        aggregate_id: Uuid,
+        events: Vec<AccountEvent>,
+        expected_version: i64,
+        priority: EventPriority,
+    ) -> Result<()> {
+        self.save_events_with_priority(aggregate_id, events, expected_version, priority)
+            .await
+    }
+
+    async fn update_version(&self, aggregate_id: Uuid, version: i64) -> Result<()> {
+        self.update_version(aggregate_id, version).await
+    }
+
+    async fn health_check(&self) -> Result<EventStoreHealth> {
+        self.health_check().await
+    }
+
+    fn get_metrics(&self) -> EventStoreMetrics {
+        self.get_metrics()
+    }
+
+    fn pool_stats(&self) -> (u32, u32) {
+        self.pool_stats()
     }
 }

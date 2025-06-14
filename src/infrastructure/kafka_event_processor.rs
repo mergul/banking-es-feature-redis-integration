@@ -1,17 +1,18 @@
 use crate::domain::{Account, AccountEvent};
-use crate::infrastructure::event_store::EventStore;
+use crate::infrastructure::cache_service::{CacheService, CacheServiceTrait};
+use crate::infrastructure::event_store::{EventStore, EventStoreTrait};
 use crate::infrastructure::kafka_abstraction::{
     EventBatch, KafkaConfig, KafkaConsumer, KafkaProducer,
 };
-use crate::infrastructure::kafka_dlq::DeadLetterQueue;
+use crate::infrastructure::kafka_dlq::{DeadLetterQueue, DeadLetterQueueTrait};
 use crate::infrastructure::kafka_metrics::KafkaMetrics;
-use crate::infrastructure::kafka_monitoring::MonitoringDashboard;
-use crate::infrastructure::kafka_recovery::KafkaRecovery;
+use crate::infrastructure::kafka_monitoring::{MonitoringDashboard, MonitoringDashboardTrait};
+use crate::infrastructure::kafka_recovery::{KafkaRecovery, KafkaRecoveryTrait};
 use crate::infrastructure::kafka_recovery_strategies::{RecoveryStrategies, RecoveryStrategy};
-use crate::infrastructure::kafka_tracing::KafkaTracing;
-use crate::infrastructure::projections::ProjectionStore;
-use crate::infrastructure::cache_service::CacheService;
+use crate::infrastructure::kafka_tracing::{KafkaTracing, KafkaTracingTrait};
+use crate::infrastructure::projections::{ProjectionStore, ProjectionStoreTrait};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use rdkafka::error::KafkaError;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,27 +21,27 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-#[derive(Clone)]
-pub struct KafkaEventProcessor {
-    producer: KafkaProducer,
-    consumer: KafkaConsumer,
-    event_store: EventStore,
-    projections: ProjectionStore,
-    dlq: DeadLetterQueue,
-    recovery: KafkaRecovery,
-    recovery_strategies: Arc<RecoveryStrategies>,
-    metrics: Arc<KafkaMetrics>,
-    monitoring: MonitoringDashboard,
-    tracing: KafkaTracing,
-    cache_service: CacheService,
-    processing_state: Arc<RwLock<ProcessingState>>,
-}
-
 #[derive(Debug, Default)]
 struct ProcessingState {
     is_processing: bool,
     current_batch: Option<EventBatch>,
     last_processed_offset: i64,
+}
+
+#[derive(Clone)]
+pub struct KafkaEventProcessor {
+    producer: KafkaProducer,
+    consumer: KafkaConsumer,
+    event_store: Arc<dyn EventStoreTrait + Send + Sync>,
+    projections: Arc<dyn ProjectionStoreTrait + Send + Sync>,
+    dlq: Arc<dyn DeadLetterQueueTrait + Send + Sync>,
+    recovery: Arc<dyn KafkaRecoveryTrait + Send + Sync>,
+    recovery_strategies: Arc<RecoveryStrategies>,
+    metrics: Arc<KafkaMetrics>,
+    monitoring: Arc<dyn MonitoringDashboardTrait + Send + Sync>,
+    tracing: Arc<dyn KafkaTracingTrait + Send + Sync>,
+    cache_service: Arc<dyn CacheServiceTrait + Send + Sync>,
+    processing_state: Arc<RwLock<ProcessingState>>,
 }
 
 impl KafkaEventProcessor {
@@ -54,21 +55,25 @@ impl KafkaEventProcessor {
         let producer = KafkaProducer::new(config.clone())?;
         let consumer = KafkaConsumer::new(config.clone())?;
 
-        let dlq = DeadLetterQueue::new(
+        let event_store = Arc::new(event_store);
+        let projections = Arc::new(projections);
+
+        let dlq = Arc::new(DeadLetterQueue::new(
             producer.clone(),
+            consumer.clone(),
             metrics.clone(),
             3,                      // max retries
             Duration::from_secs(1), // initial retry delay
-        );
+        ));
 
-        let recovery = KafkaRecovery::new(
+        let recovery = Arc::new(KafkaRecovery::new(
             producer.clone(),
             consumer.clone(),
             event_store.clone(),
             projections.clone(),
             dlq.clone(),
             metrics.clone(),
-        );
+        ));
 
         let recovery_strategies = Arc::new(RecoveryStrategies::new(
             event_store.clone(),
@@ -78,8 +83,8 @@ impl KafkaEventProcessor {
             metrics.clone(),
         ));
 
-        let monitoring = MonitoringDashboard::new(metrics.clone());
-        let tracing = KafkaTracing::new(metrics.clone());
+        let monitoring = Arc::new(MonitoringDashboard::new(metrics.clone()));
+        let tracing = Arc::new(KafkaTracing::new(metrics.clone()));
 
         Ok(Self {
             producer,
@@ -92,7 +97,7 @@ impl KafkaEventProcessor {
             metrics,
             monitoring,
             tracing,
-            cache_service,
+            cache_service: Arc::new(cache_service),
             processing_state: Arc::new(RwLock::new(ProcessingState::default())),
         })
     }
@@ -208,7 +213,8 @@ impl KafkaEventProcessor {
             .await?;
 
         // Convert events to versioned format
-        let versioned_events: Vec<(i64, AccountEvent)> = batch.events
+        let versioned_events: Vec<(i64, AccountEvent)> = batch
+            .events
             .iter()
             .enumerate()
             .map(|(i, event)| (batch.version + i as i64, event.clone()))
