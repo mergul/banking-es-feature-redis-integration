@@ -29,6 +29,8 @@ tower-http = { version = "0.5", features = ["trace", "cors"] }
 validator = { version = "0.16", features = ["derive"] }
 dotenv = "0.15"
 rand = "0.8.5"
+strum = "0.26"
+strum_macros = "0.26"
 
 # Serialization
 
