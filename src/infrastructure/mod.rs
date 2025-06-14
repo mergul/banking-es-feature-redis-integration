@@ -17,6 +17,7 @@ pub mod scaling;
 pub mod sharding;
 pub mod middleware;
 pub mod rate_limiter;
+pub mod user_repository; // Added user_repository module
 
 pub use event_store::{EventStore, EventStoreConfig};
 pub use kafka_abstraction::KafkaConfig;
@@ -24,3 +25,4 @@ pub use kafka_event_processor::KafkaEventProcessor;
 pub use projections::ProjectionStore;
 pub use redis_abstraction::{RealRedisClient, RedisClientTrait};
 pub use repository::{AccountRepository, AccountRepositoryTrait, RepositoryError};
+pub use user_repository::{User, UserRepository, NewUser, UserRepositoryError}; // Added re-export

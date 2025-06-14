@@ -1,6 +1,7 @@
 use crate::infrastructure::auth::{AuthConfig, AuthService};
 use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
-use crate::infrastructure::event_store::EventStore;
+use crate::infrastructure::event_store::{EventStore, DB_POOL}; // Import DB_POOL
+use crate::infrastructure::user_repository::UserRepository; // Import UserRepository
 use crate::infrastructure::kafka_abstraction::KafkaConfig;
 use crate::infrastructure::projections::ProjectionStore;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
@@ -86,8 +87,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         scaling_config,
     ));
 
-    // Initialize auth service
-    let auth_config = AuthConfig {
+    // Ensure DB_POOL is initialized for UserRepository, before AuthService in main needs it.
+    // This is a bit indirect; ideally, a shared pool is explicitly created and passed.
+    // We rely on EventStore::new_with_config to initialize DB_POOL.
+    // A dummy EventStoreConfig can be used if we only need to init the pool.
+    // Or, better, ensure initialize_services() is called first if its pool is to be reused.
+    // For this specific AuthService instance in main, let's ensure pool is ready.
+    // One way to ensure DB_POOL is initialized:
+    let _event_store_for_pool_init = EventStore::new_with_config(EventStoreConfig::default()).await?;
+    let pool_for_main_auth = DB_POOL.get().expect("DB_POOL not initialized in main").clone();
+    let user_repository_for_main_auth = Arc::new(UserRepository::new(pool_for_main_auth));
+
+    // Initialize auth service (this instance might be for non-web components if any)
+    let auth_config_main = AuthConfig { // Renamed to avoid conflict if initialize_services also defines one
         jwt_secret: std::env::var("JWT_SECRET").unwrap_or_else(|_| "your-secret-key".to_string()),
         refresh_token_secret: std::env::var("REFRESH_TOKEN_SECRET")
             .unwrap_or_else(|_| "your-refresh-secret-key".to_string()),
@@ -95,10 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         refresh_token_expiry: 604800, // 7 days
         rate_limit_requests: 100,
         rate_limit_window: 60,
-        max_failed_attempts: 5,
-        lockout_duration_minutes: 30,
+        max_failed_attempts: 5, // Ensure this is i32 if AuthConfig expects i32
+        lockout_duration_minutes: 30, // Ensure this is i64 if AuthConfig expects i64
     };
-    let auth_service = Arc::new(AuthService::new(redis_client.clone(), auth_config));
+    // This auth_service instance is created here but then shadowed by the one from initialize_services.
+    // If it were used by other components before initialize_services, it would need the user_repository.
+    let _auth_service_main_instance = Arc::new(AuthService::new(
+        redis_client.clone(),
+        auth_config_main,
+        user_repository_for_main_auth.clone()
+    ));
+    // NOTE: The auth_service used for the router is the one from initialize_services()
 
     // Register this instance
     let instance = ServiceInstance {

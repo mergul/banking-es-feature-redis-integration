@@ -45,7 +45,9 @@ use crate::infrastructure::{
     repository::{AccountRepository, AccountRepositoryTrait},
     scaling::{InstanceMetrics, ScalingConfig, ScalingManager, ServiceInstance},
     sharding::{LockManager, ShardConfig, ShardManager},
+    user_repository::UserRepository, // Added UserRepository
 };
+use crate::infrastructure::event_store::DB_POOL; // Added DB_POOL for PgPool access
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -218,6 +220,15 @@ pub async fn initialize_services() -> Result<(Arc<AccountService>, Arc<AuthServi
         Some(RedisPoolConfig::default()),
     );
 
+    // Initialize EventStore and ProjectionStore (this will initialize DB_POOL if not already)
+    let event_store_config = EventStoreConfig::default();
+    // Ensure EventStore is initialized which should set up DB_POOL
+    let _event_store_for_pool_init = EventStore::new_with_config(event_store_config.clone()).await?;
+
+    // Get the pool for UserRepository
+    let pool = DB_POOL.get().expect("DB_POOL not initialized").clone();
+    let user_repository = Arc::new(UserRepository::new(pool.clone()));
+
     // Initialize AuthService
     let auth_config = AuthConfig {
         jwt_secret: std::env::var("JWT_SECRET").unwrap_or_else(|_| "default_secret".to_string()),
@@ -225,12 +236,12 @@ pub async fn initialize_services() -> Result<(Arc<AccountService>, Arc<AuthServi
             .unwrap_or_else(|_| "default_refresh_secret".to_string()),
         access_token_expiry: 3600,
         refresh_token_expiry: 604800,
-        rate_limit_requests: 1000,
-        rate_limit_window: 60,
+        rate_limit_requests: 1000, // requests per window
+        rate_limit_window: 60,   // window in seconds
         max_failed_attempts: 5,
         lockout_duration_minutes: 30,
     };
-    let auth_service = Arc::new(AuthService::new(redis_client.clone(), auth_config));
+    let auth_service = Arc::new(AuthService::new(redis_client.clone(), auth_config, user_repository.clone()));
 
     // Initialize CacheService
     let cache_config = CacheConfig {
@@ -284,14 +295,16 @@ pub async fn initialize_services() -> Result<(Arc<AccountService>, Arc<AuthServi
         scaling_config,
     ));
 
-    // Initialize EventStore and ProjectionStore
-    let event_store = Arc::new(EventStore::new_with_pool_size(10).await?);
-    let projection_store =
-        Arc::new(ProjectionStore::new_with_config(ProjectionConfig::default()).await?);
+    // Initialize EventStore and ProjectionStore (using the pool obtained above for consistency if desired, or they init their own)
+    // For now, EventStore was already initialized for DB_POOL. ProjectionStore can use the same pool.
+    let event_store = Arc::new(EventStore::new_with_config(event_store_config).await?); // Re-use config
+    let projection_store_config = ProjectionConfig::default();
+    let projection_store = Arc::new(ProjectionStore::from_pool_with_config(pool.clone(), projection_store_config));
+
 
     // Initialize AccountRepository
     let repository = Arc::new(AccountRepository::new(
-        event_store.as_ref().clone(),
+        event_store.clone(),
         KafkaConfig::default(),
         projection_store.as_ref().clone(),
         redis_client.as_ref().clone(),
