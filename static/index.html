@@ -135,12 +135,24 @@
 
             try {
                 const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
+                const responseText = await response.text();
+                console.log('Raw response:', responseText); // Log raw response
+
                 if (!response.ok) {
-                    const errorData = await response.json();
-                    return { success: false, error: errorData.error || 'Request failed' };
+                    try {
+                        const errorData = JSON.parse(responseText);
+                        return { success: false, error: errorData.error || 'Request failed' };
+                    } catch (e) {
+                        return { success: false, error: `Server error: ${responseText}` };
+                    }
                 }
-                const data = await response.json();
-                return { success: true, data };
+
+                try {
+                    const data = JSON.parse(responseText);
+                    return { success: true, data };
+                } catch (e) {
+                    return { success: false, error: `Invalid JSON response: ${responseText}` };
+                }
             } catch (error) {
                 return { success: false, error: error.message };
             }
@@ -153,6 +165,7 @@
             const result = await makeRequest('/api/auth/register', 'POST', {
                 username,
                 password,
+                email: `${username}@example.com`,
                 roles: ["Customer"]
             });
 
@@ -267,7 +280,7 @@
                     JSON.stringify(result.data, null, 2);
             } else {
                 document.getElementById('info-response').textContent =
-                    `Failed to get accounts: ${result.error}`;
+                    `Failed to get acts:lt.error}`;
             }
         }
     </script>

@@ -47,23 +47,20 @@ pub struct KafkaEventProcessor {
 impl KafkaEventProcessor {
     pub fn new(
         config: KafkaConfig,
-        event_store: EventStore,
-        projections: ProjectionStore,
-        cache_service: CacheService,
+        event_store: Arc<dyn EventStoreTrait + Send + Sync>,
+        projections: Arc<dyn ProjectionStoreTrait + Send + Sync>,
+        cache_service: Arc<dyn CacheServiceTrait + Send + Sync>,
     ) -> Result<Self> {
         let metrics = Arc::new(KafkaMetrics::default());
         let producer = KafkaProducer::new(config.clone())?;
         let consumer = KafkaConsumer::new(config.clone())?;
 
-        let event_store = Arc::new(event_store);
-        let projections = Arc::new(projections);
-
         let dlq = Arc::new(DeadLetterQueue::new(
             producer.clone(),
             consumer.clone(),
             metrics.clone(),
-            3,                      // max retries
-            Duration::from_secs(1), // initial retry delay
+            3,
+            Duration::from_secs(1),
         ));
 
         let recovery = Arc::new(KafkaRecovery::new(
@@ -97,7 +94,7 @@ impl KafkaEventProcessor {
             metrics,
             monitoring,
             tracing,
-            cache_service: Arc::new(cache_service),
+            cache_service,
             processing_state: Arc::new(RwLock::new(ProcessingState::default())),
         })
     }

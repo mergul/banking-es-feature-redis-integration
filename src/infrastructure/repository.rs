@@ -88,9 +88,10 @@ impl AccountRepository {
     }
 
     pub async fn save(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()> {
-        self.event_store
+        Ok(self
+            .event_store
             .save_events(account.id, events, account.version)
-            .await
+            .await?)
     }
 
     pub async fn get_by_id(&self, id: Uuid) -> Result<Option<Account>, AccountError> {
@@ -176,9 +177,10 @@ impl AccountRepositoryTrait for AccountRepository {
     }
 
     async fn save_immediate(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()> {
-        self.event_store
+        Ok(self
+            .event_store
             .save_events(account.id, events, account.version)
-            .await
+            .await?)
     }
 
     async fn save(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()> {
@@ -195,9 +197,10 @@ impl AccountRepositoryTrait for AccountRepository {
         expected_version: i64,
         events: Vec<AccountEvent>,
     ) -> Result<()> {
-        self.event_store
+        Ok(self
+            .event_store
             .save_events(account_id, events, expected_version)
-            .await
+            .await?)
     }
 
     async fn flush_all(&self) -> Result<()> {
