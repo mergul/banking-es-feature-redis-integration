@@ -6,6 +6,7 @@ use crate::infrastructure::cache_service::{
 use crate::infrastructure::event_store::{EventStore, EventStoreConfig, EventStoreTrait};
 use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaConsumer, KafkaProducer};
 use crate::infrastructure::kafka_event_processor::KafkaEventProcessor;
+use crate::infrastructure::l1_cache_updater::L1CacheUpdater;
 use crate::infrastructure::middleware::{
     AccountCreationValidator, RequestMiddleware, TransactionValidator,
 };
@@ -18,12 +19,14 @@ use anyhow::Result;
 use redis;
 use std::sync::Arc;
 use std::time::Duration;
+use uuid::Uuid;
 
 pub struct ServiceContext {
     pub account_service: Arc<AccountService>,
     pub auth_service: Arc<AuthService>,
     pub scaling_manager: Arc<ScalingManager>,
     pub kafka_processor: Arc<KafkaEventProcessor>,
+    pub l1_cache_updater: Arc<L1CacheUpdater>,
 }
 
 pub async fn init_all_services() -> Result<ServiceContext> {
@@ -34,6 +37,8 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     // Initialize EventStore
     let event_store: Arc<dyn EventStoreTrait> = Arc::new(EventStore::new_with_pool_size(10).await?);
     let event_store_for_kafka = event_store.clone();
+    let event_store_for_repo = event_store.clone();
+    let event_store_for_warmup = event_store.clone();
 
     // Initialize UserRepository
     let user_repository = Arc::new(UserRepository::new(event_store.get_pool().clone()));
@@ -73,11 +78,13 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     };
     let cache_service: Arc<dyn CacheServiceTrait> =
         Arc::new(CacheService::new(redis_client_trait.clone(), cache_config));
+    let cache_service_for_l1 = cache_service.clone();
     let cache_service_for_kafka = cache_service.clone();
+    let cache_service_for_warmup = cache_service.clone();
 
     // Initialize AccountRepository
     let account_repository: Arc<dyn AccountRepositoryTrait> =
-        Arc::new(AccountRepository::new(event_store));
+        Arc::new(AccountRepository::new(event_store_for_repo));
 
     // Initialize RequestMiddleware
     let rate_limit_config = crate::infrastructure::middleware::RateLimitConfig {
@@ -138,6 +145,12 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         event_topic: "banking-es-events".to_string(),
     };
 
+    // Initialize L1CacheUpdater
+    let l1_cache_updater = Arc::new(L1CacheUpdater::new(
+        kafka_config.clone(),
+        cache_service_for_l1,
+    )?);
+
     // Initialize KafkaEventProcessor
     let kafka_processor = Arc::new(KafkaEventProcessor::new(
         kafka_config,
@@ -146,12 +159,32 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         cache_service_for_kafka,
     )?);
 
+    // Start L1 cache updater in background
+    let l1_cache_updater_clone = l1_cache_updater.clone();
+    tokio::spawn(async move {
+        if let Err(e) = l1_cache_updater_clone.start().await {
+            eprintln!("L1 cache updater error: {}", e);
+        }
+    });
+
+    // Warm up cache with active accounts
+    let event_store_for_warmup = event_store.clone();
+    tokio::spawn(async move {
+        if let Ok(accounts) = event_store_for_warmup.get_all_accounts().await {
+            let account_ids: Vec<Uuid> = accounts.iter().map(|a| a.id).collect();
+            if let Err(e) = cache_service_for_warmup.warmup_cache(account_ids).await {
+                eprintln!("Cache warmup error: {}", e);
+            }
+        }
+    });
+
     // Create ServiceContext
     let service_context = ServiceContext {
         account_service,
         auth_service,
         scaling_manager,
         kafka_processor,
+        l1_cache_updater,
     };
 
     Ok(service_context)

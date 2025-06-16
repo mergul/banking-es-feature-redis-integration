@@ -222,23 +222,29 @@ impl KafkaEventProcessor {
             .set_account_events(batch.account_id, &versioned_events, None)
             .await?;
 
-        // Get account from projections
+        // Get account from projections and apply latest events
         let account = self.projections.get_account(batch.account_id).await?;
-        if let Some(account_proj) = account {
-            // Convert projection to account
+        if let Some(mut account_proj) = account {
+            // Apply latest events to get final state
+            for event in &batch.events {
+                account_proj = account_proj.apply_event(event)?;
+            }
+
+            // Convert projection to account with updated state
             let account = Account {
                 id: account_proj.id,
                 owner_name: account_proj.owner_name,
                 balance: account_proj.balance,
                 is_active: account_proj.is_active,
-                version: batch.version,
+                version: batch.version + batch.events.len() as i64,
             };
 
-            // Cache the account
+            // Cache the updated account
             self.cache_service
                 .set_account(&account, Some(Duration::from_secs(3600)))
                 .await?;
 
+            // Send cache update with final state
             self.producer
                 .send_cache_update(batch.account_id, &account)
                 .await?;
