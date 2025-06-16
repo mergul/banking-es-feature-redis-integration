@@ -9,17 +9,17 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use redis::Client;
 use redis::RedisError;
-use redis::{aio::MultiplexedConnection, ConnectionInfo, Value as RedisValue};
+use redis::{ConnectionInfo, Value as RedisValue, aio::MultiplexedConnection};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::io::{duplex, AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, duplex};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -96,6 +96,68 @@ struct WarmingState {
     is_warming: bool,
     last_warmup: Option<Instant>,
     accounts_to_warm: Vec<Uuid>,
+}
+
+#[async_trait]
+pub trait CacheServiceTrait: Send + Sync {
+    async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>>;
+    async fn set_account(&self, account: &Account, ttl: Option<Duration>) -> Result<()>;
+    async fn delete_account(&self, account_id: Uuid) -> Result<()>;
+    async fn get_account_events(&self, account_id: Uuid) -> Result<Option<Vec<AccountEvent>>>;
+    async fn set_account_events(
+        &self,
+        account_id: Uuid,
+        events: &[(i64, AccountEvent)],
+        ttl: Option<Duration>,
+    ) -> Result<()>;
+    async fn delete_account_events(&self, account_id: Uuid) -> Result<()>;
+    async fn invalidate_account(&self, account_id: Uuid) -> Result<()>;
+    async fn warmup_cache(&self, account_ids: Vec<Uuid>) -> Result<()>;
+    fn get_metrics(&self) -> &CacheMetrics;
+}
+
+#[async_trait]
+impl CacheServiceTrait for CacheService {
+    async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>> {
+        self.get_account(account_id).await
+    }
+
+    async fn set_account(&self, account: &Account, ttl: Option<Duration>) -> Result<()> {
+        self.set_account(account, ttl).await
+    }
+
+    async fn delete_account(&self, account_id: Uuid) -> Result<()> {
+        self.delete_account(account_id).await
+    }
+
+    async fn get_account_events(&self, account_id: Uuid) -> Result<Option<Vec<AccountEvent>>> {
+        self.get_account_events(account_id).await
+    }
+
+    async fn set_account_events(
+        &self,
+        account_id: Uuid,
+        events: &[(i64, AccountEvent)],
+        ttl: Option<Duration>,
+    ) -> Result<()> {
+        self.set_account_events(account_id, events, ttl).await
+    }
+
+    async fn delete_account_events(&self, account_id: Uuid) -> Result<()> {
+        self.delete_account_events(account_id).await
+    }
+
+    async fn invalidate_account(&self, account_id: Uuid) -> Result<()> {
+        self.invalidate_account(account_id).await
+    }
+
+    async fn warmup_cache(&self, account_ids: Vec<Uuid>) -> Result<()> {
+        self.warmup_cache(account_ids).await
+    }
+
+    fn get_metrics(&self) -> &CacheMetrics {
+        self.get_metrics()
+    }
 }
 
 impl CacheService {
@@ -268,7 +330,8 @@ impl CacheService {
         let key = format!("account:{}", account.id);
         let value = serde_json::to_vec(account)?;
 
-        conn.set_ex(key.as_bytes(), &value, ttl.as_secs()).await?;
+        conn.set_ex::<_, _, ()>(key.as_bytes(), &value, ttl.as_secs() as u64)
+            .await?;
 
         // Update in-memory cache
         self.update_in_memory_cache(account.id, account.clone());
@@ -281,7 +344,7 @@ impl CacheService {
         use redis::AsyncCommands;
         let key = format!("account:{}", account_id);
 
-        conn.del(key.as_bytes()).await?;
+        conn.del::<_, ()>(key.as_bytes()).await?;
         self.metrics
             .evictions
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -348,7 +411,8 @@ impl CacheService {
         let key = format!("events:{}", account_id);
         let value = serde_json::to_vec(events)?;
 
-        conn.set_ex(key.as_bytes(), &value, ttl.as_secs()).await?;
+        conn.set_ex::<_, _, ()>(key.as_bytes(), &value, ttl.as_secs() as u64)
+            .await?;
 
         // Update in-memory cache
         self.event_cache.insert(account_id, events.to_vec());
@@ -361,7 +425,7 @@ impl CacheService {
         use redis::AsyncCommands;
         let key = format!("events:{}", account_id);
 
-        conn.del(key.as_bytes()).await?;
+        conn.del::<_, ()>(key.as_bytes()).await?;
         self.metrics
             .evictions
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -380,8 +444,8 @@ impl CacheService {
         let account_key = format!("account:{}", account_id);
         let events_key = format!("events:{}", account_id);
 
-        conn.del(account_key.as_bytes()).await?;
-        conn.del(events_key.as_bytes()).await?;
+        conn.del::<_, ()>(account_key.as_bytes()).await?;
+        conn.del::<_, ()>(events_key.as_bytes()).await?;
 
         self.metrics
             .evictions

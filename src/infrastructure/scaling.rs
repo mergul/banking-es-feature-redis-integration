@@ -1,17 +1,17 @@
+use super::config::AppConfig;
 use crate::infrastructure::redis_abstraction::{RedisClient, RedisClientTrait};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use redis;
+use redis::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use redis;
-use redis::Client;
-use std::time::Instant;
-use super::config::AppConfig;
 
 pub type ShardId = u32;
 
@@ -59,9 +59,9 @@ impl Default for ScalingConfig {
         Self {
             min_instances: 2,
             max_instances: 10,
-            scale_up_threshold: 0.8,    // 80% resource usage
-            scale_down_threshold: 0.3,  // 30% resource usage
-            cooldown_period: Duration::from_secs(300),  // 5 minutes
+            scale_up_threshold: 0.8,                   // 80% resource usage
+            scale_down_threshold: 0.3,                 // 30% resource usage
+            cooldown_period: Duration::from_secs(300), // 5 minutes
             health_check_interval: Duration::from_secs(30),
             instance_timeout: Duration::from_secs(60),
         }
@@ -97,13 +97,13 @@ impl ScalingManager {
         let instance_id = instance.id.clone();
         let key = format!("instance:{}", instance_id);
         let value = serde_json::to_string(&instance)?;
-        
+
         let mut conn = self.redis_client.get_connection().await?;
         redis::cmd("SETEX")
             .arg(key)
             .arg(60)
             .arg(value)
-            .query_async(&mut conn)
+            .query_async::<_, ()>(&mut conn)
             .await?;
 
         self.instances.insert(instance_id.clone(), instance);
@@ -111,20 +111,24 @@ impl ScalingManager {
         Ok(())
     }
 
-    pub async fn update_instance_metrics(&self, instance_id: &str, metrics: InstanceMetrics) -> Result<()> {
+    pub async fn update_instance_metrics(
+        &self,
+        instance_id: &str,
+        metrics: InstanceMetrics,
+    ) -> Result<()> {
         if let Some(mut instance) = self.instances.get_mut(instance_id) {
             instance.metrics = metrics;
             instance.last_heartbeat = Utc::now();
-            
+
             let key = format!("instance:{}", instance_id);
             let value = serde_json::to_string(&*instance)?;
-            
+
             let mut conn = self.redis_client.get_connection().await?;
             redis::cmd("SETEX")
                 .arg(key)
                 .arg(60)
                 .arg(value)
-                .query_async(&mut conn)
+                .query_async::<_, ()>(&mut conn)
                 .await?;
         }
         Ok(())
@@ -138,12 +142,9 @@ impl ScalingManager {
 
         tokio::spawn(async move {
             loop {
-                if let Err(e) = Self::check_and_scale(
-                    &instances,
-                    &config,
-                    &last_scale_time,
-                    &metrics,
-                ).await {
+                if let Err(e) =
+                    Self::check_and_scale(&instances, &config, &last_scale_time, &metrics).await
+                {
                     error!("Scaling check failed: {}", e);
                 }
                 tokio::time::sleep(config.health_check_interval).await;
@@ -161,8 +162,10 @@ impl ScalingManager {
     ) -> Result<()> {
         let now = Utc::now();
         let last_scale = *last_scale_time.read().await;
-        
-        if now.signed_duration_since(last_scale) < chrono::Duration::from_std(config.cooldown_period)? {
+
+        if now.signed_duration_since(last_scale)
+            < chrono::Duration::from_std(config.cooldown_period)?
+        {
             return Ok(());
         }
 
@@ -172,7 +175,10 @@ impl ScalingManager {
             .collect();
 
         let total_cpu: f64 = active_instances.iter().map(|i| i.metrics.cpu_usage).sum();
-        let total_memory: f64 = active_instances.iter().map(|i| i.metrics.memory_usage).sum();
+        let total_memory: f64 = active_instances
+            .iter()
+            .map(|i| i.metrics.memory_usage)
+            .sum();
         let avg_cpu = total_cpu / active_instances.len() as f64;
         let avg_memory = total_memory / active_instances.len() as f64;
 
@@ -181,7 +187,8 @@ impl ScalingManager {
                 Self::scale_up(instances, metrics).await?;
                 *last_scale_time.write().await = now;
             }
-        } else if avg_cpu < config.scale_down_threshold && avg_memory < config.scale_down_threshold {
+        } else if avg_cpu < config.scale_down_threshold && avg_memory < config.scale_down_threshold
+        {
             if active_instances.len() > config.min_instances {
                 Self::scale_down(instances, metrics).await?;
                 *last_scale_time.write().await = now;
@@ -191,17 +198,26 @@ impl ScalingManager {
         Ok(())
     }
 
-    async fn scale_up(instances: &DashMap<String, ServiceInstance>, metrics: &RwLock<InstanceMetrics>) -> Result<()> {
+    async fn scale_up(
+        instances: &DashMap<String, ServiceInstance>,
+        metrics: &RwLock<InstanceMetrics>,
+    ) -> Result<()> {
         // In a real implementation, this would trigger the creation of a new instance
         // through your container orchestration system (e.g., Kubernetes)
         info!("Scaling up: Creating new instance");
         Ok(())
     }
 
-    async fn scale_down(instances: &DashMap<String, ServiceInstance>, metrics: &RwLock<InstanceMetrics>) -> Result<()> {
+    async fn scale_down(
+        instances: &DashMap<String, ServiceInstance>,
+        metrics: &RwLock<InstanceMetrics>,
+    ) -> Result<()> {
         // In a real implementation, this would trigger the removal of an instance
         // through your container orchestration system
-        if let Some(instance) = instances.iter().find(|i| i.status == InstanceStatus::Active) {
+        if let Some(instance) = instances
+            .iter()
+            .find(|i| i.status == InstanceStatus::Active)
+        {
             info!("Scaling down: Removing instance {}", instance.id);
             Ok(())
         } else {
@@ -213,10 +229,12 @@ impl ScalingManager {
         let now = Utc::now();
         let timeout = self.config.instance_timeout;
 
-        let failed_instances: Vec<_> = self.instances
+        let failed_instances: Vec<_> = self
+            .instances
             .iter()
             .filter(|i| {
-                now.signed_duration_since(i.last_heartbeat) > chrono::Duration::from_std(timeout).unwrap()
+                now.signed_duration_since(i.last_heartbeat)
+                    > chrono::Duration::from_std(timeout).unwrap()
             })
             .map(|i| i.id.clone())
             .collect();
@@ -224,7 +242,7 @@ impl ScalingManager {
         for instance_id in failed_instances {
             if let Some(instance) = self.instances.remove(&instance_id) {
                 warn!("Removing failed instance: {}", instance_id);
-                
+
                 // In a real implementation, this would trigger cleanup in your container orchestration system
             }
         }
@@ -238,7 +256,9 @@ impl ScalingManager {
 
     pub async fn get_instance_id(&self) -> String {
         let instance_id = self.instance_id.read().await;
-        instance_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string())
+        instance_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string())
     }
 
     pub async fn get_instance_metrics(&self) -> InstanceMetrics {
@@ -322,10 +342,15 @@ mod tests {
             latency_ms: 60,
         };
 
-        assert!(manager.update_instance_metrics("test-instance", new_metrics).await.is_ok());
-        
+        assert!(
+            manager
+                .update_instance_metrics("test-instance", new_metrics)
+                .await
+                .is_ok()
+        );
+
         let instance = manager.instances.get("test-instance").unwrap();
         assert_eq!(instance.metrics.cpu_usage, 0.7);
         assert_eq!(instance.metrics.memory_usage, 0.8);
     }
-} 
+}
