@@ -1,22 +1,22 @@
 use crate::infrastructure::user_repository::{NewUser, User, UserRepository, UserRepositoryError};
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 use async_trait::async_trait;
 use axum::{
+    Json, RequestPartsExt, Router,
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
+    http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, RequestPartsExt, Router,
 };
 use axum_extra::{
-    headers::{authorization::Bearer, Authorization},
     TypedHeader,
+    headers::{Authorization, authorization::Bearer},
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc}; // use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use redis::{AsyncCommands, RedisError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -515,7 +515,10 @@ impl AuthService {
         // Blacklist token until it expires
         let ttl = claims.exp - Utc::now().timestamp();
         if ttl > 0 {
-            conn.set_ex(format!("blacklist:{}", token), true, ttl as u64)
+            conn.set_ex::<_, _, ()>(format!("blacklist:{}", token), "1", ttl as u64)
+                .await?;
+
+            conn.expire::<_, ()>(format!("blacklist:{}", token), ttl as i64)
                 .await?;
         }
 
@@ -527,7 +530,7 @@ impl AuthService {
         let current: i64 = conn.incr(format!("rate_limit:{}", key), 1).await?;
 
         if current == 1 {
-            conn.expire(
+            conn.expire::<_, ()>(
                 format!("rate_limit:{}", key),
                 self.config.rate_limit_window as i64,
             )
@@ -576,7 +579,7 @@ where
         parts: &'a mut Parts,
         _state: &'b S,
     ) -> impl futures::Future<Output = Result<Self, <Self as FromRequestParts<S>>::Rejection>>
-           + std::marker::Send {
+    + std::marker::Send {
         async move {
             let TypedHeader(Authorization(bearer)) = parts
                 .extract::<TypedHeader<Authorization<Bearer>>>()
