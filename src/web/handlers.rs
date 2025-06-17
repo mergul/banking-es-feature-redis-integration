@@ -104,6 +104,17 @@ pub struct RegisterRequest {
     pub roles: Vec<UserRole>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TransactionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccountsResponse {
+    pub accounts: Vec<AccountProjection>,
+}
+
 pub async fn create_account(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<CreateAccountRequest>,
@@ -158,7 +169,10 @@ pub async fn deposit_money(
         .deposit_money(id, payload.amount)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(StatusCode::OK)
+    Ok(Json(TransactionResponse {
+        success: true,
+        message: "Deposit successful".to_string(),
+    }))
 }
 
 pub async fn withdraw_money(
@@ -170,14 +184,17 @@ pub async fn withdraw_money(
         .withdraw_money(id, payload.amount)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(StatusCode::OK)
+    Ok(Json(TransactionResponse {
+        success: true,
+        message: "Withdrawal successful".to_string(),
+    }))
 }
 
 pub async fn get_all_accounts(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
-) -> Result<Json<Vec<AccountProjection>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<AccountsResponse>, (StatusCode, Json<ErrorResponse>)> {
     match service.get_all_accounts().await {
-        Ok(accounts) => Ok(Json(accounts)),
+        Ok(accounts) => Ok(Json(AccountsResponse { accounts })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

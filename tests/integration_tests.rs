@@ -695,3 +695,95 @@ async fn test_high_throughput_performance() {
         total_ops
     );
 }
+
+#[tokio::test]
+async fn test_concurrent_deposits() {
+    let ctx = setup_test_environment()
+        .await
+        .expect("Failed to setup test environment");
+
+    // Create account with initial balance
+    let account_id = ctx
+        .account_service
+        .create_account("Concurrent Test User".to_string(), Decimal::new(1000, 0))
+        .await
+        .expect("Failed to create account");
+
+    // Add a small delay to ensure projection is updated
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Get initial account state
+    let initial_account = ctx
+        .account_service
+        .get_account(account_id)
+        .await
+        .expect("Failed to get account")
+        .expect("Account not found");
+
+    assert_eq!(initial_account.balance, Decimal::new(1000, 0));
+
+    // Perform multiple deposits concurrently
+    let deposit_amount = Decimal::new(100, 0);
+    let deposit_count = 5;
+    let mut handles = vec![];
+
+    for _ in 0..deposit_count {
+        let service = ctx.account_service.clone();
+        let account_id = account_id;
+        let amount = deposit_amount;
+        handles.push(tokio::spawn(async move {
+            service.deposit_money(account_id, amount).await
+        }));
+    }
+
+    // Wait for all deposits to complete
+    for handle in handles {
+        let result = handle.await.expect("Task failed");
+        assert!(result.is_ok(), "Deposit failed: {:?}", result.err());
+    }
+
+    // Verify final balance
+    let final_account = ctx
+        .account_service
+        .get_account(account_id)
+        .await
+        .expect("Failed to get account")
+        .expect("Account not found");
+
+    let expected_balance = Decimal::new(1000, 0) + (deposit_amount * Decimal::from(deposit_count));
+    assert_eq!(
+        final_account.balance,
+        expected_balance,
+        "Final balance mismatch. Expected: {}, Got: {}",
+        expected_balance,
+        final_account.balance
+    );
+
+    // Verify transaction history
+    let transactions = ctx
+        .account_service
+        .get_account_transactions(account_id)
+        .await
+        .expect("Failed to get transactions");
+
+    assert_eq!(
+        transactions.len(),
+        deposit_count + 1, // +1 for account creation
+        "Expected {} transactions, got {}",
+        deposit_count + 1,
+        transactions.len()
+    );
+
+    // Verify all deposits were recorded
+    let deposit_transactions: Vec<_> = transactions
+        .iter()
+        .filter(|t| t.transaction_type == "MoneyDeposited")
+        .collect();
+    assert_eq!(
+        deposit_transactions.len(),
+        deposit_count,
+        "Expected {} deposit transactions, got {}",
+        deposit_count,
+        deposit_transactions.len()
+    );
+}

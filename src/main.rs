@@ -118,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/login", post(web::handlers::login))
         .route("/api/auth/logout", post(web::handlers::logout))
         // Account operations
+        .route("/api/accounts", get(web::handlers::get_all_accounts))
         .route("/api/accounts", post(web::handlers::create_account))
         .route("/api/accounts/{id}", get(web::handlers::get_account))
         .route(
@@ -207,34 +208,49 @@ async fn shutdown_signal() {
 }
 
 fn configure_tcp_listener(listener: &TcpListener) -> Result<(), Box<dyn std::error::Error>> {
-    use libc::{setsockopt, IPPROTO_TCP, SOL_SOCKET, SO_REUSEADDR, SO_REUSEPORT, TCP_NODELAY};
-    use std::os::unix::io::AsRawFd;
+    #[cfg(unix)]
+    {
+        use libc::{setsockopt, SOL_SOCKET, SO_REUSEADDR, SO_REUSEPORT};
+        use std::os::unix::io::AsRawFd;
 
-    let fd = listener.as_raw_fd();
-    let optval: libc::c_int = 1;
+        let fd = listener.as_raw_fd();
+        let optval: libc::c_int = 1;
 
-    unsafe {
-        setsockopt(
-            fd,
-            SOL_SOCKET,
-            SO_REUSEADDR,
-            &optval as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&optval) as libc::socklen_t,
-        );
-        setsockopt(
-            fd,
-            SOL_SOCKET,
-            SO_REUSEPORT,
-            &optval as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&optval) as libc::socklen_t,
-        );
-        setsockopt(
-            fd,
-            IPPROTO_TCP,
-            TCP_NODELAY,
-            &optval as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&optval) as libc::socklen_t,
-        );
+        unsafe {
+            setsockopt(
+                fd,
+                SOL_SOCKET,
+                SO_REUSEADDR,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            setsockopt(
+                fd,
+                SOL_SOCKET,
+                SO_REUSEPORT,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use windows::Win32::Networking::WinSock::{setsockopt, SOL_SOCKET, SO_REUSEADDR};
+        use windows::Win32::Networking::WinSock::SOCKET;
+        use std::os::windows::io::AsRawSocket;
+
+        let socket = SOCKET(listener.as_raw_socket() as usize);
+        let optval: i32 = 1;
+
+        unsafe {
+            setsockopt(
+                socket,
+                SOL_SOCKET,
+                SO_REUSEADDR,
+                Some(std::slice::from_raw_parts(&optval as *const _ as *const u8, std::mem::size_of::<i32>())),
+            );
+        }
     }
 
     Ok(())

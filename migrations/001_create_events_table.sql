@@ -84,8 +84,17 @@ CREATE INDEX IF NOT EXISTS idx_events_data_gin
     ON events USING GIN (event_data jsonb_path_ops);
 
 -- Add unique constraint for event ordering
-ALTER TABLE events ADD CONSTRAINT unique_aggregate_version_timestamp
-    UNIQUE (aggregate_id, version, timestamp);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'unique_aggregate_version_timestamp'
+    ) THEN
+        ALTER TABLE events ADD CONSTRAINT unique_aggregate_version_timestamp
+            UNIQUE (aggregate_id, version, timestamp);
+    END IF;
+END$$;
 
 -- 2. Snapshots table with optimized indexes
 CREATE TABLE IF NOT EXISTS snapshots (

@@ -145,7 +145,10 @@ impl ProjectionStoreTrait for ProjectionStore {
     }
 
     async fn upsert_accounts_batch(&self, accounts: Vec<AccountProjection>) -> Result<()> {
-        self.upsert_accounts_batch(accounts).await
+        self.update_sender
+            .send(ProjectionUpdate::AccountBatch(accounts))
+            .map_err(|e| anyhow::anyhow!("Failed to send account batch update: {}", e))?;
+        Ok(())
     }
 
     async fn insert_transactions_batch(
@@ -186,16 +189,18 @@ impl ProjectionStore {
             config: config.clone(),
         };
 
-        // Only start background processor if not in test mode
-        if std::env::var("RUST_TEST").is_err() {
-            tokio::spawn(Self::update_processor(
-                pool,
-                update_receiver,
-                account_cache,
-                transaction_cache,
-                config,
-            ));
-        }
+        // Start background processor
+        tokio::spawn(Self::update_processor(
+            pool,
+            update_receiver,
+            account_cache,
+            transaction_cache,
+            config,
+        ));
+
+        // Start metrics reporter
+        let metrics = store.metrics.clone();
+        tokio::spawn(Self::metrics_reporter(metrics));
 
         store
     }

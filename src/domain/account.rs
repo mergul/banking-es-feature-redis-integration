@@ -63,18 +63,21 @@ impl Account {
                 self.owner_name = owner_name.clone();
                 self.balance = *initial_balance;
                 self.is_active = true;
+                self.version = 0;
             }
             AccountEvent::MoneyDeposited { amount, .. } => {
                 self.balance += amount;
+                self.version += 1;
             }
             AccountEvent::MoneyWithdrawn { amount, .. } => {
                 self.balance -= amount;
+                self.version += 1;
             }
             AccountEvent::AccountClosed { .. } => {
                 self.is_active = false;
+                self.version += 1;
             }
         }
-        self.version += 1;
     }
 
     pub fn handle_command(

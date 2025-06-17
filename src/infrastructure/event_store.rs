@@ -626,7 +626,7 @@ impl EventStore {
 
         let first_event = events.first().unwrap();
         let aggregate_id = first_event.aggregate_id;
-        let expected_version = first_event.version;
+        let expected_version = first_event.version - 1; // Subtract 1 since we're checking the version before the new events
         let last_version = events.last().unwrap().version;
 
         // Retry logic for transient failures
@@ -638,16 +638,16 @@ impl EventStore {
             // Verify current version and lock the row for update
             let current_version = sqlx::query!(
                 r#"
-                WITH current_events AS (
+                SELECT COALESCE(e.version, 0) as version
+                FROM (SELECT 1) dummy
+                LEFT JOIN (
                     SELECT version
                     FROM events
                     WHERE aggregate_id = $1
                     ORDER BY version DESC
                     LIMIT 1
                     FOR UPDATE
-                )
-                SELECT COALESCE(version, 0) as version
-                FROM current_events
+                ) e ON true
                 "#,
                 aggregate_id
             )
@@ -1490,6 +1490,7 @@ pub trait EventStoreTrait: Send + Sync + 'static {
     async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>, EventStoreError>;
     async fn get_all_accounts(&self) -> Result<Vec<Account>, EventStoreError>;
     fn get_pool(&self) -> PgPool;
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[async_trait]
@@ -1542,6 +1543,10 @@ impl EventStoreTrait for EventStore {
 
     fn get_pool(&self) -> PgPool {
         self.pool.clone()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

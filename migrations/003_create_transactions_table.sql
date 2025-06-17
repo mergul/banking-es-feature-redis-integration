@@ -8,12 +8,20 @@ CREATE TABLE IF NOT EXISTS transaction_projections (
 ) PARTITION BY RANGE (timestamp);
 
 -- Create monthly partitions with optimized fillfactor
-CREATE TABLE transaction_projections_2024_01 PARTITION OF transaction_projections
-    FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')
-    WITH (fillfactor = 90);
-CREATE TABLE transaction_projections_2024_02 PARTITION OF transaction_projections
-    FOR VALUES FROM ('2024-02-01') TO ('2024-03-01')
-    WITH (fillfactor = 90);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'transaction_projections_2024_01') THEN
+        CREATE TABLE transaction_projections_2024_01 PARTITION OF transaction_projections
+            FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')
+            WITH (fillfactor = 90);
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'transaction_projections_2024_02') THEN
+        CREATE TABLE transaction_projections_2024_02 PARTITION OF transaction_projections
+            FOR VALUES FROM ('2024-02-01') TO ('2024-03-01')
+            WITH (fillfactor = 90);
+    END IF;
+END$$;
 
 -- Optimized indexes for transaction projections
 CREATE INDEX IF NOT EXISTS idx_transaction_projections_account_id
@@ -39,5 +47,26 @@ CREATE INDEX IF NOT EXISTS idx_transaction_projections_account_type
     ON transaction_projections (account_id, transaction_type, timestamp DESC)
     WITH (fillfactor = 90);
 
-ALTER TABLE transaction_projections ADD CONSTRAINT unique_projections_id_timestamp 
-    UNIQUE (id, timestamp);
+-- Add unique constraint to each partition instead of parent table
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'unique_projections_id_timestamp_2024_01'
+    ) THEN
+        ALTER TABLE transaction_projections_2024_01 
+            ADD CONSTRAINT unique_projections_id_timestamp_2024_01 
+            UNIQUE (id, timestamp);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'unique_projections_id_timestamp_2024_02'
+    ) THEN
+        ALTER TABLE transaction_projections_2024_02 
+            ADD CONSTRAINT unique_projections_id_timestamp_2024_02 
+            UNIQUE (id, timestamp);
+    END IF;
+END$$;

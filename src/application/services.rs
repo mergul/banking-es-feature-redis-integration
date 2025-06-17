@@ -116,12 +116,12 @@ impl AccountService {
             initial_balance,
         };
 
-        let account = Account::default();
+        let account = Account::new(account_id, owner_name.clone(), initial_balance)?;
         let events = account.handle_command(&command)?;
 
-        // Save events with retry logic
+        // Save events immediately for account creation
         self.repository
-            .save(&account, events.clone())
+            .save_immediate(&account, events.clone())
             .await
             .map_err(|e| {
                 self.metrics
@@ -133,7 +133,7 @@ impl AccountService {
         // Update projections
         let projection = AccountProjection {
             id: account_id,
-            owner_name,
+            owner_name: owner_name.clone(),
             balance: initial_balance,
             is_active: true,
             created_at: Utc::now(),
@@ -171,56 +171,87 @@ impl AccountService {
         amount: Decimal,
     ) -> Result<(), AccountError> {
         let start_time = Instant::now();
+        let command_id = Uuid::new_v4(); // Generate a unique command ID
 
         // Check for duplicate command
-        if self.is_duplicate_command(account_id).await {
+        if self.is_duplicate_command(command_id).await {
             return Err(AccountError::InfrastructureError(
                 "Duplicate deposit command".to_string(),
             ));
         }
 
-        let mut account = self
-            .repository
-            .get_by_id(account_id)
-            .await?
-            .ok_or(AccountError::NotFound)?;
+        let mut retry_count = 0;
+        let max_retries = 3;
+        let mut backoff = Duration::from_millis(100);
 
-        let command = AccountCommand::DepositMoney { account_id, amount };
-        let events = account.handle_command(&command)?;
+        loop {
+            let mut account = self
+                .repository
+                .get_by_id(account_id)
+                .await?
+                .ok_or(AccountError::NotFound)?;
 
-        // Apply events to account
-        for event in &events {
-            account.apply_event(event);
+            let command = AccountCommand::DepositMoney { account_id, amount };
+            let events = account.handle_command(&command)?;
+
+            // Save events with current version
+            match self.repository.save_immediate(&account, events.clone()).await {
+                Ok(_) => {
+                    // Apply events to account after saving
+                    for event in &events {
+                        account.apply_event(event);
+                    }
+
+                    // Update projections directly without triggering Kafka
+                    let account_projection = AccountProjection {
+                        id: account.id,
+                        owner_name: account.owner_name.clone(),
+                        balance: account.balance,
+                        is_active: account.is_active,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    };
+
+                    // Update projection directly
+                    self.projections
+                        .upsert_accounts_batch(vec![account_projection])
+                        .await
+                        .map_err(|e| {
+                            self.metrics
+                                .projection_errors
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            AccountError::InfrastructureError(format!("Failed to update projection: {}", e))
+                        })?;
+
+                    // Cache the updated account
+                    self.cache_service
+                        .set_account(&account, Some(Duration::from_secs(3600)))
+                        .await
+                        .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+
+                    self.metrics
+                        .projection_updates
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics
+                        .commands_processed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    return Ok(());
+                }
+                Err(e) => {
+                    if retry_count >= max_retries {
+                        self.metrics
+                            .commands_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Err(AccountError::InfrastructureError(e.to_string()));
+                    }
+
+                    retry_count += 1;
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2; // Exponential backoff
+                }
+            }
         }
-
-        // Save events with retry logic
-        self.repository
-            .save(&account, events.clone())
-            .await
-            .map_err(|e| {
-                self.metrics
-                    .commands_failed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                AccountError::InfrastructureError(e.to_string())
-            })?;
-
-        // Update projections
-        if let Err(e) = self.update_projections_from_events(&events).await {
-            self.metrics
-                .projection_errors
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            warn!("Failed to update projections for deposit: {}", e);
-        } else {
-            self.metrics
-                .projection_updates
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        self.metrics
-            .commands_processed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        Ok(())
     }
 
     pub async fn withdraw_money(
@@ -229,56 +260,87 @@ impl AccountService {
         amount: Decimal,
     ) -> Result<(), AccountError> {
         let start_time = Instant::now();
+        let command_id = Uuid::new_v4(); // Generate a unique command ID
 
         // Check for duplicate command
-        if self.is_duplicate_command(account_id).await {
+        if self.is_duplicate_command(command_id).await {
             return Err(AccountError::InfrastructureError(
                 "Duplicate withdraw command".to_string(),
             ));
         }
 
-        let mut account = self
-            .repository
-            .get_by_id(account_id)
-            .await?
-            .ok_or(AccountError::NotFound)?;
+        let mut retry_count = 0;
+        let max_retries = 3;
+        let mut backoff = Duration::from_millis(100);
 
-        let command = AccountCommand::WithdrawMoney { account_id, amount };
-        let events = account.handle_command(&command)?;
+        loop {
+            let mut account = self
+                .repository
+                .get_by_id(account_id)
+                .await?
+                .ok_or(AccountError::NotFound)?;
 
-        // Apply events to account
-        for event in &events {
-            account.apply_event(event);
+            let command = AccountCommand::WithdrawMoney { account_id, amount };
+            let events = account.handle_command(&command)?;
+
+            // Save events with current version
+            match self.repository.save_immediate(&account, events.clone()).await {
+                Ok(_) => {
+                    // Apply events to account after saving
+                    for event in &events {
+                        account.apply_event(event);
+                    }
+
+                    // Update projections directly without triggering Kafka
+                    let account_projection = AccountProjection {
+                        id: account.id,
+                        owner_name: account.owner_name.clone(),
+                        balance: account.balance,
+                        is_active: account.is_active,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    };
+
+                    // Update projection directly
+                    self.projections
+                        .upsert_accounts_batch(vec![account_projection])
+                        .await
+                        .map_err(|e| {
+                            self.metrics
+                                .projection_errors
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            AccountError::InfrastructureError(format!("Failed to update projection: {}", e))
+                        })?;
+
+                    // Cache the updated account
+                    self.cache_service
+                        .set_account(&account, Some(Duration::from_secs(3600)))
+                        .await
+                        .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+
+                    self.metrics
+                        .projection_updates
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics
+                        .commands_processed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    return Ok(());
+                }
+                Err(e) => {
+                    if retry_count >= max_retries {
+                        self.metrics
+                            .commands_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Err(AccountError::InfrastructureError(e.to_string()));
+                    }
+
+                    retry_count += 1;
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2; // Exponential backoff
+                }
+            }
         }
-
-        // Save events with retry logic
-        self.repository
-            .save(&account, events.clone())
-            .await
-            .map_err(|e| {
-                self.metrics
-                    .commands_failed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                AccountError::InfrastructureError(e.to_string())
-            })?;
-
-        // Update projections
-        if let Err(e) = self.update_projections_from_events(&events).await {
-            self.metrics
-                .projection_errors
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            warn!("Failed to update projections for withdrawal: {}", e);
-        } else {
-            self.metrics
-                .projection_updates
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        self.metrics
-            .commands_processed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        Ok(())
     }
 
     pub async fn get_account(
@@ -308,11 +370,37 @@ impl AccountService {
             .cache_misses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Fall back to projections
-        self.projections
+        // Try projections
+        if let Some(account) = self
+            .projections
             .get_account(account_id)
             .await
-            .map_err(|e| AccountError::InfrastructureError(e.to_string()))
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?
+        {
+            return Ok(Some(account));
+        }
+
+        // If not in projections, check if account exists in event store
+        if let Some(account) = self
+            .repository
+            .get_by_id(account_id)
+            .await
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?
+        {
+            // Account exists in event store but not in projection
+            // This is a temporary state that will be fixed by projection update
+            return Ok(Some(AccountProjection {
+                id: account.id,
+                owner_name: account.owner_name,
+                balance: account.balance,
+                is_active: account.is_active,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }));
+        }
+
+        // Account not found anywhere
+        Ok(None)
     }
 
     pub async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>, AccountError> {
@@ -387,7 +475,7 @@ impl AccountService {
                     {
                         let account = Account {
                             id: account.id,
-                            owner_name: account.owner_name,
+                            owner_name: account.owner_name.clone(),
                             balance: account.balance,
                             is_active: account.is_active,
                             version: 0, // Default version
@@ -521,13 +609,12 @@ mod tests {
         async fn create_account(
             &self,
             _owner_name: String,
-            _initial_balance: Decimal,
         ) -> Result<Account> {
             Ok(Account::default())
         }
 
-        async fn get_account(&self, _account_id: Uuid) -> Result<Option<Account>> {
-            Ok(None)
+        async fn get_account(&self, _account_id: Uuid) -> Result<Account> {
+            Ok(Account::default())
         }
 
         async fn deposit_money(&self, _account_id: Uuid, _amount: Decimal) -> Result<Account> {

@@ -25,11 +25,19 @@ pub struct KafkaConfig {
     pub ssl_certificate_location: Option<String>,
     pub ssl_key_location: Option<String>,
     pub ssl_key_password: Option<String>,
+    pub enabled: bool,
+    pub producer_acks: i32,
+    pub producer_retries: i32,
+    pub consumer_max_poll_interval_ms: i32,
+    pub consumer_session_timeout_ms: i32,
+    pub cache_invalidation_topic: String,
+    pub event_topic: String,
 }
 
 impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             bootstrap_servers: "localhost:9092".to_string(),
             group_id: "banking-es-group".to_string(),
             client_id: "banking-es-client".to_string(),
@@ -38,20 +46,26 @@ impl Default for KafkaConfig {
             enable_auto_commit: true,
             session_timeout_ms: 30000,
             heartbeat_interval_ms: 10000,
-            max_poll_interval_ms: 300000,
+            max_poll_interval_ms: 600000,
             max_poll_records: 500,
             retry_backoff_ms: 100,
             retry_count: 3,
             request_timeout_ms: 30000,
             socket_timeout_ms: 30000,
             security_protocol: "PLAINTEXT".to_string(),
-            sasl_mechanism: None,
+            sasl_mechanism: "PLAIN".to_string(),
             sasl_username: None,
             sasl_password: None,
             ssl_ca_location: None,
             ssl_certificate_location: None,
             ssl_key_location: None,
             ssl_key_password: None,
+            producer_acks: 1,
+            producer_retries: 3,
+            consumer_max_poll_interval_ms: 600000,
+            consumer_session_timeout_ms: 30000,
+            cache_invalidation_topic: "banking-es-cache-invalidation".to_string(),
+            event_topic: "banking-es-events".to_string(),
         }
     }
 }

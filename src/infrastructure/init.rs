@@ -294,13 +294,13 @@ pub async fn init_all_services() -> Result<ServiceContext> {
             .parse()
             .unwrap_or(3),
         consumer_max_poll_interval_ms: std::env::var("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS")
-            .unwrap_or_else(|_| "300000".to_string())
+            .unwrap_or_else(|_| "600000".to_string())
             .parse()
-            .unwrap_or(300000),
+            .unwrap_or(600000),
         consumer_session_timeout_ms: std::env::var("KAFKA_CONSUMER_SESSION_TIMEOUT_MS")
-            .unwrap_or_else(|_| "10000".to_string())
+            .unwrap_or_else(|_| "30000".to_string())
             .parse()
-            .unwrap_or(10000),
+            .unwrap_or(30000),
         consumer_max_poll_records: std::env::var("KAFKA_CONSUMER_MAX_POLL_RECORDS")
             .unwrap_or_else(|_| "250".to_string())
             .parse()
