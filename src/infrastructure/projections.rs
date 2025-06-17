@@ -1,3 +1,4 @@
+use crate::domain::events::AccountEvent;
 use crate::infrastructure::event_store::DB_POOL;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -649,5 +650,32 @@ impl Default for ProjectionStore {
             .connect_lazy(&database_url)
             .expect("Failed to connect to database");
         ProjectionStore::new(pool)
+    }
+}
+
+impl AccountProjection {
+    pub fn apply_event(&self, event: &AccountEvent) -> Result<Self> {
+        let mut projection = self.clone();
+        match event {
+            AccountEvent::AccountCreated {
+                owner_name,
+                initial_balance,
+                ..
+            } => {
+                projection.owner_name = owner_name.clone();
+                projection.balance = *initial_balance;
+                projection.is_active = true;
+            }
+            AccountEvent::MoneyDeposited { amount, .. } => {
+                projection.balance += *amount;
+            }
+            AccountEvent::MoneyWithdrawn { amount, .. } => {
+                projection.balance -= *amount;
+            }
+            AccountEvent::AccountClosed { .. } => {
+                projection.is_active = false;
+            }
+        }
+        Ok(projection)
     }
 }

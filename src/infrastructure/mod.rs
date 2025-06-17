@@ -11,6 +11,7 @@ pub mod kafka_monitoring;
 pub mod kafka_recovery;
 pub mod kafka_recovery_strategies;
 pub mod kafka_tracing;
+pub mod l1_cache_updater;
 pub mod middleware;
 pub mod projections;
 pub mod rate_limiter;

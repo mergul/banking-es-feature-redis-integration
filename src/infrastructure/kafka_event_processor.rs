@@ -47,9 +47,9 @@ pub struct KafkaEventProcessor {
 impl KafkaEventProcessor {
     pub fn new(
         config: KafkaConfig,
-        event_store: Arc<dyn EventStoreTrait + Send + Sync>,
-        projections: Arc<dyn ProjectionStoreTrait + Send + Sync>,
-        cache_service: Arc<dyn CacheServiceTrait + Send + Sync>,
+        event_store: &Arc<dyn EventStoreTrait + Send + Sync>,
+        projections: &Arc<dyn ProjectionStoreTrait + Send + Sync>,
+        cache_service: &Arc<dyn CacheServiceTrait + Send + Sync>,
     ) -> Result<Self> {
         let metrics = Arc::new(KafkaMetrics::default());
         let producer = KafkaProducer::new(config.clone())?;
@@ -86,15 +86,15 @@ impl KafkaEventProcessor {
         Ok(Self {
             producer,
             consumer,
-            event_store,
-            projections,
+            event_store: event_store.clone(),
+            projections: projections.clone(),
             dlq,
             recovery,
             recovery_strategies,
             metrics,
             monitoring,
             tracing,
-            cache_service,
+            cache_service: cache_service.clone(),
             processing_state: Arc::new(RwLock::new(ProcessingState::default())),
         })
     }
@@ -222,23 +222,29 @@ impl KafkaEventProcessor {
             .set_account_events(batch.account_id, &versioned_events, None)
             .await?;
 
-        // Get account from projections
+        // Get account from projections and apply latest events
         let account = self.projections.get_account(batch.account_id).await?;
-        if let Some(account_proj) = account {
-            // Convert projection to account
+        if let Some(mut account_proj) = account {
+            // Apply latest events to get final state
+            for event in &batch.events {
+                account_proj = account_proj.apply_event(event)?;
+            }
+
+            // Convert projection to account with updated state
             let account = Account {
                 id: account_proj.id,
                 owner_name: account_proj.owner_name,
                 balance: account_proj.balance,
                 is_active: account_proj.is_active,
-                version: batch.version,
+                version: batch.version + batch.events.len() as i64,
             };
 
-            // Cache the account
+            // Cache the updated account
             self.cache_service
                 .set_account(&account, Some(Duration::from_secs(3600)))
                 .await?;
 
+            // Send cache update with final state
             self.producer
                 .send_cache_update(batch.account_id, &account)
                 .await?;
