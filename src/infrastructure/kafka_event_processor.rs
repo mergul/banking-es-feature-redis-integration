@@ -47,9 +47,9 @@ pub struct KafkaEventProcessor {
 impl KafkaEventProcessor {
     pub fn new(
         config: KafkaConfig,
-        event_store: Arc<dyn EventStoreTrait + Send + Sync>,
-        projections: Arc<dyn ProjectionStoreTrait + Send + Sync>,
-        cache_service: Arc<dyn CacheServiceTrait + Send + Sync>,
+        event_store: &Arc<dyn EventStoreTrait + Send + Sync>,
+        projections: &Arc<dyn ProjectionStoreTrait + Send + Sync>,
+        cache_service: &Arc<dyn CacheServiceTrait + Send + Sync>,
     ) -> Result<Self> {
         let metrics = Arc::new(KafkaMetrics::default());
         let producer = KafkaProducer::new(config.clone())?;
@@ -86,15 +86,15 @@ impl KafkaEventProcessor {
         Ok(Self {
             producer,
             consumer,
-            event_store,
-            projections,
+            event_store: event_store.clone(),
+            projections: projections.clone(),
             dlq,
             recovery,
             recovery_strategies,
             metrics,
             monitoring,
             tracing,
-            cache_service,
+            cache_service: cache_service.clone(),
             processing_state: Arc::new(RwLock::new(ProcessingState::default())),
         })
     }
