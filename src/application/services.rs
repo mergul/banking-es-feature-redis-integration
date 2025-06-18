@@ -678,4 +678,91 @@ mod tests {
         let second_result = service.is_duplicate_command(account_id_for_deposit).await;
         assert!(second_result, "Second call should be detected as duplicate");
     }
+
+    #[tokio::test]
+    async fn test_concurrent_events() {
+        use rust_decimal_macros::dec;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tokio::task::JoinSet;
+
+        // Create a real repository for this test
+        let repository = Arc::new(AccountRepository::default());
+        let projection_store = Arc::new(ProjectionStore::default()) as Arc<dyn ProjectionStoreTrait + 'static>;
+        let cache_service = Arc::new(CacheService::default()) as Arc<dyn CacheServiceTrait + 'static>;
+        let service = AccountService::new(
+            repository,
+            projection_store,
+            cache_service,
+            Arc::new(RequestMiddleware::default()),
+            100, // Allow up to 100 concurrent requests
+        );
+
+        // Create an initial account
+        let account_id = service.create_account("Test User".to_string(), dec!(1000)).await.unwrap();
+        
+        // Number of concurrent operations
+        let num_operations = 500; // Increased from 100 to 500
+        let success_count = Arc::new(AtomicU64::new(0));
+        let successful_deposits = Arc::new(AtomicU64::new(0));
+        let successful_withdrawals = Arc::new(AtomicU64::new(0));
+        let mut tasks = JoinSet::new();
+
+        // Spawn concurrent deposit and withdraw tasks
+        for i in 0..num_operations {
+            let service_clone = service.clone();
+            let account_id = account_id;
+            let success_count = Arc::clone(&success_count);
+            let successful_deposits = Arc::clone(&successful_deposits);
+            let successful_withdrawals = Arc::clone(&successful_withdrawals);
+
+            tasks.spawn(async move {
+                if i % 2 == 0 {
+                    // Deposit operation
+                    match service_clone.deposit_money(account_id, dec!(100)).await {
+                        Ok(_) => { 
+                            success_count.fetch_add(1, Ordering::SeqCst);
+                            successful_deposits.fetch_add(1, Ordering::SeqCst);
+                        },
+                        Err(e) => tracing::warn!("Deposit failed: {}", e),
+                    }
+                } else {
+                    // Withdraw operation
+                    match service_clone.withdraw_money(account_id, dec!(50)).await {
+                        Ok(_) => { 
+                            success_count.fetch_add(1, Ordering::SeqCst);
+                            successful_withdrawals.fetch_add(1, Ordering::SeqCst);
+                        },
+                        Err(e) => tracing::warn!("Withdraw failed: {}", e),
+                    }
+                }
+            });
+        }
+
+        // Wait for all tasks to complete
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
+
+        // Get final account state
+        let final_account = service.get_account(account_id).await.unwrap().unwrap();
+        
+        // Verify results
+        let successful_operations = success_count.load(Ordering::SeqCst);
+        let successful_deposits_count = successful_deposits.load(Ordering::SeqCst);
+        let successful_withdrawals_count = successful_withdrawals.load(Ordering::SeqCst);
+        println!("Successful operations: {}", successful_operations);
+        println!("Successful deposits: {}", successful_deposits_count);
+        println!("Successful withdrawals: {}", successful_withdrawals_count);
+        println!("Final balance: {}", final_account.balance);
+
+        // The final balance should be consistent with the number of successful operations
+        // Each successful deposit adds 100, each successful withdraw subtracts 50
+        let expected_balance = dec!(1000)
+            + (dec!(100) * Decimal::from(successful_deposits_count))
+            - (dec!(50) * Decimal::from(successful_withdrawals_count));
+        
+        assert_eq!(final_account.balance, expected_balance, 
+            "Final balance {} does not match expected balance {}", 
+            final_account.balance, expected_balance);
+    }
 }
