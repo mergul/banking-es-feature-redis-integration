@@ -99,7 +99,7 @@ impl KafkaRecovery {
             reconstructed_account.id = projection.id;
 
             for event in account {
-                let account_event: AccountEvent = serde_json::from_value(event.event_data)
+                let account_event: AccountEvent = bincode::deserialize(&event.event_data)
                     .context("Failed to deserialize event")?;
                 reconstructed_account.apply_event(&account_event);
             }
@@ -152,8 +152,8 @@ impl KafkaRecovery {
         replayed_account.id = account.id;
 
         for event in stored_events {
-            let account_event: AccountEvent =
-                serde_json::from_value(event.event_data).context("Failed to deserialize event")?;
+            let account_event: AccountEvent = bincode::deserialize(&event.event_data)
+                .context("Failed to deserialize event")?;
             replayed_account.apply_event(&account_event);
         }
 
@@ -168,8 +168,8 @@ impl KafkaRecovery {
         let stored_events = self.event_store.get_events(account.id, None).await?;
 
         for event in stored_events {
-            let account_event: AccountEvent =
-                serde_json::from_value(event.event_data).context("Failed to deserialize event")?;
+            let account_event: AccountEvent = bincode::deserialize(&event.event_data)
+                .context("Failed to deserialize event")?;
 
             // Send event to Kafka for reprocessing
             self.producer

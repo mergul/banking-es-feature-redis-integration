@@ -3,6 +3,8 @@ use crate::infrastructure::auth::{AuthConfig, AuthService};
 use crate::infrastructure::cache_service::{
     CacheConfig, CacheService, CacheServiceTrait, EvictionPolicy,
 };
+use crate::infrastructure::connection_pool_monitor::{ConnectionPoolMonitor, PoolMonitorConfig};
+use crate::infrastructure::deadlock_detector::{DeadlockDetector, DeadlockConfig};
 use crate::infrastructure::event_store::{EventStore, EventStoreConfig, EventStoreTrait};
 use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaConsumer, KafkaProducer};
 use crate::infrastructure::kafka_event_processor::KafkaEventProcessor;
@@ -14,6 +16,7 @@ use crate::infrastructure::projections::{ProjectionConfig, ProjectionStore, Proj
 use crate::infrastructure::redis_abstraction::{RealRedisClient, RedisClientTrait};
 use crate::infrastructure::repository::{AccountRepository, AccountRepositoryTrait};
 use crate::infrastructure::scaling::{ScalingConfig, ScalingManager};
+use crate::infrastructure::timeout_manager::{TimeoutManager, TimeoutConfig};
 use crate::infrastructure::user_repository::UserRepository;
 use anyhow::Result;
 use redis;
@@ -29,6 +32,9 @@ pub struct ServiceContext {
     pub scaling_manager: Arc<ScalingManager>,
     pub kafka_processor: Arc<KafkaEventProcessor>,
     pub l1_cache_updater: Arc<L1CacheUpdater>,
+    pub timeout_manager: Arc<TimeoutManager>,
+    pub deadlock_detector: Arc<DeadlockDetector>,
+    pub connection_pool_monitor: Arc<ConnectionPoolMonitor>,
     warmup_handle: Arc<tokio::task::JoinHandle<()>>,
     l1_handle: Arc<tokio::task::JoinHandle<()>>,
 }
@@ -91,6 +97,100 @@ impl ServiceContext {
 pub async fn init_all_services() -> Result<ServiceContext> {
     info!("Initializing services...");
 
+    // Initialize timeout manager
+    let timeout_config = TimeoutConfig {
+        database_operation_timeout: Duration::from_secs(
+            std::env::var("DB_OPERATION_TIMEOUT")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30),
+        ),
+        cache_operation_timeout: Duration::from_secs(
+            std::env::var("CACHE_OPERATION_TIMEOUT")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+        ),
+        kafka_operation_timeout: Duration::from_secs(
+            std::env::var("KAFKA_OPERATION_TIMEOUT")
+                .unwrap_or_else(|_| "15".to_string())
+                .parse()
+                .unwrap_or(15),
+        ),
+        redis_operation_timeout: Duration::from_secs(
+            std::env::var("REDIS_OPERATION_TIMEOUT")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
+        ),
+        batch_processing_timeout: Duration::from_secs(
+            std::env::var("BATCH_PROCESSING_TIMEOUT")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()
+                .unwrap_or(60),
+        ),
+        health_check_timeout: Duration::from_secs(
+            std::env::var("HEALTH_CHECK_TIMEOUT")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+        ),
+        connection_acquire_timeout: Duration::from_secs(
+            std::env::var("CONNECTION_ACQUIRE_TIMEOUT")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+        ),
+        transaction_timeout: Duration::from_secs(
+            std::env::var("TRANSACTION_TIMEOUT")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30),
+        ),
+        lock_timeout: Duration::from_secs(
+            std::env::var("LOCK_TIMEOUT")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
+        ),
+        retry_timeout: Duration::from_secs(
+            std::env::var("RETRY_TIMEOUT")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
+        ),
+    };
+    let timeout_manager = Arc::new(TimeoutManager::new(timeout_config));
+
+    // Initialize deadlock detector
+    let deadlock_config = DeadlockConfig {
+        check_interval: Duration::from_secs(
+            std::env::var("DEADLOCK_CHECK_INTERVAL")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
+        ),
+        operation_timeout: Duration::from_secs(
+            std::env::var("DEADLOCK_OPERATION_TIMEOUT")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30),
+        ),
+        max_concurrent_operations: std::env::var("MAX_CONCURRENT_OPERATIONS")
+            .unwrap_or_else(|_| "1000".to_string())
+            .parse()
+            .unwrap_or(1000),
+        enable_auto_resolution: std::env::var("ENABLE_AUTO_RESOLUTION")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse()
+            .unwrap_or(true),
+        log_suspicious_operations: std::env::var("LOG_SUSPICIOUS_OPERATIONS")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse()
+            .unwrap_or(true),
+    };
+    let deadlock_detector = Arc::new(DeadlockDetector::new(deadlock_config));
+
     // Initialize Redis client Singleton with connection pool
     let redis_client = Arc::new(redis::Client::open("redis://127.0.0.1/")?);
     let redis_client_trait = RealRedisClient::new(redis_client.as_ref().clone(), None);
@@ -98,6 +198,48 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     // Initialize EventStore with optimized pool size
     let event_store: Arc<dyn EventStoreTrait + Send + Sync> =
         Arc::new(EventStore::new_with_pool_size(5).await?);
+
+    // Initialize connection pool monitor
+    let pool_monitor_config = PoolMonitorConfig {
+        health_check_interval: Duration::from_secs(
+            std::env::var("POOL_HEALTH_CHECK_INTERVAL")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+        ),
+        connection_timeout: Duration::from_secs(
+            std::env::var("POOL_CONNECTION_TIMEOUT")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30),
+        ),
+        max_connection_wait_time: Duration::from_secs(
+            std::env::var("POOL_MAX_WAIT_TIME")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
+        ),
+        pool_exhaustion_threshold: std::env::var("POOL_EXHAUSTION_THRESHOLD")
+            .unwrap_or_else(|_| "0.8".to_string())
+            .parse()
+            .unwrap_or(0.8),
+        enable_auto_scaling: std::env::var("POOL_AUTO_SCALING")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse()
+            .unwrap_or(true),
+        max_connections: std::env::var("POOL_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "100".to_string())
+            .parse()
+            .unwrap_or(100),
+        min_connections: std::env::var("POOL_MIN_CONNECTIONS")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .unwrap_or(5),
+    };
+    let connection_pool_monitor = Arc::new(ConnectionPoolMonitor::new(
+        event_store.get_pool().clone(),
+        pool_monitor_config,
+    ));
 
     // Initialize UserRepository
     let user_repository = Arc::new(UserRepository::new(event_store.get_pool().clone()));
@@ -361,6 +503,9 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         scaling_manager,
         kafka_processor,
         l1_cache_updater,
+        timeout_manager,
+        deadlock_detector,
+        connection_pool_monitor,
         warmup_handle,
         l1_handle,
     };

@@ -194,7 +194,7 @@ async fn setup_test_environment() -> Result<TestContext, Box<dyn std::error::Err
     });
 
     let pool = PgPoolOptions::new()
-        .max_connections(50) // Increased from 20 to 50 for extreme concurrency
+        .max_connections(100) // Increased from 50 to 100 for even more concurrency
         .min_connections(10)  // Increased minimum connections
         .acquire_timeout(Duration::from_secs(10)) // Increased timeout
         .idle_timeout(Duration::from_secs(60)) // Increased idle timeout
@@ -590,14 +590,14 @@ async fn test_high_throughput_performance() {
         // Setup test environment with increased timeouts
         let setup_timeout = Duration::from_secs(30);
         let account_creation_timeout = Duration::from_secs(10);
-        let test_duration = Duration::from_secs(5); // Increased to 5 seconds
+        let test_duration = Duration::from_secs(10); // Increased to 10 seconds
         let operation_timeout = Duration::from_millis(500);
         
         // Increased test parameters for more threads
-        let target_eps = 50; // Higher target
-        let worker_count = 20; // Increased from 2 to 20 workers
-        let channel_buffer_size = 500; // Increased buffer size
-        let batch_size = 5; // Increased batch size
+        let target_eps = 500; // Much higher target
+        let worker_count = 100; // Increased from 20 to 100 workers
+        let channel_buffer_size = 2000; // Increased buffer size
+        let batch_size = 5; // Keep batch size as is
         
         println!("Initializing test environment...");
         let context = setup_test_environment().await.expect("Failed to setup test environment");
@@ -668,18 +668,18 @@ async fn test_high_throughput_performance() {
                             operations += 1;
                             tx.send(OperationResult::Success).await.ok();
                         }
-                        Ok(Err(e)) => {
-                            println!("Worker {} operation failed: {:?}", worker_id, e);
+                        Ok(Err(_)) => {
+                            // Reduced per-operation overhead: do not print
                             tx.send(OperationResult::Failure).await.ok();
                         }
                         Err(_) => {
-                            println!("Worker {} operation timed out", worker_id);
+                            // Reduced per-operation overhead: do not print
                             tx.send(OperationResult::Timeout).await.ok();
                         }
                     }
                     
                     // Reduced sleep time for higher throughput
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 
                 println!("Worker {} completed after {} operations", worker_id, operations);

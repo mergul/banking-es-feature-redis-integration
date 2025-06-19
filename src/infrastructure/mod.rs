@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod cache_service;
 pub mod config;
+pub mod connection_pool_monitor;
+pub mod deadlock_detector;
 pub mod event_store;
 pub mod init;
 pub mod kafka_abstraction;
@@ -19,6 +21,8 @@ pub mod redis_abstraction;
 pub mod repository;
 pub mod scaling;
 pub mod sharding;
+pub mod timeout_manager;
+pub mod troubleshooting;
 pub mod user_repository;
 
 pub use auth::*;

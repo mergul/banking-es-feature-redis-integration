@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS events (
     id UUID NOT NULL,
     aggregate_id UUID NOT NULL,
     event_type VARCHAR(100) NOT NULL,
-    event_data JSONB NOT NULL,
+    event_data BYTEA NOT NULL,
     version BIGINT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb
@@ -79,9 +79,9 @@ CREATE INDEX IF NOT EXISTS idx_events_event_type
 --     WHERE timestamp > NOW() - INTERVAL '30 days'
 --     WITH (fillfactor = 90);
 
--- GIN index for JSONB queries (GIN indexes don't support fillfactor)
-CREATE INDEX IF NOT EXISTS idx_events_data_gin
-    ON events USING GIN (event_data jsonb_path_ops);
+-- GIN index not supported for BYTEA, remove or replace with a regular index if needed
+-- CREATE INDEX IF NOT EXISTS idx_events_data_gin
+--     ON events USING GIN (event_data);
 
 -- Add unique constraint for event ordering
 DO $$

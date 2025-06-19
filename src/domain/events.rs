@@ -8,7 +8,7 @@ pub struct Event {
     pub id: Uuid,
     pub aggregate_id: Uuid,
     pub event_type: String,
-    pub event_data: serde_json::Value,
+    pub event_data: Vec<u8>,
     pub version: i64,
     pub timestamp: DateTime<Utc>,
 }

@@ -73,7 +73,7 @@ impl RecoveryStrategies {
         for account in accounts {
             let events = self.event_store.get_events(account.id, None).await?;
             for event in events {
-                let account_event: AccountEvent = serde_json::from_value(event.event_data)
+                let account_event: AccountEvent = bincode::deserialize(&event.event_data)
                     .context("Failed to deserialize event")?;
 
                 self.producer
@@ -108,7 +108,7 @@ impl RecoveryStrategies {
                 .await?;
 
             for event in events {
-                let account_event: AccountEvent = serde_json::from_value(event.event_data)
+                let account_event: AccountEvent = bincode::deserialize(&event.event_data)
                     .context("Failed to deserialize event")?;
 
                 self.producer
@@ -151,7 +151,7 @@ impl RecoveryStrategies {
                     }
                 }
 
-                let account_event: AccountEvent = serde_json::from_value(event.event_data)
+                let account_event: AccountEvent = bincode::deserialize(&event.event_data)
                     .context("Failed to deserialize event")?;
                 batch.push(account_event);
                 current_version = event.version;

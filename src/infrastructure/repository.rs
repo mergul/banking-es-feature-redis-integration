@@ -11,6 +11,7 @@ use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use dashmap::DashMap;
 use tokio::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -66,9 +67,10 @@ struct RepositoryMetrics {
 #[derive(Clone)]
 pub struct AccountRepository {
     event_store: Arc<dyn EventStoreTrait + 'static>,
-    pending_events: Arc<Mutex<HashMap<Uuid, Vec<AccountEvent>>>>,
+    pending_events: Arc<DashMap<Uuid, Vec<AccountEvent>>>,
     account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Account>>>>,
     flush_interval: Duration,
+    max_batch_size: usize,
     metrics: Arc<RepositoryMetrics>,
 }
 
@@ -76,9 +78,10 @@ impl AccountRepository {
     pub fn new(event_store: Arc<dyn EventStoreTrait + 'static>) -> Self {
         let repo = Self {
             event_store,
-            pending_events: Arc::new(Mutex::new(HashMap::new())),
+            pending_events: Arc::new(DashMap::new()),
             account_cache: Arc::new(RwLock::new(HashMap::new())),
             flush_interval: Duration::from_millis(50),
+            max_batch_size: 1000,
             metrics: Arc::new(RepositoryMetrics::default()),
         };
 
@@ -185,8 +188,10 @@ impl AccountRepositoryTrait for AccountRepository {
     }
 
     async fn save(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()> {
-        let mut pending = self.pending_events.lock().await;
-        pending.insert(account.id, events);
+        self.pending_events
+            .entry(account.id)
+            .or_insert_with(Vec::new)
+            .extend(events);
         Ok(())
     }
 
@@ -206,10 +211,9 @@ impl AccountRepositoryTrait for AccountRepository {
             version: 0,
         };
         for event in stored_events {
-            let account_event: AccountEvent =
-                serde_json::from_value(event.event_data).map_err(|e| {
-                    AccountError::InfrastructureError(format!("Deserialization error: {}", e))
-                })?;
+            let account_event: AccountEvent = bincode::deserialize(&event.event_data).map_err(|e| {
+                AccountError::InfrastructureError(format!("Deserialization error: {}", e))
+            })?;
 
             account.apply_event(&account_event);
             account.version = event.version;
@@ -230,8 +234,12 @@ impl AccountRepositoryTrait for AccountRepository {
     }
 
     async fn flush_all(&self) -> Result<()> {
-        let mut pending = self.pending_events.lock().await;
-        for (account_id, events) in pending.drain() {
+        let mut all_events = Vec::new();
+        for entry in self.pending_events.iter() {
+            all_events.push((entry.key().clone(), entry.value().clone()));
+        }
+        self.pending_events.clear();
+        for (account_id, events) in all_events {
             if let Err(e) = self.event_store.save_events(account_id, events, 0).await {
                 error!("Failed to flush events for account {}: {}", account_id, e);
             }
@@ -243,19 +251,35 @@ impl AccountRepositoryTrait for AccountRepository {
         let pending_events = Arc::clone(&self.pending_events);
         let event_store = Arc::clone(&self.event_store);
         let flush_interval = self.flush_interval;
+        let max_batch_size = self.max_batch_size;
         let metrics = Arc::clone(&self.metrics);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(flush_interval);
             loop {
                 interval.tick().await;
-                let mut pending = pending_events.lock().await;
-                for (account_id, events) in pending.drain() {
-                    if let Err(e) = event_store.save_events(account_id, events, 0).await {
-                        error!("Failed to flush events for account {}: {}", account_id, e);
-                        metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    } else {
-                        metrics.batch_flushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut batch = Vec::new();
+                for entry in pending_events.iter() {
+                    for event in entry.value().iter() {
+                        batch.push((*entry.key(), event.clone()));
+                    }
+                }
+                pending_events.clear();
+                if !batch.is_empty() {
+                    for chunk in batch.chunks(max_batch_size) {
+                        let mut grouped: HashMap<Uuid, Vec<AccountEvent>> = HashMap::new();
+                        for (account_id, event) in chunk.iter() {
+                            grouped.entry(*account_id).or_default().push(event.clone());
+                        }
+                        for (account_id, events) in grouped {
+                            if let Err(e) = event_store.save_events(account_id, events, 0).await {
+                                error!("Failed to flush events for account {}: {}", account_id, e);
+                                metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            } else {
+                                metrics.batch_flushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                metrics.events_processed.fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
                     }
                 }
             }
