@@ -194,10 +194,10 @@ async fn setup_test_environment() -> Result<TestContext, Box<dyn std::error::Err
     });
 
     let pool = PgPoolOptions::new()
-        .max_connections(20) // Increased from 5 to 20
-        .min_connections(5)  // Added minimum connections
-        .acquire_timeout(Duration::from_secs(5))
-        .idle_timeout(Duration::from_secs(30))
+        .max_connections(50) // Increased from 20 to 50 for extreme concurrency
+        .min_connections(10)  // Increased minimum connections
+        .acquire_timeout(Duration::from_secs(10)) // Increased timeout
+        .idle_timeout(Duration::from_secs(60)) // Increased idle timeout
         .max_lifetime(Duration::from_secs(1800))
         .connect(&database_url)
         .await?;
@@ -220,14 +220,14 @@ async fn setup_test_environment() -> Result<TestContext, Box<dyn std::error::Err
         projection_store,
         cache_service,
         Arc::new(Default::default()),
-        20, // Increased from 10 to 20 for higher concurrency
+        50, // Increased from 20 to 50 for higher concurrency
     ));
 
     // Start connection monitoring task
     let pool_clone = pool.clone();
     let monitor_handle = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(10)).await; // Reduced frequency
             println!("DB Pool Stats - Active: {}, Idle: {}", 
                 pool_clone.size(), 
                 pool_clone.num_idle()
@@ -590,14 +590,14 @@ async fn test_high_throughput_performance() {
         // Setup test environment with increased timeouts
         let setup_timeout = Duration::from_secs(30);
         let account_creation_timeout = Duration::from_secs(10);
-        let test_duration = Duration::from_secs(2); // Reduced to 2 seconds
+        let test_duration = Duration::from_secs(5); // Increased to 5 seconds
         let operation_timeout = Duration::from_millis(500);
         
-        // Minimal test parameters
-        let target_eps = 10; // Very low target
-        let worker_count = 2; // Just 2 workers
-        let channel_buffer_size = 100;
-        let batch_size = 2;
+        // Increased test parameters for more threads
+        let target_eps = 50; // Higher target
+        let worker_count = 20; // Increased from 2 to 20 workers
+        let channel_buffer_size = 500; // Increased buffer size
+        let batch_size = 5; // Increased batch size
         
         println!("Initializing test environment...");
         let context = setup_test_environment().await.expect("Failed to setup test environment");
@@ -648,7 +648,6 @@ async fn test_high_throughput_performance() {
                         Operation::Withdraw(amount)
                     };
                     
-                    println!("Worker {} processing operation", worker_id);
                     let result = match operation {
                         Operation::Deposit(amount) => {
                             tokio::time::timeout(
@@ -667,7 +666,6 @@ async fn test_high_throughput_performance() {
                     match result {
                         Ok(Ok(_)) => {
                             operations += 1;
-                            println!("Worker {} operation successful", worker_id);
                             tx.send(OperationResult::Success).await.ok();
                         }
                         Ok(Err(e)) => {
@@ -680,7 +678,8 @@ async fn test_high_throughput_performance() {
                         }
                     }
                     
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Reduced sleep time for higher throughput
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 
                 println!("Worker {} completed after {} operations", worker_id, operations);
@@ -706,13 +705,14 @@ async fn test_high_throughput_performance() {
                 OperationResult::Failure => failed_ops += 1,
                 OperationResult::Timeout => {
                     timed_out_ops += 1;
-                    println!("Operation timed out");
                 }
             }
             
-            let elapsed = start_time.elapsed();
-            let current_eps = total_ops as f64 / elapsed.as_secs_f64();
-            println!("Current EPS: {:.2}, Total Ops: {}", current_eps, total_ops);
+            if total_ops % 100 == 0 {
+                let elapsed = start_time.elapsed();
+                let current_eps = total_ops as f64 / elapsed.as_secs_f64();
+                println!("Current EPS: {:.2}, Total Ops: {}", current_eps, total_ops);
+            }
         }
         
         // Wait for all workers to complete
@@ -732,6 +732,7 @@ async fn test_high_throughput_performance() {
         println!("Total Operations: {}", total_ops);
         println!("Successful Operations: {}", successful_ops);
         println!("Failed Operations: {}", failed_ops);
+        println!("Timed Out Operations: {}", timed_out_ops);
         println!("Events Per Second: {:.2}", eps);
         println!("Success Rate: {:.2}%\n", (successful_ops as f64 / total_ops as f64) * 100.0);
         
@@ -753,10 +754,10 @@ async fn test_high_throughput_performance() {
         );
     };
 
-    // Add global timeout of 1 minute
-    match tokio::time::timeout(Duration::from_secs(60), test_future).await {
+    // Add global timeout of 2 minutes
+    match tokio::time::timeout(Duration::from_secs(120), test_future).await {
         Ok(_) => println!("Test completed successfully"),
-        Err(_) => panic!("Test timed out after 60 seconds"),
+        Err(_) => panic!("Test timed out after 120 seconds"),
     }
 }
 
@@ -1143,4 +1144,404 @@ async fn test_infrastructure_configurations() {
     }
 
     println!("\nInfrastructure configuration test completed successfully!");
+}
+
+#[tokio::test]
+async fn test_extreme_concurrency() {
+    println!("Starting extreme concurrency test...");
+    
+    let test_future = async {
+        let test_duration = Duration::from_secs(10);
+        let operation_timeout = Duration::from_millis(1000);
+        
+        // Extreme concurrency parameters
+        let worker_count = 50; // 50 concurrent workers
+        let channel_buffer_size = 1000;
+        
+        println!("Initializing test environment for extreme concurrency...");
+        let context = setup_test_environment().await.expect("Failed to setup test environment");
+        
+        // Create multiple test accounts for better distribution
+        let mut account_ids = Vec::new();
+        for i in 0..5 {
+            let account_id = context.account_service
+                .create_account(format!("Test User {}", i), Decimal::new(10000, 0))
+                .await
+                .expect("Failed to create account");
+            account_ids.push(account_id);
+            println!("Created account {}: {}", i, account_id);
+        }
+        
+        // Pre-warm cache for all accounts
+        for account_id in &account_ids {
+            let _ = context.account_service.get_account(*account_id).await.expect("Failed to pre-warm cache");
+        }
+        println!("Cache pre-warmed for all accounts");
+        
+        println!("Starting extreme concurrency test with {} workers", worker_count);
+        
+        let (tx, mut rx) = tokio::sync::mpsc::channel(channel_buffer_size);
+        let start_time = Instant::now();
+        let end_time = start_time + test_duration;
+        
+        // Spawn worker tasks
+        let mut handles = Vec::new();
+        for worker_id in 0..worker_count {
+            let tx = tx.clone();
+            let service = context.account_service.clone();
+            let account_ids = account_ids.clone();
+            let operation_timeout = operation_timeout;
+            
+            let handle = tokio::spawn(async move {
+                use rand::{SeedableRng, Rng};
+                use rand_chacha::ChaCha8Rng;
+                let mut rng = ChaCha8Rng::from_rng(rand::thread_rng()).unwrap();
+                let mut operations = 0;
+                
+                while Instant::now() < end_time {
+                    // Randomly select an account
+                    let account_id = account_ids[rng.gen_range(0..account_ids.len())];
+                    let amount = rng.gen_range(1..=50);
+                    let operation = if rng.gen_bool(0.6) { // 60% deposits, 40% withdrawals
+                        Operation::Deposit(amount)
+                    } else {
+                        Operation::Withdraw(amount)
+                    };
+                    
+                    let result = match operation {
+                        Operation::Deposit(amount) => {
+                            tokio::time::timeout(
+                                operation_timeout,
+                                service.deposit_money(account_id, amount.into())
+                            ).await
+                        }
+                        Operation::Withdraw(amount) => {
+                            tokio::time::timeout(
+                                operation_timeout,
+                                service.withdraw_money(account_id, amount.into())
+                            ).await
+                        }
+                    };
+
+                    match result {
+                        Ok(Ok(_)) => {
+                            operations += 1;
+                            tx.send(OperationResult::Success).await.ok();
+                        }
+                        Ok(Err(e)) => {
+                            if worker_id % 10 == 0 { // Only log every 10th worker to reduce noise
+                                println!("Worker {} operation failed: {:?}", worker_id, e);
+                            }
+                            tx.send(OperationResult::Failure).await.ok();
+                        }
+                        Err(_) => {
+                            if worker_id % 10 == 0 {
+                                println!("Worker {} operation timed out", worker_id);
+                            }
+                            tx.send(OperationResult::Timeout).await.ok();
+                        }
+                    }
+                    
+                    // Minimal sleep for maximum throughput
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                
+                if worker_id % 10 == 0 {
+                    println!("Worker {} completed after {} operations", worker_id, operations);
+                }
+            });
+            
+            handles.push(handle);
+        }
+        
+        drop(tx);
+        
+        // Collect results
+        let mut total_ops = 0;
+        let mut successful_ops = 0;
+        let mut failed_ops = 0;
+        let mut timed_out_ops = 0;
+        
+        while let Some(result) = rx.recv().await {
+            total_ops += 1;
+            match result {
+                OperationResult::Success => successful_ops += 1,
+                OperationResult::Failure => failed_ops += 1,
+                OperationResult::Timeout => timed_out_ops += 1,
+            }
+            
+            if total_ops % 500 == 0 {
+                let elapsed = start_time.elapsed();
+                let current_eps = total_ops as f64 / elapsed.as_secs_f64();
+                println!("Current EPS: {:.2}, Total Ops: {}", current_eps, total_ops);
+            }
+        }
+        
+        // Wait for all workers to complete
+        for handle in handles {
+            handle.await.expect("Worker task failed");
+        }
+        
+        // Calculate final metrics
+        let duration = start_time.elapsed();
+        let eps = total_ops as f64 / duration.as_secs_f64();
+        
+        println!("\nExtreme Concurrency Test Results:");
+        println!("Duration: {:.2}s", duration.as_secs_f64());
+        println!("Total Operations: {}", total_ops);
+        println!("Successful Operations: {}", successful_ops);
+        println!("Failed Operations: {}", failed_ops);
+        println!("Timed Out Operations: {}", timed_out_ops);
+        println!("Events Per Second: {:.2}", eps);
+        println!("Success Rate: {:.2}%", (successful_ops as f64 / total_ops as f64) * 100.0);
+        
+        // Get system metrics
+        let metrics = context.account_service.get_metrics();
+        println!("\nSystem Metrics:");
+        println!("Commands Processed: {}", metrics.commands_processed.load(Ordering::Relaxed));
+        println!("Commands Failed: {}", metrics.commands_failed.load(Ordering::Relaxed));
+        println!("Projection Updates: {}", metrics.projection_updates.load(Ordering::Relaxed));
+        println!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
+        println!("Cache Misses: {}", metrics.cache_misses.load(Ordering::Relaxed));
+        
+        // Verify final account states
+        println!("\nFinal Account States:");
+        for (i, account_id) in account_ids.iter().enumerate() {
+            if let Ok(Some(account)) = context.account_service.get_account(*account_id).await {
+                println!("Account {}: Balance = {}", i, account.balance);
+            }
+        }
+        
+        // Assert reasonable performance
+        assert!(
+            eps >= 100.0, // Expect at least 100 ops/sec under extreme concurrency
+            "Failed to maintain reasonable EPS under extreme concurrency. Achieved: {:.2}",
+            eps
+        );
+        
+        assert!(
+            (successful_ops as f64 / total_ops as f64) >= 0.8, // At least 80% success rate
+            "Success rate too low: {:.2}%",
+            (successful_ops as f64 / total_ops as f64) * 100.0
+        );
+    };
+
+    // Add global timeout of 3 minutes for extreme concurrency test
+    match tokio::time::timeout(Duration::from_secs(180), test_future).await {
+        Ok(_) => println!("Extreme concurrency test completed successfully"),
+        Err(_) => panic!("Extreme concurrency test timed out after 180 seconds"),
+    }
+}
+
+#[tokio::test]
+async fn test_optimized_high_concurrency() {
+    println!("Starting optimized high concurrency test...");
+    
+    let test_future = async {
+        let test_duration = Duration::from_secs(15);
+        let operation_timeout = Duration::from_millis(2000); // Increased timeout
+        
+        // Optimized concurrency parameters
+        let worker_count = 30; // Reduced from 50 to 30
+        let account_count = 20; // Increased from 5 to 20 accounts for better distribution
+        let channel_buffer_size = 1000;
+        
+        println!("Initializing test environment for optimized high concurrency...");
+        let context = setup_test_environment().await.expect("Failed to setup test environment");
+        
+        // Create more test accounts for better distribution
+        let mut account_ids = Vec::new();
+        for i in 0..account_count {
+            let account_id = context.account_service
+                .create_account(format!("Test User {}", i), Decimal::new(10000, 0))
+                .await
+                .expect("Failed to create account");
+            account_ids.push(account_id);
+            println!("Created account {}: {}", i, account_id);
+        }
+        
+        // Pre-warm cache for all accounts
+        for account_id in &account_ids {
+            let _ = context.account_service.get_account(*account_id).await.expect("Failed to pre-warm cache");
+        }
+        println!("Cache pre-warmed for all {} accounts", account_count);
+        
+        println!("Starting optimized high concurrency test with {} workers", worker_count);
+        
+        let (tx, mut rx) = tokio::sync::mpsc::channel(channel_buffer_size);
+        let start_time = Instant::now();
+        let end_time = start_time + test_duration;
+        
+        // Spawn worker tasks with better account distribution
+        let mut handles = Vec::new();
+        for worker_id in 0..worker_count {
+            let tx = tx.clone();
+            let service = context.account_service.clone();
+            let account_ids = account_ids.clone();
+            let operation_timeout = operation_timeout;
+            
+            let handle = tokio::spawn(async move {
+                use rand::{SeedableRng, Rng};
+                use rand_chacha::ChaCha8Rng;
+                let mut rng = ChaCha8Rng::from_rng(rand::thread_rng()).unwrap();
+                let mut operations = 0;
+                let mut consecutive_failures = 0;
+                
+                while Instant::now() < end_time {
+                    // Use worker-specific account selection to reduce conflicts
+                    let account_index = (worker_id + operations) % account_ids.len();
+                    let account_id = account_ids[account_index];
+                    
+                    let amount = rng.gen_range(1..=20); // Smaller amounts
+                    let operation = if rng.gen_bool(0.7) { // 70% deposits, 30% withdrawals
+                        Operation::Deposit(amount)
+                    } else {
+                        Operation::Withdraw(amount)
+                    };
+                    
+                    let result = match operation {
+                        Operation::Deposit(amount) => {
+                            tokio::time::timeout(
+                                operation_timeout,
+                                service.deposit_money(account_id, amount.into())
+                            ).await
+                        }
+                        Operation::Withdraw(amount) => {
+                            tokio::time::timeout(
+                                operation_timeout,
+                                service.withdraw_money(account_id, amount.into())
+                            ).await
+                        }
+                    };
+
+                    match result {
+                        Ok(Ok(_)) => {
+                            operations += 1;
+                            consecutive_failures = 0; // Reset failure counter
+                            tx.send(OperationResult::Success).await.ok();
+                        }
+                        Ok(Err(e)) => {
+                            consecutive_failures += 1;
+                            if worker_id % 5 == 0 && consecutive_failures <= 3 { // Reduced logging
+                                println!("Worker {} operation failed: {:?}", worker_id, e);
+                            }
+                            tx.send(OperationResult::Failure).await.ok();
+                            
+                            // Add small delay after consecutive failures
+                            if consecutive_failures > 2 {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                            }
+                        }
+                        Err(_) => {
+                            consecutive_failures += 1;
+                            if worker_id % 5 == 0 {
+                                println!("Worker {} operation timed out", worker_id);
+                            }
+                            tx.send(OperationResult::Timeout).await.ok();
+                        }
+                    }
+                    
+                    // Adaptive sleep based on failure rate
+                    let sleep_time = if consecutive_failures > 1 {
+                        Duration::from_millis(20)
+                    } else {
+                        Duration::from_millis(5)
+                    };
+                    tokio::time::sleep(sleep_time).await;
+                }
+                
+                if worker_id % 5 == 0 {
+                    println!("Worker {} completed after {} operations", worker_id, operations);
+                }
+            });
+            
+            handles.push(handle);
+        }
+        
+        drop(tx);
+        
+        // Collect results
+        let mut total_ops = 0;
+        let mut successful_ops = 0;
+        let mut failed_ops = 0;
+        let mut timed_out_ops = 0;
+        
+        while let Some(result) = rx.recv().await {
+            total_ops += 1;
+            match result {
+                OperationResult::Success => successful_ops += 1,
+                OperationResult::Failure => failed_ops += 1,
+                OperationResult::Timeout => timed_out_ops += 1,
+            }
+            
+            if total_ops % 1000 == 0 {
+                let elapsed = start_time.elapsed();
+                let current_eps = total_ops as f64 / elapsed.as_secs_f64();
+                let current_success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
+                println!("Current EPS: {:.2}, Total Ops: {}, Success Rate: {:.2}%", 
+                    current_eps, total_ops, current_success_rate);
+            }
+        }
+        
+        // Wait for all workers to complete
+        for handle in handles {
+            handle.await.expect("Worker task failed");
+        }
+        
+        // Calculate final metrics
+        let duration = start_time.elapsed();
+        let eps = total_ops as f64 / duration.as_secs_f64();
+        let success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
+        
+        println!("\nOptimized High Concurrency Test Results:");
+        println!("Duration: {:.2}s", duration.as_secs_f64());
+        println!("Total Operations: {}", total_ops);
+        println!("Successful Operations: {}", successful_ops);
+        println!("Failed Operations: {}", failed_ops);
+        println!("Timed Out Operations: {}", timed_out_ops);
+        println!("Events Per Second: {:.2}", eps);
+        println!("Success Rate: {:.2}%", success_rate);
+        
+        // Get system metrics
+        let metrics = context.account_service.get_metrics();
+        println!("\nSystem Metrics:");
+        println!("Commands Processed: {}", metrics.commands_processed.load(Ordering::Relaxed));
+        println!("Commands Failed: {}", metrics.commands_failed.load(Ordering::Relaxed));
+        println!("Projection Updates: {}", metrics.projection_updates.load(Ordering::Relaxed));
+        println!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
+        println!("Cache Misses: {}", metrics.cache_misses.load(Ordering::Relaxed));
+        
+        // Verify final account states
+        println!("\nFinal Account States (first 10):");
+        for (i, account_id) in account_ids.iter().take(10).enumerate() {
+            if let Ok(Some(account)) = context.account_service.get_account(*account_id).await {
+                println!("Account {}: Balance = {}", i, account.balance);
+            }
+        }
+        
+        // More reasonable assertions for optimized test
+        assert!(
+            eps >= 80.0, // Expect at least 80 ops/sec
+            "Failed to maintain reasonable EPS. Achieved: {:.2}",
+            eps
+        );
+        
+        assert!(
+            success_rate >= 75.0, // At least 75% success rate
+            "Success rate too low: {:.2}%",
+            success_rate
+        );
+        
+        assert!(
+            total_ops >= 1000, // At least 1000 total operations
+            "Too few total operations: {}",
+            total_ops
+        );
+    };
+
+    // Add global timeout of 3 minutes
+    match tokio::time::timeout(Duration::from_secs(180), test_future).await {
+        Ok(_) => println!("Optimized high concurrency test completed successfully"),
+        Err(_) => panic!("Optimized high concurrency test timed out after 180 seconds"),
+    }
 }
