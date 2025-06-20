@@ -8,6 +8,24 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
+// Custom module for bincode-compatible DateTime<Utc> serialization
+mod bincode_datetime {
+    use chrono::{DateTime, Utc, TimeZone};
+    use serde::{self, Serializer, Deserializer};
+    use serde::de::Deserialize;
+
+    pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_i64(dt.timestamp())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where D: Deserializer<'de> {
+        let ts = i64::deserialize(deserializer)?;
+        Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
+    }
+}
+
 #[async_trait]
 pub trait MonitoringDashboardTrait: Send + Sync {
     fn record_metrics(&self);
@@ -23,13 +41,14 @@ pub struct MonitoringDashboard {
     pub health_status: HealthStatus,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeSeriesPoint {
+    #[serde(with = "bincode_datetime")]
     pub timestamp: DateTime<Utc>,
     pub metrics: MetricsSnapshot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     pub error_rate: f64,
     pub processing_latency: f64,
@@ -40,38 +59,40 @@ pub struct MetricsSnapshot {
     pub dlq_size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alert {
     pub severity: AlertSeverity,
     pub message: String,
+    #[serde(with = "bincode_datetime")]
     pub timestamp: DateTime<Utc>,
     pub metric_name: String,
     pub threshold: f64,
     pub current_value: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertSeverity {
     Info,
     Warning,
     Critical,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthStatus {
     pub status: ServiceStatus,
+    #[serde(with = "bincode_datetime")]
     pub last_check: DateTime<Utc>,
     pub components: Vec<ComponentHealth>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceStatus {
     Healthy,
     Degraded,
     Unhealthy,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentHealth {
     pub name: String,
     pub status: ServiceStatus,

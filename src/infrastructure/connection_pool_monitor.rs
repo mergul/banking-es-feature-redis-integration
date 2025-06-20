@@ -232,7 +232,7 @@ impl PoolMonitorTrait for ConnectionPoolMonitor {
     }
     
     async fn health_check(&self) -> Result<PoolHealth, Box<dyn std::error::Error>> {
-        Ok(PoolHealth::new(self))
+        Ok(PoolHealth::new(self).await)
     }
 }
 
@@ -247,9 +247,9 @@ pub struct PoolHealth {
 }
 
 impl PoolHealth {
-    pub fn new(monitor: &ConnectionPoolMonitor) -> Self {
-        let metrics = monitor.metrics.blocking_read();
-        let stuck_connections = monitor.stuck_connections.blocking_read();
+    pub async fn new(monitor: &ConnectionPoolMonitor) -> Self {
+        let metrics = monitor.metrics.read().await;
+        let stuck_connections = monitor.stuck_connections.read().await;
         
         Self {
             is_healthy: metrics.active_connections < metrics.total_connections * 9 / 10,

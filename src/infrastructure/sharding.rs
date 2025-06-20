@@ -14,8 +14,27 @@ use uuid::Uuid;
 use redis::aio::ConnectionLike;
 use redis::Client;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
+use chrono::{DateTime, Utc};
 
 pub type ShardId = Uuid;
+
+// Custom module for bincode-compatible DateTime<Utc> serialization
+mod bincode_datetime {
+    use chrono::{DateTime, Utc, TimeZone};
+    use serde::{self, Serializer, Deserializer};
+    use serde::de::Deserialize;
+
+    pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_i64(dt.timestamp())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where D: Deserializer<'de> {
+        let ts = i64::deserialize(deserializer)?;
+        Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardInfo {
@@ -24,7 +43,8 @@ pub struct ShardInfo {
     pub range_end: u64,
     pub instance_id: Option<String>,
     pub status: ShardStatus,
-    pub last_updated: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "bincode_datetime")]
+    pub last_updated: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -313,12 +333,13 @@ impl ConnectionLike for dyn RedisConnectionCommands + Send {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInstance {
     pub id: String,
     pub status: InstanceStatus,
     pub shard_assignments: Vec<ShardId>,
-    pub last_heartbeat: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "bincode_datetime")]
+    pub last_heartbeat: DateTime<Utc>,
 }
 
 #[cfg(test)]

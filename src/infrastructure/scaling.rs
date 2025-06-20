@@ -15,6 +15,24 @@ use uuid::Uuid;
 
 pub type ShardId = u32;
 
+// Custom module for bincode-compatible DateTime<Utc> serialization
+mod bincode_datetime {
+    use chrono::{DateTime, Utc, TimeZone};
+    use serde::{self, Serializer, Deserializer};
+    use serde::de::Deserialize;
+
+    pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_i64(dt.timestamp())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where D: Deserializer<'de> {
+        let ts = i64::deserialize(deserializer)?;
+        Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInstance {
     pub id: String,
@@ -23,6 +41,7 @@ pub struct ServiceInstance {
     pub status: InstanceStatus,
     pub metrics: InstanceMetrics,
     pub shard_assignments: Vec<ShardId>,
+    #[serde(with = "bincode_datetime")]
     pub last_heartbeat: DateTime<Utc>,
 }
 

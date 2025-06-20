@@ -3,6 +3,25 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
+// Custom module for bincode-compatible Decimal serialization
+mod bincode_decimal {
+    use rust_decimal::Decimal;
+    use serde::{self, Serializer, Deserializer};
+    use serde::de::Deserialize;
+
+    pub fn serialize<S>(decimal: &Decimal, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        // Serialize as string to avoid precision issues
+        serializer.serialize_str(&decimal.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+    where D: Deserializer<'de> {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<Decimal>().map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub id: Uuid,
@@ -14,20 +33,22 @@ pub struct Event {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
 pub enum AccountEvent {
     AccountCreated {
         account_id: Uuid,
         owner_name: String,
+        #[serde(with = "bincode_decimal")]
         initial_balance: Decimal,
     },
     MoneyDeposited {
         account_id: Uuid,
+        #[serde(with = "bincode_decimal")]
         amount: Decimal,
         transaction_id: Uuid,
     },
     MoneyWithdrawn {
         account_id: Uuid,
+        #[serde(with = "bincode_decimal")]
         amount: Decimal,
         transaction_id: Uuid,
     },

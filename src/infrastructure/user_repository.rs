@@ -4,6 +4,42 @@ use sqlx::{postgres::PgDatabaseError, FromRow, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
+// Custom module for bincode-compatible DateTime<Utc> serialization
+mod bincode_datetime {
+    use chrono::{DateTime, Utc, TimeZone};
+    use serde::{self, Serializer, Deserializer};
+    use serde::de::Deserialize;
+
+    pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_i64(dt.timestamp())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where D: Deserializer<'de> {
+        let ts = i64::deserialize(deserializer)?;
+        Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
+    }
+
+    pub mod option {
+        use super::*;
+        use chrono::{DateTime, Utc, TimeZone};
+        use serde::de::Deserialize;
+        pub fn serialize<S>(dt: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
+        where S: Serializer {
+            match dt {
+                Some(dt) => serializer.serialize_some(&dt.timestamp()),
+                None => serializer.serialize_none(),
+            }
+        }
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+        where D: Deserializer<'de> {
+            let opt = Option::<i64>::deserialize(deserializer)?;
+            Ok(opt.map(|ts| Utc.timestamp_opt(ts, 0).single().unwrap()))
+        }
+    }
+}
+
 #[derive(Debug, FromRow, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: Uuid,
@@ -12,9 +48,12 @@ pub struct User {
     pub password_hash: String,
     pub roles: Vec<String>, // Stored as TEXT[] in PostgreSQL
     pub is_active: bool,
+    #[serde(with = "bincode_datetime")]
     pub registered_at: DateTime<Utc>,
+    #[serde(with = "bincode_datetime::option")]
     pub last_login_at: Option<DateTime<Utc>>,
     pub failed_login_attempts: i32,
+    #[serde(with = "bincode_datetime::option")]
     pub locked_until: Option<DateTime<Utc>>,
 }
 

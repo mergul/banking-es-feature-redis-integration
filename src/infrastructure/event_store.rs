@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sqlx::{
     postgres::{PgPoolOptions, PgValue},
     PgPool, Postgres, Row, Transaction,
@@ -775,7 +774,7 @@ impl EventStore {
             );
 
             let mut values = Vec::new();
-            let mut params: Vec<(Uuid, Uuid, String, Vec<u8>, i64, DateTime<Utc>, Value)> =
+            let mut params: Vec<(Uuid, Uuid, String, Vec<u8>, i64, DateTime<Utc>, Vec<u8>)> =
                 Vec::new();
             let mut param_index = 1;
 
@@ -798,8 +797,8 @@ impl EventStore {
                     event.event_data,
                     event.version,
                     event.timestamp,
-                    serde_json::to_value(event.metadata)
-                        .unwrap_or(serde_json::json!({})),
+                    bincode::serialize(&event.metadata)
+                        .unwrap_or_else(|_| bincode::serialize(&EventMetadata::default()).unwrap_or_default()),
                 ));
 
                 param_index += 7;

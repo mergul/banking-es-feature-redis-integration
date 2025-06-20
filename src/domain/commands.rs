@@ -3,7 +3,6 @@ use uuid::Uuid;
 use rust_decimal::Decimal;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
 pub enum AccountCommand {
     CreateAccount {
         account_id: Uuid,

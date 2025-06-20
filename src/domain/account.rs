@@ -4,10 +4,30 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+// Custom module for bincode-compatible Decimal serialization
+mod bincode_decimal {
+    use rust_decimal::Decimal;
+    use serde::{self, Serializer, Deserializer};
+    use serde::de::Deserialize;
+
+    pub fn serialize<S>(decimal: &Decimal, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        // Serialize as string to avoid precision issues
+        serializer.serialize_str(&decimal.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+    where D: Deserializer<'de> {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<Decimal>().map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Account {
     pub id: Uuid,
     pub owner_name: String,
+    #[serde(with = "bincode_decimal")]
     pub balance: Decimal,
     pub is_active: bool,
     pub version: i64,

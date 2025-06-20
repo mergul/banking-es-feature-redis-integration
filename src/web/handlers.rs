@@ -337,7 +337,7 @@ fn create_request_context(
     RequestContext {
         client_id,
         request_type,
-        payload,
+        payload: payload.to_string(),
         headers,
     }
 }

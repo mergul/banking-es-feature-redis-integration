@@ -12,7 +12,7 @@ use redis::RedisError;
 use redis::{ConnectionInfo, Value as RedisValue, aio::MultiplexedConnection};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json;
+use bincode;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -289,7 +289,7 @@ impl CacheService {
 
         match conn.get(key.as_bytes()).await {
             Ok(redis::Value::Data(data)) => {
-                match serde_json::from_slice::<Account>(&data) {
+                match bincode::deserialize::<Account>(&data) {
                     Ok(account) => {
                         self.metrics
                             .hits
@@ -328,7 +328,7 @@ impl CacheService {
         let mut conn = self.redis_client.get_connection().await?;
         use redis::AsyncCommands;
         let key = format!("account:{}", account.id);
-        let value = serde_json::to_vec(account)?;
+        let value = bincode::serialize(account)?;
 
         conn.set_ex::<_, _, ()>(key.as_bytes(), &value, ttl.as_secs() as u64)
             .await?;
@@ -365,7 +365,7 @@ impl CacheService {
 
         match conn.get(key.as_bytes()).await {
             Ok(redis::Value::Data(data)) => {
-                match serde_json::from_slice::<Vec<(i64, AccountEvent)>>(&data) {
+                match bincode::deserialize::<Vec<(i64, AccountEvent)>>(&data) {
                     Ok(events) => {
                         self.metrics
                             .hits
@@ -409,7 +409,7 @@ impl CacheService {
         let mut conn = self.redis_client.get_connection().await?;
         use redis::AsyncCommands;
         let key = format!("events:{}", account_id);
-        let value = serde_json::to_vec(events)?;
+        let value = bincode::serialize(events)?;
 
         conn.set_ex::<_, _, ()>(key.as_bytes(), &value, ttl.as_secs() as u64)
             .await?;
@@ -489,8 +489,8 @@ impl CacheService {
                     _ => &[],
                 };
                 if let (Ok(account_data), Ok(events_data)) = (
-                    serde_json::from_slice::<Account>(account_bytes),
-                    serde_json::from_slice::<Vec<(i64, AccountEvent)>>(events_bytes),
+                    bincode::deserialize::<Account>(account_bytes),
+                    bincode::deserialize::<Vec<(i64, AccountEvent)>>(events_bytes),
                 ) {
                     self.update_in_memory_cache(account_id, account_data);
                     self.event_cache.insert(account_id, events_data);

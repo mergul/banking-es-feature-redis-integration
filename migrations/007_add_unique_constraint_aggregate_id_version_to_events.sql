@@ -9,10 +9,10 @@ CREATE TABLE events_new (
     id UUID NOT NULL,
     aggregate_id UUID NOT NULL,
     event_type VARCHAR(100) NOT NULL,
-    event_data JSONB NOT NULL,
+    event_data BYTEA NOT NULL,
     version BIGINT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    metadata BYTEA NOT NULL DEFAULT ''::bytea
 ) PARTITION BY HASH (aggregate_id);
 
 -- Create partitions for the new table
@@ -23,7 +23,15 @@ CREATE TABLE events_new_p3 PARTITION OF events_new FOR VALUES WITH (modulus 4, r
 
 -- Copy data from old table to new table
 INSERT INTO events_new 
-SELECT * FROM events;
+SELECT 
+    id,
+    aggregate_id,
+    event_type,
+    event_data,
+    version,
+    timestamp,
+    metadata::text::bytea
+FROM events;
 
 -- Drop the old table
 DROP TABLE events;
@@ -47,5 +55,5 @@ CREATE INDEX IF NOT EXISTS idx_events_event_type
     ON events (event_type)
     WITH (fillfactor = 90);
 
-CREATE INDEX IF NOT EXISTS idx_events_data_gin
-    ON events USING GIN (event_data jsonb_path_ops);
+-- Note: Removed GIN index on event_data since it's now BYTEA and doesn't support jsonb_path_ops
+-- If you need to index event_data, consider using a different approach like hash or btree on a computed column

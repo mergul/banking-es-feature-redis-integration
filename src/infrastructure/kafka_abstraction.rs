@@ -24,10 +24,29 @@ use rdkafka::{
     util::Timeout,
     Offset, TopicPartitionList,
 };
-use serde_json;
+use bincode;
 use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{error, info};
+use chrono::DateTime;
+
+// Custom module for bincode-compatible DateTime<Utc> serialization
+mod bincode_datetime {
+    use chrono::{DateTime, Utc, TimeZone};
+    use serde::{self, Serializer, Deserializer};
+    use serde::de::Deserialize;
+
+    pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_i64(dt.timestamp())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where D: Deserializer<'de> {
+        let ts = i64::deserialize(deserializer)?;
+        Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BankingKafkaError {
@@ -70,8 +89,8 @@ impl From<rdkafka::error::KafkaError> for BankingKafkaError {
     }
 }
 
-impl From<serde_json::Error> for BankingKafkaError {
-    fn from(error: serde_json::Error) -> Self {
+impl From<bincode::Error> for BankingKafkaError {
+    fn from(error: bincode::Error) -> Self {
         BankingKafkaError::SerializationError(error.to_string())
     }
 }
@@ -164,8 +183,7 @@ impl KafkaProducer {
             timestamp: Utc::now(),
         };
 
-        let payload = serde_json::to_vec(&batch)
-            .map_err(|e| BankingKafkaError::SerializationError(e.to_string()))?;
+        let payload = bincode::serialize(&batch)?;
 
         self.producer
             .as_ref()
@@ -195,8 +213,7 @@ impl KafkaProducer {
         let topic = format!("{}-cache", self.config.topic_prefix);
         let key = account_id.to_string();
 
-        let payload = serde_json::to_vec(account)
-            .map_err(|e| BankingKafkaError::SerializationError(e.to_string()))?;
+        let payload = bincode::serialize(account)?;
 
         self.producer
             .as_ref()
@@ -225,8 +242,7 @@ impl KafkaProducer {
         let topic = format!("{}-dlq", self.config.topic_prefix);
         let key = message.account_id.to_string();
 
-        let payload = serde_json::to_vec(message)
-            .map_err(|e| BankingKafkaError::SerializationError(e.to_string()))?;
+        let payload = bincode::serialize(message)?;
 
         self.producer
             .as_ref()
@@ -261,7 +277,7 @@ impl KafkaProducer {
             reason,
         };
 
-        let payload = serde_json::to_vec(&message)?;
+        let payload = bincode::serialize(&message)?;
         let topic = &self.config.cache_invalidation_topic;
 
         self.producer
@@ -357,7 +373,7 @@ impl KafkaConsumer {
                     if let Some(key) = msg.key() {
                         if key == account_id.to_string().as_bytes() {
                             if let Some(payload) = msg.payload() {
-                                if let Ok(batch) = serde_json::from_slice::<EventBatch>(payload) {
+                                if let Ok(batch) = bincode::deserialize::<EventBatch>(payload) {
                                     version = batch.version;
                                 }
                             }
@@ -383,7 +399,7 @@ impl KafkaConsumer {
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
 
-                let batch: EventBatch = serde_json::from_slice(payload).map_err(|e| {
+                let batch: EventBatch = bincode::deserialize(payload).map_err(|e| {
                     BankingKafkaError::ConsumerError("Failed to deserialize message".to_string())
                 })?;
 
@@ -407,7 +423,7 @@ impl KafkaConsumer {
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
 
-                let account: Account = serde_json::from_slice(payload).map_err(|e| {
+                let account: Account = bincode::deserialize(payload).map_err(|e| {
                     BankingKafkaError::ConsumerError("Failed to deserialize message".to_string())
                 })?;
 
@@ -433,7 +449,7 @@ impl KafkaConsumer {
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
 
-                let message: CacheInvalidationMessage = serde_json::from_slice(payload)?;
+                let message: CacheInvalidationMessage = bincode::deserialize(payload)?;
                 Ok(Some(message))
             }
             Ok(Some(Err(e))) => Err(BankingKafkaError::ConsumerError(e.to_string())),
@@ -454,7 +470,7 @@ impl KafkaConsumer {
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
 
-                let dlq_message: DeadLetterMessage = serde_json::from_slice(payload)?;
+                let dlq_message: DeadLetterMessage = bincode::deserialize(payload)?;
                 Ok(Some(dlq_message))
             }
             Ok(Some(Err(e))) => Err(BankingKafkaError::ConsumerError(e.to_string())),
@@ -469,6 +485,7 @@ pub struct EventBatch {
     pub account_id: Uuid,
     pub events: Vec<AccountEvent>,
     pub version: i64,
+    #[serde(with = "bincode_datetime")]
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -476,6 +493,7 @@ pub struct EventBatch {
 pub struct CacheInvalidationMessage {
     pub account_id: Uuid,
     pub invalidation_type: CacheInvalidationType,
+    #[serde(with = "bincode_datetime")]
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub reason: String,
 }

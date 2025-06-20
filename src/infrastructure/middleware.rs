@@ -17,7 +17,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tower::Service;
-use serde_json::Value;
+use serde_json;
 
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
@@ -113,7 +113,7 @@ pub trait RequestValidationRule: Send + Sync + std::fmt::Debug {
 pub struct RequestContext {
     pub client_id: String,
     pub request_type: String,
-    pub payload: Value,
+    pub payload: String,
     pub headers: HeaderMap,
 }
 
@@ -169,20 +169,30 @@ impl RequestValidationRule for AccountCreationValidator {
             warnings: Vec::new(),
         };
 
+        // Parse JSON payload
+        let payload: serde_json::Value = match serde_json::from_str(&context.payload) {
+            Ok(p) => p,
+            Err(_) => {
+                result.is_valid = false;
+                result.errors.push("Payload must be valid JSON".to_string());
+                return result;
+            }
+        };
+
         // Validate required fields
-        if !context.payload.is_object() {
+        if !payload.is_object() {
             result.is_valid = false;
             result.errors.push("Payload must be a JSON object".to_string());
             return result;
         }
 
-        let payload = context.payload.as_object().unwrap();
+        let payload_obj = payload.as_object().unwrap();
 
         // Check owner_name
-        if !payload.contains_key("owner_name") {
+        if !payload_obj.contains_key("owner_name") {
             result.is_valid = false;
             result.errors.push("owner_name is required".to_string());
-        } else if let Some(name) = payload["owner_name"].as_str() {
+        } else if let Some(name) = payload_obj["owner_name"].as_str() {
             if name.is_empty() {
                 result.is_valid = false;
                 result.errors.push("owner_name cannot be empty".to_string());
@@ -190,10 +200,10 @@ impl RequestValidationRule for AccountCreationValidator {
         }
 
         // Check initial_balance
-        if !payload.contains_key("initial_balance") {
+        if !payload_obj.contains_key("initial_balance") {
             result.is_valid = false;
             result.errors.push("initial_balance is required".to_string());
-        } else if let Some(balance) = payload["initial_balance"].as_f64() {
+        } else if let Some(balance) = payload_obj["initial_balance"].as_f64() {
             if balance < 0.0 {
                 result.is_valid = false;
                 result.errors.push("initial_balance cannot be negative".to_string());
@@ -216,20 +226,30 @@ impl RequestValidationRule for TransactionValidator {
             warnings: Vec::new(),
         };
 
+        // Parse JSON payload
+        let payload: serde_json::Value = match serde_json::from_str(&context.payload) {
+            Ok(p) => p,
+            Err(_) => {
+                result.is_valid = false;
+                result.errors.push("Payload must be valid JSON".to_string());
+                return result;
+            }
+        };
+
         // Validate required fields
-        if !context.payload.is_object() {
+        if !payload.is_object() {
             result.is_valid = false;
             result.errors.push("Payload must be a JSON object".to_string());
             return result;
         }
 
-        let payload = context.payload.as_object().unwrap();
+        let payload_obj = payload.as_object().unwrap();
 
         // Check account_id
-        if !payload.contains_key("account_id") {
+        if !payload_obj.contains_key("account_id") {
             result.is_valid = false;
             result.errors.push("account_id is required".to_string());
-        } else if let Some(id) = payload["account_id"].as_str() {
+        } else if let Some(id) = payload_obj["account_id"].as_str() {
             if let Err(_) = Uuid::parse_str(id) {
                 result.is_valid = false;
                 result.errors.push("account_id must be a valid UUID".to_string());
@@ -237,10 +257,10 @@ impl RequestValidationRule for TransactionValidator {
         }
 
         // Check amount
-        if !payload.contains_key("amount") {
+        if !payload_obj.contains_key("amount") {
             result.is_valid = false;
             result.errors.push("amount is required".to_string());
-        } else if let Some(amount) = payload["amount"].as_f64() {
+        } else if let Some(amount) = payload_obj["amount"].as_f64() {
             if amount <= 0.0 {
                 result.is_valid = false;
                 result.errors.push("amount must be greater than zero".to_string());
