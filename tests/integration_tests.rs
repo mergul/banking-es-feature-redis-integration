@@ -194,17 +194,27 @@ async fn setup_test_environment() -> Result<TestContext, Box<dyn std::error::Err
     });
 
     let pool = PgPoolOptions::new()
-        .max_connections(600) // Increased from 400 to 600 for maximum throughput
-        .min_connections(200) // Increased from 100 to 200 for better connection availability
-        .acquire_timeout(Duration::from_secs(60)) // Increased from 30 to 60 seconds
-        .idle_timeout(Duration::from_secs(600)) // Increased from 300 to 600 seconds
-        .max_lifetime(Duration::from_secs(14400)) // Increased from 7200 to 14400 seconds
-        .connect(&database_url)
-        .await?;
+        .max_connections(1000) // Increased from 600 to 1000 for maximum throughput
+        .min_connections(300) // Increased from 200 to 300 for better connection availability
+        .acquire_timeout(Duration::from_secs(120)) // Increased from 60 to 120 seconds
+        .idle_timeout(Duration::from_secs(1200)) // Increased from 600 to 1200 seconds
+        .max_lifetime(Duration::from_secs(1800)) // Added max lifetime
+        .test_before_acquire(true) // Test connections before acquiring
+        .connect_lazy_with(database_url.parse().unwrap());
 
     // Initialize Redis client with optimized settings
-    let redis_client = Arc::new(redis::Client::open("redis://127.0.0.1/")?);
-    let redis_client_trait = RealRedisClient::new(redis_client.as_ref().clone(), None);
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_client = redis::Client::open(redis_url).expect("Failed to connect to Redis");
+
+    // Test Redis connection
+    let mut redis_conn = redis_client
+        .get_connection()
+        .expect("Failed to get Redis connection");
+    let _: () = redis::cmd("PING").execute(&mut redis_conn);
+    eeprintln!("Redis connection test successful");
+
+    let redis_client_trait = RealRedisClient::new(redis_client, None);
 
     // Initialize services with optimized configs
     let event_store = Arc::new(EventStore::new(pool.clone())) as Arc<dyn EventStoreTrait + 'static>;
@@ -229,18 +239,19 @@ async fn setup_test_environment() -> Result<TestContext, Box<dyn std::error::Err
         projection_store,
         cache_service,
         Arc::new(Default::default()),
-        500, // Increased from 200 to 500 for maximum batching efficiency
+        1000, // Increased from 500 to 1000 for maximum batching efficiency
     ));
 
     // Start connection monitoring task
     let pool_clone = pool.clone();
     let monitor_handle = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(10)).await; // Reduced frequency
-            println!(
-                "DB Pool Stats - Active: {}, Idle: {}",
+            tokio::time::sleep(Duration::from_secs(5)).await; // Increased frequency from 10s to 5s
+            eprintln!(
+                "DB Pool Stats - Active: {}, Idle: {}, Size: {}",
                 pool_clone.size(),
-                pool_clone.num_idle()
+                pool_clone.num_idle(),
+                pool_clone.size()
             );
         }
     });
@@ -593,31 +604,31 @@ async fn test_duplicate_command_handling() {
 
 #[tokio::test]
 async fn test_high_throughput_performance() {
-    println!("Starting improved high throughput test...");
+    eprintln!("Starting improved high throughput test...");
 
     // Add global timeout for the entire test
     let test_future = async {
-        // Optimized test parameters
-        let target_eps = 150; // Adjusted target based on current performance
-        let worker_count = 50; // Increased from 30 to 40 workers
-        let account_count = 200; // Increased from 50 to 100 accounts for better distribution
-        let channel_buffer_size = 5000; // Increased buffer size
-        let max_retries = 1; // Reduced retries for faster processing
+        // Aggressive test parameters
+        let target_eps = 5000; // Aggressive target
+        let worker_count = 10; // Small number of workers
+        let account_count = 20; // Small number of accounts
+        let channel_buffer_size = 2000; // Sufficient buffer
+        let max_retries = 1; // No retries for speed
 
-        // Optimized test parameters
-        let setup_timeout = Duration::from_secs(30);
-        let account_creation_timeout = Duration::from_secs(10);
-        let test_duration = Duration::from_secs(30); // Increased to 20 seconds for more data
-        let operation_timeout = Duration::from_millis(5000); // Increased to 5 seconds
+        // Aggressive test parameters
+        let setup_timeout = Duration::from_secs(10);
+        let account_creation_timeout = Duration::from_secs(5);
+        let test_duration = Duration::from_secs(5); // Short, bursty test
+        let operation_timeout = Duration::from_millis(1000); // 1s per op
 
-        println!("Initializing test environment...");
+        eprintln!("Initializing test environment...");
         let context = setup_test_environment()
             .await
             .expect("Failed to setup test environment");
-        println!("Test environment setup complete");
+        eprintln!("Test environment setup complete");
 
         // Create accounts for testing
-        println!("Creating {} test accounts...", account_count);
+        eprintln!("Creating {} test accounts...", account_count);
         let mut account_ids = Vec::new();
         for i in 0..account_count {
             let owner_name = format!("TestUser_{}", i);
@@ -630,7 +641,7 @@ async fn test_high_throughput_performance() {
         }
 
         // Cache warmup phase - populate cache with account data
-        println!("Warming up cache with {} accounts...", account_count);
+        eprintln!("Warming up cache with {} accounts...", account_count);
         let warmup_start = Instant::now();
         let mut warmup_handles = Vec::new();
 
@@ -651,7 +662,7 @@ async fn test_high_throughput_performance() {
         }
 
         let warmup_duration = warmup_start.elapsed();
-        println!(
+        eprintln!(
             "Cache warmup completed in {:.2}s",
             warmup_duration.as_secs_f64()
         );
@@ -660,13 +671,13 @@ async fn test_high_throughput_performance() {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Start performance test
-        println!("Starting high throughput performance test...");
-        println!("Test parameters:");
-        println!("  - Target EPS: {}", target_eps);
-        println!("  - Worker count: {}", worker_count);
-        println!("  - Account count: {}", account_count);
-        println!("  - Test duration: {:.1}s", test_duration.as_secs_f64());
-        println!(
+        eprintln!("Starting high throughput performance test...");
+        eprintln!("Test parameters:");
+        eprintln!("  - Target EPS: {}", target_eps);
+        eprintln!("  - Worker count: {}", worker_count);
+        eprintln!("  - Account count: {}", account_count);
+        eprintln!("  - Test duration: {:.1}s", test_duration.as_secs_f64());
+        eprintln!(
             "  - Operation timeout: {:.1}s",
             operation_timeout.as_secs_f64()
         );
@@ -676,7 +687,7 @@ async fn test_high_throughput_performance() {
         let end_time = start_time + test_duration;
 
         // Spawn worker tasks with improved logic
-        println!("Spawning worker tasks...");
+        eprintln!("Spawning worker tasks...");
         let mut handles = Vec::new();
         for worker_id in 0..worker_count {
             let tx = tx.clone();
@@ -685,7 +696,7 @@ async fn test_high_throughput_performance() {
             let operation_timeout = operation_timeout;
 
             let handle = tokio::spawn(async move {
-                println!("Worker {} starting...", worker_id);
+                eprintln!("Worker {} starting...", worker_id);
                 use rand::{Rng, SeedableRng};
                 use rand_chacha::ChaCha8Rng;
                 let mut rng = ChaCha8Rng::from_rng(rand::thread_rng()).unwrap();
@@ -769,7 +780,7 @@ async fn test_high_throughput_performance() {
                     // tokio::time::sleep(Duration::from_millis(5)).await;
                 }
 
-                println!(
+                eprintln!(
                     "Worker {} completed after {} operations",
                     worker_id, operations
                 );
@@ -782,7 +793,7 @@ async fn test_high_throughput_performance() {
         drop(tx);
 
         // Collect results
-        println!("Starting to collect results...");
+        eprintln!("Starting to collect results...");
         let mut total_ops = 0;
         let mut successful_ops = 0;
         let mut failed_ops = 0;
@@ -802,7 +813,7 @@ async fn test_high_throughput_performance() {
                 let elapsed = start_time.elapsed();
                 let current_eps = total_ops as f64 / elapsed.as_secs_f64();
                 let current_success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
-                println!(
+                eprintln!(
                     "Progress: {} ops, {:.2} EPS, {:.1}% success",
                     total_ops, current_eps, current_success_rate
                 );
@@ -810,44 +821,44 @@ async fn test_high_throughput_performance() {
         }
 
         // Wait for all workers to complete
-        println!("Finished collecting results after {} operations", total_ops);
-        println!("Waiting for workers to complete...");
+        eprintln!("Finished collecting results after {} operations", total_ops);
+        eprintln!("Waiting for workers to complete...");
         for handle in handles {
             handle.await.expect("Worker task failed");
         }
-        println!("All worker tasks completed successfully\n");
+        eprintln!("All worker tasks completed successfully\n");
 
         // Calculate final metrics
         let duration = start_time.elapsed();
         let eps = total_ops as f64 / duration.as_secs_f64();
         let success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
 
-        println!("Improved High Throughput Test Results:");
-        println!("Duration: {:.2}s", duration.as_secs_f64());
-        println!("Total Operations: {}", total_ops);
-        println!("Successful Operations: {}", successful_ops);
-        println!("Failed Operations: {}", failed_ops);
-        println!("Timed Out Operations: {}", timed_out_ops);
-        println!("Events Per Second: {:.2}", eps);
-        println!("Success Rate: {:.2}%\n", success_rate);
+        eprintln!("Improved High Throughput Test Results:");
+        eprintln!("Duration: {:.2}s", duration.as_secs_f64());
+        eprintln!("Total Operations: {}", total_ops);
+        eprintln!("Successful Operations: {}", successful_ops);
+        eprintln!("Failed Operations: {}", failed_ops);
+        eprintln!("Timed Out Operations: {}", timed_out_ops);
+        eprintln!("Events Per Second: {:.2}", eps);
+        eprintln!("Success Rate: {:.2}%\n", success_rate);
 
         // Get metrics from services
         let metrics = context.account_service.get_metrics();
-        println!("System Metrics:");
-        println!(
+        eprintln!("System Metrics:");
+        eprintln!(
             "Commands Processed: {}",
             metrics.commands_processed.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "Commands Failed: {}",
             metrics.commands_failed.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "Projection Updates: {}",
             metrics.projection_updates.load(Ordering::Relaxed)
         );
-        println!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
-        println!(
+        eprintln!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
+        eprintln!(
             "Cache Misses: {}",
             metrics.cache_misses.load(Ordering::Relaxed)
         );
@@ -863,13 +874,13 @@ async fn test_high_throughput_performance() {
         } else {
             0.0
         };
-        println!("Cache Hit Rate: {:.2}%", cache_hit_rate);
+        eprintln!("Cache Hit Rate: {:.2}%", cache_hit_rate);
 
         // Verify final account states
-        println!("\nFinal Account States (Sample):");
+        eprintln!("\nFinal Account States (Sample):");
         for (i, account_id) in account_ids.iter().take(5).enumerate() {
             if let Ok(Some(account)) = context.account_service.get_account(*account_id).await {
-                println!("Account {}: Balance = {}", i, account.balance);
+                eprintln!("Account {}: Balance = {}", i, account.balance);
             }
         }
 
@@ -893,14 +904,14 @@ async fn test_high_throughput_performance() {
             total_ops
         );
 
-        println!("✅ All performance targets met! High throughput test completed successfully.");
+        eprintln!("✅ All performance targets met! High throughput test completed successfully.");
 
         Ok::<(), Box<dyn std::error::Error>>(())
     };
 
     // Add global timeout of 3 minutes
     match tokio::time::timeout(Duration::from_secs(180), test_future).await {
-        Ok(_) => println!("Test completed successfully"),
+        Ok(_) => eprintln!("Test completed successfully"),
         Err(_) => panic!("Test timed out after 180 seconds"),
     }
 }
@@ -973,7 +984,7 @@ async fn test_concurrent_deposits() {
     let successful_deposits = Arc::new(AtomicU64::new(0));
     let failed_deposits = Arc::new(AtomicU64::new(0));
 
-    println!("Starting {} concurrent deposits...", deposit_count);
+    eprintln!("Starting {} concurrent deposits...", deposit_count);
 
     for i in 0..deposit_count {
         let service = ctx.account_service.clone();
@@ -983,7 +994,7 @@ async fn test_concurrent_deposits() {
         let failed_deposits = failed_deposits.clone();
 
         handles.push(tokio::spawn(async move {
-            println!("Starting deposit #{}", i + 1);
+            eprintln!("Starting deposit #{}", i + 1);
             let result = tokio::time::timeout(
                 Duration::from_secs(5),
                 service.deposit_money(account_id, amount),
@@ -992,17 +1003,17 @@ async fn test_concurrent_deposits() {
 
             match result {
                 Ok(Ok(_)) => {
-                    println!("Deposit #{} completed successfully", i + 1);
+                    eprintln!("Deposit #{} completed successfully", i + 1);
                     successful_deposits.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 }
                 Ok(Err(e)) => {
-                    println!("Deposit #{} failed: {:?}", i + 1, e);
+                    eprintln!("Deposit #{} failed: {:?}", i + 1, e);
                     failed_deposits.fetch_add(1, Ordering::SeqCst);
                     Err(e)
                 }
                 Err(_) => {
-                    println!("Deposit #{} timed out", i + 1);
+                    eprintln!("Deposit #{} timed out", i + 1);
                     failed_deposits.fetch_add(1, Ordering::SeqCst);
                     Err(AccountError::InfrastructureError(
                         "Operation timed out".to_string(),
@@ -1018,13 +1029,13 @@ async fn test_concurrent_deposits() {
         match tokio::time::timeout(Duration::from_secs(10), handle).await {
             Ok(Ok(result)) => results.push(result),
             Ok(Err(e)) => {
-                println!("Task failed: {:?}", e);
+                eprintln!("Task failed: {:?}", e);
                 results.push(Err(AccountError::InfrastructureError(
                     "Task failed".to_string(),
                 )));
             }
             Err(_) => {
-                println!("Task timed out");
+                eprintln!("Task timed out");
                 results.push(Err(AccountError::InfrastructureError(
                     "Task timed out".to_string(),
                 )));
@@ -1035,9 +1046,9 @@ async fn test_concurrent_deposits() {
     // Verify results
     let successful_count = successful_deposits.load(Ordering::SeqCst);
     let failed_count = failed_deposits.load(Ordering::SeqCst);
-    println!("\nDeposit Results:");
-    println!("Successful deposits: {}", successful_count);
-    println!("Failed deposits: {}", failed_count);
+    eprintln!("\nDeposit Results:");
+    eprintln!("Successful deposits: {}", successful_count);
+    eprintln!("Failed deposits: {}", failed_count);
 
     // Verify final balance
     let final_account = ctx
@@ -1094,21 +1105,21 @@ async fn test_concurrent_deposits() {
 
     // Print metrics
     let metrics = ctx.account_service.get_metrics();
-    println!("\nSystem Metrics:");
-    println!(
+    eprintln!("\nSystem Metrics:");
+    eprintln!(
         "Commands Processed: {}",
         metrics.commands_processed.load(Ordering::Relaxed)
     );
-    println!(
+    eprintln!(
         "Commands Failed: {}",
         metrics.commands_failed.load(Ordering::Relaxed)
     );
-    println!(
+    eprintln!(
         "Projection Updates: {}",
         metrics.projection_updates.load(Ordering::Relaxed)
     );
-    println!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
-    println!(
+    eprintln!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
+    eprintln!(
         "Cache Misses: {}",
         metrics.cache_misses.load(Ordering::Relaxed)
     );
@@ -1116,31 +1127,31 @@ async fn test_concurrent_deposits() {
 
 #[tokio::test]
 async fn test_infrastructure_configurations() {
-    println!("Testing infrastructure configurations...");
+    eprintln!("Testing infrastructure configurations...");
 
     // Test database connection
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
     });
 
-    println!("Testing PostgreSQL connection...");
+    eprintln!("Testing PostgreSQL connection...");
     let pool = match PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
     {
         Ok(pool) => {
-            println!("✅ PostgreSQL connection successful");
+            eprintln!("✅ PostgreSQL connection successful");
             pool
         }
         Err(e) => {
-            println!("❌ PostgreSQL connection failed: {}", e);
+            eprintln!("❌ PostgreSQL connection failed: {}", e);
             return;
         }
     };
 
     // Test database schema and configuration
-    println!("\nTesting database schema and configuration...");
+    eprintln!("\nTesting database schema and configuration...");
     let tables = match sqlx::query!(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
     )
@@ -1148,56 +1159,56 @@ async fn test_infrastructure_configurations() {
     .await
     {
         Ok(tables) => {
-            println!("✅ Database schema check successful");
+            eprintln!("✅ Database schema check successful");
             tables
         }
         Err(e) => {
-            println!("❌ Database schema check failed: {}", e);
+            eprintln!("❌ Database schema check failed: {}", e);
             return;
         }
     };
 
-    println!("\nFound tables:");
+    eprintln!("\nFound tables:");
     for table in tables {
-        println!("- {}", table.table_name.unwrap_or_default());
+        eprintln!("- {}", table.table_name.unwrap_or_default());
     }
 
     // Check database configuration
-    println!("\nChecking database configuration...");
+    eprintln!("\nChecking database configuration...");
     let db_config = match sqlx::query!("SHOW max_connections").fetch_one(&pool).await {
         Ok(config) => {
-            println!(
+            eprintln!(
                 "✅ Max connections: {}",
                 config.max_connections.as_ref().unwrap_or(&"0".to_string())
             );
             config
         }
         Err(e) => {
-            println!("❌ Failed to get max_connections: {}", e);
+            eprintln!("❌ Failed to get max_connections: {}", e);
             return;
         }
     };
 
     // Test Redis connection and configuration
-    println!("\nTesting Redis connection and configuration...");
+    eprintln!("\nTesting Redis connection and configuration...");
     let redis_client = match redis::Client::open("redis://127.0.0.1/") {
         Ok(client) => {
-            println!("✅ Redis client created successfully");
+            eprintln!("✅ Redis client created successfully");
             client
         }
         Err(e) => {
-            println!("❌ Redis client creation failed: {}", e);
+            eprintln!("❌ Redis client creation failed: {}", e);
             return;
         }
     };
 
     let mut con = match redis_client.get_multiplexed_async_connection().await {
         Ok(con) => {
-            println!("✅ Redis connection established");
+            eprintln!("✅ Redis connection established");
             con
         }
         Err(e) => {
-            println!("❌ Redis connection failed: {}", e);
+            eprintln!("❌ Redis connection failed: {}", e);
             return;
         }
     };
@@ -1207,16 +1218,16 @@ async fn test_infrastructure_configurations() {
     match redis::cmd("PING").query_async::<_, String>(&mut con).await {
         Ok(_) => {
             let latency = start.elapsed();
-            println!("✅ Redis PING successful (latency: {:?})", latency);
+            eprintln!("✅ Redis PING successful (latency: {:?})", latency);
         }
         Err(e) => {
-            println!("❌ Redis PING failed: {}", e);
+            eprintln!("❌ Redis PING failed: {}", e);
             return;
         }
     }
 
     // Check Redis configuration
-    println!("\nChecking Redis configuration...");
+    eprintln!("\nChecking Redis configuration...");
     let configs = vec!["maxmemory", "maxmemory-policy", "timeout", "tcp-keepalive"];
     for config in configs {
         match redis::cmd("CONFIG")
@@ -1226,15 +1237,15 @@ async fn test_infrastructure_configurations() {
             .await
         {
             Ok(values) if values.len() >= 2 => {
-                println!("✅ {}: {}", values[0], values[1]);
+                eprintln!("✅ {}: {}", values[0], values[1]);
             }
-            Ok(_) => println!("⚠️ {}: No value found", config),
-            Err(e) => println!("❌ Failed to get {}: {}", config, e),
+            Ok(_) => eprintln!("⚠️ {}: No value found", config),
+            Err(e) => eprintln!("❌ Failed to get {}: {}", config, e),
         }
     }
 
     // Test database performance with multiple queries
-    println!("\nTesting database performance...");
+    eprintln!("\nTesting database performance...");
     let queries = vec![
         "SELECT 1",
         "SELECT COUNT(*) FROM events",
@@ -1248,28 +1259,28 @@ async fn test_infrastructure_configurations() {
             Ok(row) => {
                 let duration = start.elapsed();
                 let result: i64 = row.try_get(0).unwrap_or(0);
-                println!(
+                eprintln!(
                     "✅ Query '{}' completed in {:?} (result: {:?})",
                     query, duration, result
                 );
             }
-            Err(e) => println!("❌ Query '{}' failed: {}", query, e),
+            Err(e) => eprintln!("❌ Query '{}' failed: {}", query, e),
         }
     }
 
     // Test Redis performance with multiple operations
-    println!("\nTesting Redis performance...");
+    eprintln!("\nTesting Redis performance...");
 
     let start = std::time::Instant::now();
     match redis::cmd("PING").query_async::<_, String>(&mut con).await {
         Ok(result) => {
             let duration = start.elapsed();
-            println!(
+            eprintln!(
                 "✅ Redis PING completed in {:?} (result: {:?})",
                 duration, result
             );
         }
-        Err(e) => println!("❌ Redis PING failed: {}", e),
+        Err(e) => eprintln!("❌ Redis PING failed: {}", e),
     }
 
     let start = std::time::Instant::now();
@@ -1281,12 +1292,12 @@ async fn test_infrastructure_configurations() {
     {
         Ok(result) => {
             let duration = start.elapsed();
-            println!(
+            eprintln!(
                 "✅ Redis SET completed in {:?} (result: {:?})",
                 duration, result
             );
         }
-        Err(e) => println!("❌ Redis SET failed: {}", e),
+        Err(e) => eprintln!("❌ Redis SET failed: {}", e),
     }
 
     let start = std::time::Instant::now();
@@ -1297,12 +1308,12 @@ async fn test_infrastructure_configurations() {
     {
         Ok(result) => {
             let duration = start.elapsed();
-            println!(
+            eprintln!(
                 "✅ Redis GET completed in {:?} (result: {:?})",
                 duration, result
             );
         }
-        Err(e) => println!("❌ Redis GET failed: {}", e),
+        Err(e) => eprintln!("❌ Redis GET failed: {}", e),
     }
 
     let start = std::time::Instant::now();
@@ -1313,25 +1324,25 @@ async fn test_infrastructure_configurations() {
     {
         Ok(result) => {
             let duration = start.elapsed();
-            println!(
+            eprintln!(
                 "✅ Redis DEL completed in {:?} (result: {:?})",
                 duration, result
             );
         }
-        Err(e) => println!("❌ Redis DEL failed: {}", e),
+        Err(e) => eprintln!("❌ Redis DEL failed: {}", e),
     }
 
     // Check database connection pool stats
-    println!("\nDatabase connection pool statistics:");
-    println!("Active connections: {}", pool.size());
-    println!("Idle connections: {}", pool.num_idle());
-    println!(
+    eprintln!("\nDatabase connection pool statistics:");
+    eprintln!("Active connections: {}", pool.size());
+    eprintln!("Idle connections: {}", pool.num_idle());
+    eprintln!(
         "Max connections: {}",
         db_config.max_connections.unwrap_or_default()
     );
 
     // Check Redis memory usage
-    println!("\nRedis memory usage:");
+    eprintln!("\nRedis memory usage:");
     match redis::cmd("INFO")
         .arg("memory")
         .query_async::<_, String>(&mut con)
@@ -1343,19 +1354,19 @@ async fn test_infrastructure_configurations() {
                     || line.starts_with("used_memory_peak:")
                     || line.starts_with("used_memory_lua:")
                 {
-                    println!("{}", line);
+                    eprintln!("{}", line);
                 }
             }
         }
-        Err(e) => println!("❌ Failed to get Redis memory info: {}", e),
+        Err(e) => eprintln!("❌ Failed to get Redis memory info: {}", e),
     }
 
-    println!("\nInfrastructure configuration test completed successfully!");
+    eprintln!("\nInfrastructure configuration test completed successfully!");
 }
 
 #[tokio::test]
 async fn test_extreme_concurrency() {
-    println!("Starting extreme concurrency test...");
+    eprintln!("Starting extreme concurrency test...");
 
     let test_future = async {
         let test_duration = Duration::from_secs(10);
@@ -1365,7 +1376,7 @@ async fn test_extreme_concurrency() {
         let worker_count = 50; // 50 concurrent workers
         let channel_buffer_size = 1000;
 
-        println!("Initializing test environment for extreme concurrency...");
+        eprintln!("Initializing test environment for extreme concurrency...");
         let context = setup_test_environment()
             .await
             .expect("Failed to setup test environment");
@@ -1379,7 +1390,7 @@ async fn test_extreme_concurrency() {
                 .await
                 .expect("Failed to create account");
             account_ids.push(account_id);
-            println!("Created account {}: {}", i, account_id);
+            eprintln!("Created account {}: {}", i, account_id);
         }
 
         // Pre-warm cache for all accounts
@@ -1390,9 +1401,9 @@ async fn test_extreme_concurrency() {
                 .await
                 .expect("Failed to pre-warm cache");
         }
-        println!("Cache pre-warmed for all accounts");
+        eprintln!("Cache pre-warmed for all accounts");
 
-        println!(
+        eprintln!(
             "Starting extreme concurrency test with {} workers",
             worker_count
         );
@@ -1452,13 +1463,13 @@ async fn test_extreme_concurrency() {
                         Ok(Err(e)) => {
                             if worker_id % 10 == 0 {
                                 // Only log every 10th worker to reduce noise
-                                println!("Worker {} operation failed: {:?}", worker_id, e);
+                                eprintln!("Worker {} operation failed: {:?}", worker_id, e);
                             }
                             tx.send(OperationResult::Failure).await.ok();
                         }
                         Err(_) => {
                             if worker_id % 10 == 0 {
-                                println!("Worker {} operation timed out", worker_id);
+                                eprintln!("Worker {} operation timed out", worker_id);
                             }
                             tx.send(OperationResult::Timeout).await.ok();
                         }
@@ -1469,7 +1480,7 @@ async fn test_extreme_concurrency() {
                 }
 
                 if worker_id % 10 == 0 {
-                    println!(
+                    eprintln!(
                         "Worker {} completed after {} operations",
                         worker_id, operations
                     );
@@ -1498,7 +1509,7 @@ async fn test_extreme_concurrency() {
             if total_ops % 500 == 0 {
                 let elapsed = start_time.elapsed();
                 let current_eps = total_ops as f64 / elapsed.as_secs_f64();
-                println!("Current EPS: {:.2}, Total Ops: {}", current_eps, total_ops);
+                eprintln!("Current EPS: {:.2}, Total Ops: {}", current_eps, total_ops);
             }
         }
 
@@ -1511,44 +1522,44 @@ async fn test_extreme_concurrency() {
         let duration = start_time.elapsed();
         let eps = total_ops as f64 / duration.as_secs_f64();
 
-        println!("\nExtreme Concurrency Test Results:");
-        println!("Duration: {:.2}s", duration.as_secs_f64());
-        println!("Total Operations: {}", total_ops);
-        println!("Successful Operations: {}", successful_ops);
-        println!("Failed Operations: {}", failed_ops);
-        println!("Timed Out Operations: {}", timed_out_ops);
-        println!("Events Per Second: {:.2}", eps);
-        println!(
+        eprintln!("\nExtreme Concurrency Test Results:");
+        eprintln!("Duration: {:.2}s", duration.as_secs_f64());
+        eprintln!("Total Operations: {}", total_ops);
+        eprintln!("Successful Operations: {}", successful_ops);
+        eprintln!("Failed Operations: {}", failed_ops);
+        eprintln!("Timed Out Operations: {}", timed_out_ops);
+        eprintln!("Events Per Second: {:.2}", eps);
+        eprintln!(
             "Success Rate: {:.2}%",
             (successful_ops as f64 / total_ops as f64) * 100.0
         );
 
         // Get system metrics
         let metrics = context.account_service.get_metrics();
-        println!("\nSystem Metrics:");
-        println!(
+        eprintln!("\nSystem Metrics:");
+        eprintln!(
             "Commands Processed: {}",
             metrics.commands_processed.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "Commands Failed: {}",
             metrics.commands_failed.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "Projection Updates: {}",
             metrics.projection_updates.load(Ordering::Relaxed)
         );
-        println!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
-        println!(
+        eprintln!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
+        eprintln!(
             "Cache Misses: {}",
             metrics.cache_misses.load(Ordering::Relaxed)
         );
 
         // Verify final account states
-        println!("\nFinal Account States:");
+        eprintln!("\nFinal Account States:");
         for (i, account_id) in account_ids.iter().enumerate() {
             if let Ok(Some(account)) = context.account_service.get_account(*account_id).await {
-                println!("Account {}: Balance = {}", i, account.balance);
+                eprintln!("Account {}: Balance = {}", i, account.balance);
             }
         }
 
@@ -1568,14 +1579,14 @@ async fn test_extreme_concurrency() {
 
     // Add global timeout of 3 minutes for extreme concurrency test
     match tokio::time::timeout(Duration::from_secs(180), test_future).await {
-        Ok(_) => println!("Extreme concurrency test completed successfully"),
+        Ok(_) => eprintln!("Extreme concurrency test completed successfully"),
         Err(_) => panic!("Extreme concurrency test timed out after 180 seconds"),
     }
 }
 
 #[tokio::test]
 async fn test_optimized_high_concurrency() {
-    println!("Starting optimized high concurrency test...");
+    eprintln!("Starting optimized high concurrency test...");
 
     let test_future = async {
         let test_duration = Duration::from_secs(15);
@@ -1586,7 +1597,7 @@ async fn test_optimized_high_concurrency() {
         let account_count = 20; // Increased from 5 to 20 accounts for better distribution
         let channel_buffer_size = 1000;
 
-        println!("Initializing test environment for optimized high concurrency...");
+        eprintln!("Initializing test environment for optimized high concurrency...");
         let context = setup_test_environment()
             .await
             .expect("Failed to setup test environment");
@@ -1600,7 +1611,7 @@ async fn test_optimized_high_concurrency() {
                 .await
                 .expect("Failed to create account");
             account_ids.push(account_id);
-            println!("Created account {}: {}", i, account_id);
+            eprintln!("Created account {}: {}", i, account_id);
         }
 
         // Pre-warm cache for all accounts
@@ -1611,9 +1622,9 @@ async fn test_optimized_high_concurrency() {
                 .await
                 .expect("Failed to pre-warm cache");
         }
-        println!("Cache pre-warmed for all {} accounts", account_count);
+        eprintln!("Cache pre-warmed for all {} accounts", account_count);
 
-        println!(
+        eprintln!(
             "Starting optimized high concurrency test with {} workers",
             worker_count
         );
@@ -1685,7 +1696,7 @@ async fn test_optimized_high_concurrency() {
                             let count =
                                 error_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if count < 10 {
-                                println!("Worker {} operation failed: {:?}", worker_id, e);
+                                eprintln!("Worker {} operation failed: {:?}", worker_id, e);
                             }
                             tx.send(OperationResult::Failure).await.ok();
 
@@ -1710,7 +1721,7 @@ async fn test_optimized_high_concurrency() {
                 }
 
                 if worker_id % 5 == 0 {
-                    println!(
+                    eprintln!(
                         "Worker {} completed after {} operations",
                         worker_id, operations
                     );
@@ -1741,7 +1752,7 @@ async fn test_optimized_high_concurrency() {
                 let elapsed = start_time.elapsed();
                 let current_eps = total_ops as f64 / elapsed.as_secs_f64();
                 let current_success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
-                println!(
+                eprintln!(
                     "  Progress: {} ops, {:.2} EPS, {:.1}% success",
                     total_ops, current_eps, current_success_rate
                 );
@@ -1749,7 +1760,7 @@ async fn test_optimized_high_concurrency() {
         }
 
         // Wait for all workers to complete
-        println!("⏳ Waiting for workers to complete...");
+        eprintln!("⏳ Waiting for workers to complete...");
         for handle in handles {
             handle.await.expect("Worker task failed");
         }
@@ -1759,32 +1770,32 @@ async fn test_optimized_high_concurrency() {
         let eps = total_ops as f64 / duration.as_secs_f64();
         let success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
 
-        println!("\nOptimized High Concurrency Test Results:");
-        println!("Duration: {:.2}s", duration.as_secs_f64());
-        println!("Total Operations: {}", total_ops);
-        println!("Successful Operations: {}", successful_ops);
-        println!("Failed Operations: {}", failed_ops);
-        println!("Timed Out Operations: {}", timed_out_ops);
-        println!("Events Per Second: {:.2}", eps);
-        println!("Success Rate: {:.2}%", success_rate);
+        eprintln!("\nOptimized High Concurrency Test Results:");
+        eprintln!("Duration: {:.2}s", duration.as_secs_f64());
+        eprintln!("Total Operations: {}", total_ops);
+        eprintln!("Successful Operations: {}", successful_ops);
+        eprintln!("Failed Operations: {}", failed_ops);
+        eprintln!("Timed Out Operations: {}", timed_out_ops);
+        eprintln!("Events Per Second: {:.2}", eps);
+        eprintln!("Success Rate: {:.2}%", success_rate);
 
         // Get system metrics
         let metrics = context.account_service.get_metrics();
-        println!("\nSystem Metrics:");
-        println!(
+        eprintln!("\nSystem Metrics:");
+        eprintln!(
             "Commands Processed: {}",
             metrics.commands_processed.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "Commands Failed: {}",
             metrics.commands_failed.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "Projection Updates: {}",
             metrics.projection_updates.load(Ordering::Relaxed)
         );
-        println!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
-        println!(
+        eprintln!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
+        eprintln!(
             "Cache Misses: {}",
             metrics.cache_misses.load(Ordering::Relaxed)
         );
@@ -1800,13 +1811,13 @@ async fn test_optimized_high_concurrency() {
         } else {
             0.0
         };
-        println!("  Cache Hit Rate: {:.2}%", cache_hit_rate);
+        eprintln!("  Cache Hit Rate: {:.2}%", cache_hit_rate);
 
         // Verify final account states
-        println!("\nFinal Account States:");
+        eprintln!("\nFinal Account States:");
         for (i, account_id) in account_ids.iter().enumerate() {
             if let Ok(Some(account)) = context.account_service.get_account(*account_id).await {
-                println!("  Account {}: Balance = {}", i, account.balance);
+                eprintln!("  Account {}: Balance = {}", i, account.balance);
             }
         }
 
@@ -1826,14 +1837,14 @@ async fn test_optimized_high_concurrency() {
 
     // Add global timeout of 2 minutes for optimized concurrency test
     match tokio::time::timeout(Duration::from_secs(120), test_future).await {
-        Ok(_) => println!("Optimized high concurrency test completed successfully"),
+        Ok(_) => eprintln!("Optimized high concurrency test completed successfully"),
         Err(_) => panic!("Optimized high concurrency test timed out after 120 seconds"),
     }
 }
 
 #[tokio::test]
 async fn test_comprehensive_high_throughput() {
-    println!("🚀 Starting Comprehensive High-Throughput Test...");
+    eprintln!("🚀 Starting Comprehensive High-Throughput Test...");
 
     // Test configuration and performance targets
     let test_duration = Duration::from_secs(30);
@@ -1864,13 +1875,13 @@ async fn test_comprehensive_high_throughput() {
             account_ids.push(account_id);
 
             if i % 10 == 0 {
-                println!("  Created account {}/{}", i + 1, account_count);
+                eprintln!("  Created account {}/{}", i + 1, account_count);
             }
         }
-        println!("✅ All accounts created successfully");
+        eprintln!("✅ All accounts created successfully");
 
         // Pre-warm cache
-        println!("🔥 Pre-warming cache...");
+        eprintln!("🔥 Pre-warming cache...");
         for account_id in &account_ids {
             let _ = context
                 .account_service
@@ -1878,10 +1889,10 @@ async fn test_comprehensive_high_throughput() {
                 .await
                 .expect("Failed to pre-warm cache");
         }
-        println!("✅ Cache pre-warmed");
+        eprintln!("✅ Cache pre-warmed");
 
         // Start performance test
-        println!("🚀 Starting performance test with {} workers", worker_count);
+        eprintln!("🚀 Starting performance test with {} workers", worker_count);
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(channel_buffer_size);
         let start_time = Instant::now();
@@ -1956,7 +1967,7 @@ async fn test_comprehensive_high_throughput() {
                             let count =
                                 error_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if count < 10 {
-                                println!("Worker {} operation failed: {:?}", worker_id, e);
+                                eprintln!("Worker {} operation failed: {:?}", worker_id, e);
                             }
                             tx.send(OperationResult::Failure).await.ok();
 
@@ -1981,7 +1992,7 @@ async fn test_comprehensive_high_throughput() {
                 }
 
                 if worker_id % 20 == 0 {
-                    println!("  Worker {} completed {} operations", worker_id, operations);
+                    eprintln!("  Worker {} completed {} operations", worker_id, operations);
                 }
             });
 
@@ -1991,7 +2002,7 @@ async fn test_comprehensive_high_throughput() {
         drop(tx);
 
         // Collect results
-        println!("📈 Collecting results...");
+        eprintln!("📈 Collecting results...");
         let mut total_ops = 0;
         let mut successful_ops = 0;
         let mut failed_ops = 0;
@@ -2010,7 +2021,7 @@ async fn test_comprehensive_high_throughput() {
                 let elapsed = start_time.elapsed();
                 let current_eps = total_ops as f64 / elapsed.as_secs_f64();
                 let current_success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
-                println!(
+                eprintln!(
                     "  Progress: {} ops, {:.2} EPS, {:.1}% success",
                     total_ops, current_eps, current_success_rate
                 );
@@ -2018,7 +2029,7 @@ async fn test_comprehensive_high_throughput() {
         }
 
         // Wait for all workers to complete
-        println!("⏳ Waiting for workers to complete...");
+        eprintln!("⏳ Waiting for workers to complete...");
         for handle in handles {
             handle.await.expect("Worker task failed");
         }
@@ -2054,35 +2065,35 @@ async fn test_comprehensive_high_throughput() {
         };
 
         // Print comprehensive results
-        println!("\n🎯 Comprehensive High-Throughput Test Results:");
-        println!("================================================");
-        println!("📊 Performance Metrics:");
-        println!("  Duration: {:.2}s", duration.as_secs_f64());
-        println!("  Total Operations: {}", total_ops);
-        println!("  Events Per Second: {:.2}", eps);
-        println!("  Success Rate: {:.2}%", success_rate);
+        eprintln!("\n🎯 Comprehensive High-Throughput Test Results:");
+        eprintln!("================================================");
+        eprintln!("📊 Performance Metrics:");
+        eprintln!("  Duration: {:.2}s", duration.as_secs_f64());
+        eprintln!("  Total Operations: {}", total_ops);
+        eprintln!("  Events Per Second: {:.2}", eps);
+        eprintln!("  Success Rate: {:.2}%", success_rate);
 
-        println!("\n⚡ Latency Metrics:");
-        println!("  P50 Latency: {:?}", p50_latency);
-        println!("  P95 Latency: {:?}", p95_latency);
-        println!("  P99 Latency: {:?}", p99_latency);
-        println!(
+        eprintln!("\n⚡ Latency Metrics:");
+        eprintln!("  P50 Latency: {:?}", p50_latency);
+        eprintln!("  P95 Latency: {:?}", p95_latency);
+        eprintln!("  P99 Latency: {:?}", p99_latency);
+        eprintln!(
             "  Average Latency: {:?}",
             latencies.iter().sum::<Duration>() / latencies.len().max(1) as u32
         );
 
-        println!("\n📈 Operation Breakdown:");
-        println!(
+        eprintln!("\n📈 Operation Breakdown:");
+        eprintln!(
             "  Successful: {} ({:.2}%)",
             successful_ops,
             (successful_ops as f64 / total_ops as f64) * 100.0
         );
-        println!(
+        eprintln!(
             "  Failed: {} ({:.2}%)",
             failed_ops,
             (failed_ops as f64 / total_ops as f64) * 100.0
         );
-        println!(
+        eprintln!(
             "  Timed Out: {} ({:.2}%)",
             timed_out_ops,
             (timed_out_ops as f64 / total_ops as f64) * 100.0
@@ -2090,24 +2101,24 @@ async fn test_comprehensive_high_throughput() {
 
         // System metrics
         let metrics = context.account_service.get_metrics();
-        println!("\n🔧 System Metrics:");
-        println!(
+        eprintln!("\n🔧 System Metrics:");
+        eprintln!(
             "  Commands Processed: {}",
             metrics.commands_processed.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "  Commands Failed: {}",
             metrics.commands_failed.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "  Projection Updates: {}",
             metrics.projection_updates.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "  Cache Hits: {}",
             metrics.cache_hits.load(Ordering::Relaxed)
         );
-        println!(
+        eprintln!(
             "  Cache Misses: {}",
             metrics.cache_misses.load(Ordering::Relaxed)
         );
@@ -2123,29 +2134,29 @@ async fn test_comprehensive_high_throughput() {
         } else {
             0.0
         };
-        println!("  Cache Hit Rate: {:.2}%", cache_hit_rate);
+        eprintln!("  Cache Hit Rate: {:.2}%", cache_hit_rate);
 
         // Verify final account states
-        println!("\n💰 Final Account States (Sample):");
+        eprintln!("\n💰 Final Account States (Sample):");
         for (i, account_id) in account_ids.iter().enumerate() {
             if let Ok(Some(account)) = context.account_service.get_account(*account_id).await {
-                println!("  Account {}: Balance = {}", i, account.balance);
+                eprintln!("  Account {}: Balance = {}", i, account.balance);
             }
         }
 
         // Performance assertions
-        println!("\n✅ Performance Validation:");
+        eprintln!("\n✅ Performance Validation:");
         let eps_ok = eps >= target_eps as f64;
         let success_rate_ok = success_rate >= target_success_rate;
         let latency_ok = p95_latency <= target_latency_p95;
 
-        println!(
+        eprintln!(
             "  EPS Target: {} (Achieved: {:.2}) - {}",
             target_eps,
             eps,
             if eps_ok { "✅ PASS" } else { "❌ FAIL" }
         );
-        println!(
+        eprintln!(
             "  Success Rate Target: {}% (Achieved: {:.2}%) - {}",
             target_success_rate,
             success_rate,
@@ -2155,7 +2166,7 @@ async fn test_comprehensive_high_throughput() {
                 "❌ FAIL"
             }
         );
-        println!(
+        eprintln!(
             "  P95 Latency Target: {:?} (Achieved: {:?}) - {}",
             target_latency_p95,
             p95_latency,
@@ -2187,14 +2198,14 @@ async fn test_comprehensive_high_throughput() {
             total_ops
         );
 
-        println!("\n🎉 All performance targets met! Comprehensive high-throughput test completed successfully.");
+        eprintln!("\n🎉 All performance targets met! Comprehensive high-throughput test completed successfully.");
 
         Ok::<(), Box<dyn std::error::Error>>(())
     };
 
     // Global timeout
     match tokio::time::timeout(Duration::from_secs(300), test_future).await {
-        Ok(_) => println!("✅ Comprehensive high-throughput test completed successfully"),
+        Ok(_) => eprintln!("✅ Comprehensive high-throughput test completed successfully"),
         Err(_) => panic!("❌ Comprehensive high-throughput test timed out after 300 seconds"),
     }
 }
