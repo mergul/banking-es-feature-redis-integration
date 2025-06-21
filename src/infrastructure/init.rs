@@ -4,7 +4,7 @@ use crate::infrastructure::cache_service::{
     CacheConfig, CacheService, CacheServiceTrait, EvictionPolicy,
 };
 use crate::infrastructure::connection_pool_monitor::{ConnectionPoolMonitor, PoolMonitorConfig};
-use crate::infrastructure::deadlock_detector::{DeadlockDetector, DeadlockConfig};
+use crate::infrastructure::deadlock_detector::{DeadlockConfig, DeadlockDetector};
 use crate::infrastructure::event_store::{EventStore, EventStoreConfig, EventStoreTrait};
 use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaConsumer, KafkaProducer};
 use crate::infrastructure::kafka_event_processor::KafkaEventProcessor;
@@ -16,7 +16,7 @@ use crate::infrastructure::projections::{ProjectionConfig, ProjectionStore, Proj
 use crate::infrastructure::redis_abstraction::{RealRedisClient, RedisClientTrait};
 use crate::infrastructure::repository::{AccountRepository, AccountRepositoryTrait};
 use crate::infrastructure::scaling::{ScalingConfig, ScalingManager};
-use crate::infrastructure::timeout_manager::{TimeoutManager, TimeoutConfig};
+use crate::infrastructure::timeout_manager::{TimeoutConfig, TimeoutManager};
 use crate::infrastructure::user_repository::UserRepository;
 use anyhow::Result;
 use redis;
@@ -25,7 +25,6 @@ use std::time::Duration;
 use tracing::{error, info};
 use uuid::Uuid;
 
-#[derive(Clone)]
 pub struct ServiceContext {
     pub account_service: Arc<AccountService>,
     pub auth_service: Arc<AuthService>,
@@ -35,25 +34,33 @@ pub struct ServiceContext {
     pub timeout_manager: Arc<TimeoutManager>,
     pub deadlock_detector: Arc<DeadlockDetector>,
     pub connection_pool_monitor: Arc<ConnectionPoolMonitor>,
-    warmup_handle: Arc<tokio::task::JoinHandle<()>>,
-    l1_handle: Arc<tokio::task::JoinHandle<()>>,
+    warmup_handle: tokio::task::JoinHandle<()>,
+    l1_handle: tokio::task::JoinHandle<()>,
+    kafka_handle: tokio::task::JoinHandle<()>,
 }
 
 impl ServiceContext {
     pub async fn shutdown(mut self) {
         info!("Starting graceful shutdown of services...");
 
+        // Cancel Kafka event processor
+        self.kafka_handle.abort();
+        // Wait for it to finish
+        if let Err(_) = self.kafka_handle.await {
+            error!("Error during Kafka event processor shutdown");
+        }
+
         // Cancel L1 cache updater
         self.l1_handle.abort();
         // Wait for it to finish
-        if let Err(e) = Arc::try_unwrap(self.l1_handle).unwrap().await {
-            error!("Error during L1 cache updater shutdown: {}", e);
+        if let Err(_) = self.l1_handle.await {
+            error!("Error during L1 cache updater shutdown");
         }
 
         // Cancel warmup task if it's still running
         self.warmup_handle.abort();
-        if let Err(e) = Arc::try_unwrap(self.warmup_handle).unwrap().await {
-            error!("Error during warmup task shutdown: {}", e);
+        if let Err(_) = self.warmup_handle.await {
+            error!("Error during warmup task shutdown");
         }
 
         info!("Service shutdown complete");
@@ -61,33 +68,19 @@ impl ServiceContext {
 
     pub async fn check_background_tasks(mut self) -> Result<()> {
         // Check warmup task status
-        let warmup_result = tokio::spawn(async move {
-            if let Some(handle) = Arc::get_mut(&mut self.warmup_handle) {
-                handle.await
-            } else {
-                Ok(())
-            }
-        })
-        .await?;
+        let warmup_result = tokio::spawn(async move { self.warmup_handle.await }).await?;
 
-        if let Err(e) = warmup_result {
-            error!("Warmup task failed: {}", e);
-            return Err(anyhow::anyhow!("Warmup task failed: {}", e));
+        if let Err(_) = warmup_result {
+            error!("Warmup task failed");
+            return Err(anyhow::anyhow!("Warmup task failed"));
         }
 
         // Check L1 cache updater status
-        let l1_result = tokio::spawn(async move {
-            if let Some(handle) = Arc::get_mut(&mut self.l1_handle) {
-                handle.await
-            } else {
-                Ok(())
-            }
-        })
-        .await?;
+        let l1_result = tokio::spawn(async move { self.l1_handle.await }).await?;
 
-        if let Err(e) = l1_result {
-            error!("L1 cache updater task failed: {}", e);
-            return Err(anyhow::anyhow!("L1 cache updater task failed: {}", e));
+        if let Err(_) = l1_result {
+            error!("L1 cache updater task failed");
+            return Err(anyhow::anyhow!("L1 cache updater task failed"));
         }
 
         Ok(())
@@ -291,6 +284,7 @@ pub async fn init_all_services() -> Result<ServiceContext> {
             .unwrap_or_else(|_| "1".to_string())
             .parse()
             .unwrap_or(1),
+        batch_timeout_ms: 1, // Set to 1ms for immediate batch processing
         ..ProjectionConfig::default()
     };
 
@@ -329,9 +323,61 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     let cache_service: Arc<dyn CacheServiceTrait + Send + Sync> =
         Arc::new(CacheService::new(redis_client_trait.clone(), cache_config));
 
-    // Initialize AccountRepository
-    let account_repository: Arc<dyn AccountRepositoryTrait + Send + Sync> =
-        Arc::new(AccountRepository::new(event_store.clone()));
+    // Initialize AccountRepository with Kafka producer
+    let account_repository: Arc<dyn AccountRepositoryTrait + Send + Sync> = {
+        let kafka_config = KafkaConfig {
+            enabled: std::env::var("KAFKA_ENABLED")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .unwrap_or(true),
+            bootstrap_servers: std::env::var("KAFKA_BOOTSTRAP_SERVERS")
+                .unwrap_or_else(|_| "localhost:9092".to_string()),
+            group_id: std::env::var("KAFKA_GROUP_ID")
+                .unwrap_or_else(|_| "banking-es-group".to_string()),
+            topic_prefix: std::env::var("KAFKA_TOPIC_PREFIX")
+                .unwrap_or_else(|_| "banking-es".to_string()),
+            producer_acks: std::env::var("KAFKA_PRODUCER_ACKS")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()
+                .unwrap_or(1),
+            producer_retries: std::env::var("KAFKA_PRODUCER_RETRIES")
+                .unwrap_or_else(|_| "3".to_string())
+                .parse()
+                .unwrap_or(3),
+            consumer_max_poll_interval_ms: std::env::var("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS")
+                .unwrap_or_else(|_| "300000".to_string())
+                .parse()
+                .unwrap_or(300000),
+            consumer_session_timeout_ms: std::env::var("KAFKA_CONSUMER_SESSION_TIMEOUT_MS")
+                .unwrap_or_else(|_| "10000".to_string())
+                .parse()
+                .unwrap_or(10000),
+            consumer_max_poll_records: std::env::var("KAFKA_CONSUMER_MAX_POLL_RECORDS")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()
+                .unwrap_or(500),
+            security_protocol: std::env::var("KAFKA_SECURITY_PROTOCOL")
+                .unwrap_or_else(|_| "PLAINTEXT".to_string()),
+            sasl_mechanism: std::env::var("KAFKA_SASL_MECHANISM")
+                .unwrap_or_else(|_| "PLAIN".to_string()),
+            ssl_ca_location: std::env::var("KAFKA_SSL_CA_LOCATION").ok(),
+            auto_offset_reset: std::env::var("KAFKA_AUTO_OFFSET_RESET")
+                .unwrap_or_else(|_| "earliest".to_string()),
+            cache_invalidation_topic: std::env::var("KAFKA_CACHE_INVALIDATION_TOPIC")
+                .unwrap_or_else(|_| "banking-es-cache-invalidation".to_string()),
+            event_topic: std::env::var("KAFKA_EVENT_TOPIC")
+                .unwrap_or_else(|_| "banking-es-events".to_string()),
+        };
+
+        match AccountRepository::with_kafka_producer(event_store.clone(), kafka_config.clone()) {
+            Ok(repo) => Arc::new(repo),
+            Err(e) => {
+                error!("Failed to create repository with Kafka producer: {}", e);
+                // Fallback to repository without Kafka producer
+                Arc::new(AccountRepository::new(event_store.clone()))
+            }
+        }
+    };
 
     // Initialize RequestMiddleware with optimized config
     let rate_limit_config = crate::infrastructure::middleware::RateLimitConfig {
@@ -415,7 +461,7 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         100,
     ));
 
-    // Initialize Kafka with optimized config
+    // Use the same kafka_config for all Kafka-related services
     let kafka_config = KafkaConfig {
         enabled: std::env::var("KAFKA_ENABLED")
             .unwrap_or_else(|_| "true".to_string())
@@ -436,17 +482,17 @@ pub async fn init_all_services() -> Result<ServiceContext> {
             .parse()
             .unwrap_or(3),
         consumer_max_poll_interval_ms: std::env::var("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS")
-            .unwrap_or_else(|_| "600000".to_string())
+            .unwrap_or_else(|_| "300000".to_string())
             .parse()
-            .unwrap_or(600000),
+            .unwrap_or(300000),
         consumer_session_timeout_ms: std::env::var("KAFKA_CONSUMER_SESSION_TIMEOUT_MS")
-            .unwrap_or_else(|_| "30000".to_string())
+            .unwrap_or_else(|_| "10000".to_string())
             .parse()
-            .unwrap_or(30000),
+            .unwrap_or(10000),
         consumer_max_poll_records: std::env::var("KAFKA_CONSUMER_MAX_POLL_RECORDS")
-            .unwrap_or_else(|_| "250".to_string())
+            .unwrap_or_else(|_| "500".to_string())
             .parse()
-            .unwrap_or(250),
+            .unwrap_or(500),
         security_protocol: std::env::var("KAFKA_SECURITY_PROTOCOL")
             .unwrap_or_else(|_| "PLAINTEXT".to_string()),
         sasl_mechanism: std::env::var("KAFKA_SASL_MECHANISM")
@@ -463,14 +509,14 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     // Start warmup task early with explicit Arc cloning
     let event_store_for_warmup = event_store.clone();
     let cache_service_for_warmup = cache_service.clone();
-    let warmup_handle = Arc::new(tokio::spawn(async move {
+    let warmup_handle = tokio::spawn(async move {
         if let Ok(accounts) = event_store_for_warmup.get_all_accounts().await {
             let account_ids: Vec<Uuid> = accounts.iter().map(|a| a.id).collect();
-            if let Err(e) = cache_service_for_warmup.warmup_cache(account_ids).await {
-                error!("Cache warmup error: {}", e);
+            if let Err(_) = cache_service_for_warmup.warmup_cache(account_ids).await {
+                error!("Cache warmup error");
             }
         }
-    }));
+    });
 
     // Initialize L1CacheUpdater
     let l1_cache_updater = Arc::new(L1CacheUpdater::new(
@@ -488,11 +534,19 @@ pub async fn init_all_services() -> Result<ServiceContext> {
 
     // Start L1 cache updater in background
     let l1_updater = l1_cache_updater.clone();
-    let l1_handle = Arc::new(tokio::spawn(async move {
-        if let Err(e) = l1_updater.start().await {
-            error!("L1 cache updater error: {}", e);
+    let l1_handle = tokio::spawn(async move {
+        if let Err(_) = l1_updater.start().await {
+            error!("L1 cache updater error");
         }
-    }));
+    });
+
+    // Start Kafka event processor in background
+    let kafka_processor_for_start = kafka_processor.clone();
+    let kafka_handle = tokio::spawn(async move {
+        if let Err(_) = kafka_processor_for_start.start_processing().await {
+            error!("Kafka event processor error");
+        }
+    });
 
     info!("All services initialized successfully");
 
@@ -508,6 +562,7 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         connection_pool_monitor,
         warmup_handle,
         l1_handle,
+        kafka_handle,
     };
 
     Ok(service_context)

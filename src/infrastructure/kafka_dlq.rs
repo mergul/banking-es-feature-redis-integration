@@ -13,17 +13,21 @@ use uuid::Uuid;
 
 // Custom module for bincode-compatible DateTime<Utc> serialization
 mod bincode_datetime {
-    use chrono::{DateTime, Utc, TimeZone};
-    use serde::{self, Serializer, Deserializer};
+    use chrono::{DateTime, TimeZone, Utc};
     use serde::de::Deserialize;
+    use serde::{self, Deserializer, Serializer};
 
     pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         serializer.serialize_i64(dt.timestamp())
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let ts = i64::deserialize(deserializer)?;
         Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
     }
@@ -31,14 +35,18 @@ mod bincode_datetime {
     pub mod option {
         use super::*;
         pub fn serialize<S>(dt: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
-        where S: Serializer {
+        where
+            S: Serializer,
+        {
             match dt {
                 Some(dt) => serializer.serialize_some(&dt.timestamp()),
                 None => serializer.serialize_none(),
             }
         }
         pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
-        where D: Deserializer<'de> {
+        where
+            D: Deserializer<'de>,
+        {
             let opt = Option::<i64>::deserialize(deserializer)?;
             Ok(opt.map(|ts| Utc.timestamp_opt(ts, 0).single().unwrap()))
         }
@@ -122,6 +130,9 @@ impl DeadLetterQueue {
     }
 
     pub async fn process_dlq(&self) -> Result<()> {
+        // Subscribe to DLQ topic
+        self.consumer.subscribe_to_dlq().await?;
+
         loop {
             if let Some(message) = self.consumer.poll_dlq_message().await? {
                 if message.retry_count >= self.max_retries {

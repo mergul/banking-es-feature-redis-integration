@@ -23,7 +23,7 @@ use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::signal;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info, Level};
+use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_line_number(true)
         .init();
 
-    info!("Starting high-performance banking service");
+    println!("Starting high-performance banking service");
 
     // Load environment variables
     dotenv::dotenv().ok();
@@ -101,15 +101,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_context.account_service.clone(),
         service_context.auth_service.clone(),
     );
-
-    // Clone for shutdown before checking tasks
-    let service_context_for_shutdown = service_context.clone();
-
-    // Check background tasks status
-    if let Err(e) = service_context.check_background_tasks().await {
-        error!("Background tasks failed: {}", e);
-        return Err(e.into());
-    }
 
     // Build the router with optimized middleware stack
     let app = Router::new()
@@ -163,20 +154,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(addr).await?;
     configure_tcp_listener(&listener)?;
 
-    info!("Server running on {}", addr);
+    println!("Server running on {}", addr);
 
     // Start the server with graceful shutdown
     let server = axum::serve(listener, app);
     let graceful = server.with_graceful_shutdown(shutdown_signal());
 
     if let Err(e) = graceful.await {
-        error!("Server error: {}", e);
+        eprintln!("Server error: {}", e);
         return Err(e.into());
     }
 
     // Graceful shutdown of services
-    service_context_for_shutdown.shutdown().await;
-    info!("Server shutdown complete");
+    service_context.shutdown().await;
+    println!("Server shutdown complete");
 
     Ok(())
 }
@@ -204,7 +195,7 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 
-    info!("Shutting down gracefully...");
+    println!("Shutting down gracefully...");
 }
 
 fn configure_tcp_listener(listener: &TcpListener) -> Result<(), Box<dyn std::error::Error>> {
@@ -236,9 +227,9 @@ fn configure_tcp_listener(listener: &TcpListener) -> Result<(), Box<dyn std::err
 
     #[cfg(windows)]
     {
-        use windows::Win32::Networking::WinSock::{setsockopt, SOL_SOCKET, SO_REUSEADDR};
-        use windows::Win32::Networking::WinSock::SOCKET;
         use std::os::windows::io::AsRawSocket;
+        use windows::Win32::Networking::WinSock::SOCKET;
+        use windows::Win32::Networking::WinSock::{setsockopt, SOL_SOCKET, SO_REUSEADDR};
 
         let socket = SOCKET(listener.as_raw_socket() as usize);
         let optval: i32 = 1;
@@ -248,7 +239,10 @@ fn configure_tcp_listener(listener: &TcpListener) -> Result<(), Box<dyn std::err
                 socket,
                 SOL_SOCKET,
                 SO_REUSEADDR,
-                Some(std::slice::from_raw_parts(&optval as *const _ as *const u8, std::mem::size_of::<i32>())),
+                Some(std::slice::from_raw_parts(
+                    &optval as *const _ as *const u8,
+                    std::mem::size_of::<i32>(),
+                )),
             );
         }
     }

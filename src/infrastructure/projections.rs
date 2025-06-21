@@ -23,8 +23,6 @@ pub enum ProjectionError {
     CacheError(String),
     #[error("Batch processing error: {0}")]
     BatchError(String),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
 }
 
 // Projection metrics
@@ -155,7 +153,10 @@ impl ProjectionStoreTrait for ProjectionStore {
         &self,
         transactions: Vec<TransactionProjection>,
     ) -> Result<()> {
-        self.insert_transactions_batch(transactions).await
+        self.update_sender
+            .send(ProjectionUpdate::TransactionBatch(transactions))
+            .map_err(|e| anyhow::anyhow!("Failed to send transaction batch update: {}", e))?;
+        Ok(())
     }
 }
 
@@ -570,7 +571,7 @@ impl ProjectionStore {
             r#"
             INSERT INTO transaction_projections (id, account_id, transaction_type, amount, timestamp)
             SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::decimal[], $5::timestamptz[])
-            ON CONFLICT (id) DO NOTHING
+            ON CONFLICT (id, timestamp) DO NOTHING
             "#,
             &ids,
             &account_ids,

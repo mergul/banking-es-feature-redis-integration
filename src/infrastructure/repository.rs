@@ -1,22 +1,24 @@
 use crate::domain::{Account, AccountError, AccountEvent};
 use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
-use crate::infrastructure::event_store::{EventPriority, EventStore, EventStoreTrait, EventStoreExt};
-use crate::infrastructure::kafka_abstraction::KafkaConfig;
+use crate::infrastructure::event_store::{
+    EventPriority, EventStore, EventStoreExt, EventStoreTrait,
+};
+use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaProducer};
 use crate::infrastructure::kafka_event_processor::KafkaEventProcessor;
 use crate::infrastructure::projections::ProjectionStore;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::Utc;
+use dashmap::DashMap;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use dashmap::DashMap;
-use tokio::sync::Mutex;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use chrono::Utc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
@@ -67,6 +69,7 @@ struct RepositoryMetrics {
 #[derive(Clone)]
 pub struct AccountRepository {
     event_store: Arc<dyn EventStoreTrait + 'static>,
+    kafka_producer: Option<KafkaProducer>,
     pending_events: Arc<DashMap<Uuid, Vec<AccountEvent>>>,
     account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Account>>>>,
     flush_interval: Duration,
@@ -78,6 +81,7 @@ impl AccountRepository {
     pub fn new(event_store: Arc<dyn EventStoreTrait + 'static>) -> Self {
         let repo = Self {
             event_store,
+            kafka_producer: None,
             pending_events: Arc::new(DashMap::new()),
             account_cache: Arc::new(RwLock::new(HashMap::new())),
             flush_interval: Duration::from_millis(50),
@@ -89,6 +93,28 @@ impl AccountRepository {
         repo.start_metrics_reporter();
 
         repo
+    }
+
+    pub fn with_kafka_producer(
+        event_store: Arc<dyn EventStoreTrait + 'static>,
+        kafka_config: KafkaConfig,
+    ) -> Result<Self> {
+        let kafka_producer = KafkaProducer::new(kafka_config)?;
+
+        let repo = Self {
+            event_store,
+            kafka_producer: Some(kafka_producer),
+            pending_events: Arc::new(DashMap::new()),
+            account_cache: Arc::new(RwLock::new(HashMap::new())),
+            flush_interval: Duration::from_millis(50),
+            max_batch_size: 1000,
+            metrics: Arc::new(RepositoryMetrics::default()),
+        };
+
+        repo.start_batch_flush_task();
+        repo.start_metrics_reporter();
+
+        Ok(repo)
     }
 
     fn start_metrics_reporter(&self) {
@@ -142,12 +168,17 @@ impl AccountRepositoryTrait for AccountRepository {
     }
 
     async fn get_account(&self, account_id: Uuid) -> Result<Account> {
-        self.get_by_id(account_id).await.map_err(|e| anyhow::anyhow!(e))?
+        self.get_by_id(account_id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!(AccountError::NotFound))
     }
 
     async fn deposit_money(&self, account_id: Uuid, amount: Decimal) -> Result<Account> {
-        let mut account = self.get_by_id(account_id).await.map_err(|e| anyhow::anyhow!(e))?
+        let mut account = self
+            .get_by_id(account_id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!(AccountError::NotFound))?;
 
         let event = AccountEvent::MoneyDeposited {
@@ -164,7 +195,10 @@ impl AccountRepositoryTrait for AccountRepository {
     }
 
     async fn withdraw_money(&self, account_id: Uuid, amount: Decimal) -> Result<Account> {
-        let mut account = self.get_by_id(account_id).await.map_err(|e| anyhow::anyhow!(e))?
+        let mut account = self
+            .get_by_id(account_id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!(AccountError::NotFound))?;
 
         let event = AccountEvent::MoneyWithdrawn {
@@ -181,10 +215,32 @@ impl AccountRepositoryTrait for AccountRepository {
     }
 
     async fn save_immediate(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()> {
-        Ok(self
-            .event_store
-            .save_events(account.id, events, account.version)
-            .await?)
+        // First save events to event store
+        self.event_store
+            .save_events(account.id, events.clone(), account.version)
+            .await?;
+
+        // Then publish events to Kafka if producer is available
+        if let Some(producer) = &self.kafka_producer {
+            if let Err(e) = producer
+                .send_event_batch(account.id, events.clone(), account.version)
+                .await
+            {
+                error!(
+                    "Failed to publish events to Kafka for account {}: {}",
+                    account.id, e
+                );
+                // Don't fail the operation if Kafka publishing fails, just log the error
+            } else {
+                info!(
+                    "Successfully published {} events to Kafka for account {}",
+                    events.len(),
+                    account.id
+                );
+            }
+        }
+
+        Ok(())
     }
 
     async fn save(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()> {
@@ -211,9 +267,10 @@ impl AccountRepositoryTrait for AccountRepository {
             version: 0,
         };
         for event in stored_events {
-            let account_event: AccountEvent = bincode::deserialize(&event.event_data).map_err(|e| {
-                AccountError::InfrastructureError(format!("Deserialization error: {}", e))
-            })?;
+            let account_event: AccountEvent =
+                bincode::deserialize(&event.event_data).map_err(|e| {
+                    AccountError::InfrastructureError(format!("Deserialization error: {}", e))
+                })?;
 
             account.apply_event(&account_event);
             account.version = event.version;
@@ -274,10 +331,17 @@ impl AccountRepositoryTrait for AccountRepository {
                         for (account_id, events) in grouped {
                             if let Err(e) = event_store.save_events(account_id, events, 0).await {
                                 error!("Failed to flush events for account {}: {}", account_id, e);
-                                metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                metrics
+                                    .errors
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             } else {
-                                metrics.batch_flushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                metrics.events_processed.fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                                metrics
+                                    .batch_flushes
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                metrics.events_processed.fetch_add(
+                                    chunk.len() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
                             }
                         }
                     }

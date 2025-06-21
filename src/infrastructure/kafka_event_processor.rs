@@ -10,10 +10,14 @@ use crate::infrastructure::kafka_monitoring::{MonitoringDashboard, MonitoringDas
 use crate::infrastructure::kafka_recovery::{KafkaRecovery, KafkaRecoveryTrait};
 use crate::infrastructure::kafka_recovery_strategies::{RecoveryStrategies, RecoveryStrategy};
 use crate::infrastructure::kafka_tracing::{KafkaTracing, KafkaTracingTrait};
-use crate::infrastructure::projections::{ProjectionStore, ProjectionStoreTrait};
+use crate::infrastructure::projections::{
+    AccountProjection, ProjectionStore, ProjectionStoreTrait,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use chrono;
 use rdkafka::error::KafkaError;
+use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -34,8 +38,8 @@ pub struct KafkaEventProcessor {
     consumer: KafkaConsumer,
     event_store: Arc<dyn EventStoreTrait + Send + Sync>,
     projections: Arc<dyn ProjectionStoreTrait + Send + Sync>,
-    dlq: Arc<dyn DeadLetterQueueTrait + Send + Sync>,
-    recovery: Arc<dyn KafkaRecoveryTrait + Send + Sync>,
+    dlq: Arc<DeadLetterQueue>,
+    recovery: Arc<KafkaRecovery>,
     recovery_strategies: Arc<RecoveryStrategies>,
     metrics: Arc<KafkaMetrics>,
     monitoring: Arc<dyn MonitoringDashboardTrait + Send + Sync>,
@@ -55,9 +59,12 @@ impl KafkaEventProcessor {
         let producer = KafkaProducer::new(config.clone())?;
         let consumer = KafkaConsumer::new(config.clone())?;
 
+        // Create a separate consumer for DLQ
+        let dlq_consumer = KafkaConsumer::new(config.clone())?;
+
         let dlq = Arc::new(DeadLetterQueue::new(
             producer.clone(),
-            consumer.clone(),
+            dlq_consumer,
             metrics.clone(),
             3,
             Duration::from_secs(1),
@@ -204,12 +211,10 @@ impl KafkaEventProcessor {
     async fn process_batch(&self, batch: EventBatch) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        // Save events to event store
-        self.event_store
-            .save_events(batch.account_id, batch.events.clone(), batch.version)
-            .await?;
+        // Don't save events to event store again - they're already saved by the repository
+        // The repository handles event storage and optimistic concurrency control
 
-        // Convert events to versioned format
+        // Convert events to versioned format for caching
         let versioned_events: Vec<(i64, AccountEvent)> = batch
             .events
             .iter()
@@ -228,6 +233,21 @@ impl KafkaEventProcessor {
             // Apply latest events to get final state
             for event in &batch.events {
                 account_proj = account_proj.apply_event(event)?;
+            }
+
+            // Update the account projection using batch upsert
+            if let Err(e) = self
+                .projections
+                .upsert_accounts_batch(vec![account_proj.clone()])
+                .await
+            {
+                error!("Failed to update account projection: {}", e);
+                // Don't fail the entire operation if projection update fails
+            } else {
+                info!(
+                    "Successfully updated account projection for account {}",
+                    batch.account_id
+                );
             }
 
             // Convert projection to account with updated state
@@ -251,6 +271,110 @@ impl KafkaEventProcessor {
             self.metrics
                 .cache_updates
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            // Account doesn't exist in projections, create it from events
+            let mut account_proj = AccountProjection {
+                id: batch.account_id,
+                owner_name: "Unknown".to_string(),
+                balance: rust_decimal::Decimal::ZERO,
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            for event in &batch.events {
+                account_proj = account_proj.apply_event(event)?;
+            }
+
+            // Insert the new account projection using batch upsert
+            if let Err(e) = self
+                .projections
+                .upsert_accounts_batch(vec![account_proj.clone()])
+                .await
+            {
+                error!("Failed to insert account projection: {}", e);
+                // Don't fail the entire operation if projection insert fails
+            } else {
+                info!(
+                    "Successfully created account projection for account {}",
+                    batch.account_id
+                );
+            }
+
+            // Convert projection to account with updated state
+            let account = Account {
+                id: account_proj.id,
+                owner_name: account_proj.owner_name,
+                balance: account_proj.balance,
+                is_active: account_proj.is_active,
+                version: batch.version + batch.events.len() as i64,
+            };
+
+            // Cache the updated account
+            self.cache_service
+                .set_account(&account, Some(Duration::from_secs(3600)))
+                .await?;
+
+            // Send cache update with final state
+            self.producer
+                .send_cache_update(batch.account_id, &account)
+                .await?;
+            self.metrics
+                .cache_updates
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Create transaction projections for MoneyDeposited and MoneyWithdrawn events
+        let mut transaction_projections = Vec::new();
+        let mut transaction_count = 0;
+        for event in &batch.events {
+            match event {
+                AccountEvent::MoneyDeposited {
+                    account_id, amount, ..
+                } => {
+                    transaction_count += 1;
+                    transaction_projections.push(
+                        crate::infrastructure::projections::TransactionProjection {
+                            id: uuid::Uuid::new_v4(),
+                            account_id: *account_id,
+                            transaction_type: "MoneyDeposited".to_string(),
+                            amount: *amount,
+                            timestamp: chrono::Utc::now(),
+                        },
+                    );
+                }
+                AccountEvent::MoneyWithdrawn {
+                    account_id, amount, ..
+                } => {
+                    transaction_count += 1;
+                    transaction_projections.push(
+                        crate::infrastructure::projections::TransactionProjection {
+                            id: uuid::Uuid::new_v4(),
+                            account_id: *account_id,
+                            transaction_type: "MoneyWithdrawn".to_string(),
+                            amount: *amount,
+                            timestamp: chrono::Utc::now(),
+                        },
+                    );
+                }
+                _ => {} // Skip other event types
+            }
+        }
+
+        // Insert transaction projections if any were created
+        if !transaction_projections.is_empty() {
+            if let Err(e) = self
+                .projections
+                .insert_transactions_batch(transaction_projections)
+                .await
+            {
+                error!("Failed to insert transaction projections: {}", e);
+                // Don't fail the entire operation if transaction projections fail
+            } else {
+                info!(
+                    "Successfully created {} transaction projections",
+                    transaction_count
+                );
+            }
         }
 
         self.metrics.processing_latency.fetch_add(

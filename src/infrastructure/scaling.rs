@@ -1,6 +1,7 @@
 use super::config::AppConfig;
 use crate::infrastructure::redis_abstraction::{RedisClient, RedisClientTrait};
 use anyhow::Result;
+use bincode;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use redis;
@@ -17,17 +18,21 @@ pub type ShardId = u32;
 
 // Custom module for bincode-compatible DateTime<Utc> serialization
 mod bincode_datetime {
-    use chrono::{DateTime, Utc, TimeZone};
-    use serde::{self, Serializer, Deserializer};
+    use chrono::{DateTime, TimeZone, Utc};
     use serde::de::Deserialize;
+    use serde::{self, Deserializer, Serializer};
 
     pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         serializer.serialize_i64(dt.timestamp())
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let ts = i64::deserialize(deserializer)?;
         Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
     }
@@ -115,7 +120,7 @@ impl ScalingManager {
     pub async fn register_instance(&self, instance: ServiceInstance) -> Result<()> {
         let instance_id = instance.id.clone();
         let key = format!("instance:{}", instance_id);
-        let value = serde_json::to_string(&instance)?;
+        let value = bincode::serialize(&instance)?;
 
         let mut conn = self.redis_client.get_connection().await?;
         redis::cmd("SETEX")
@@ -140,7 +145,7 @@ impl ScalingManager {
             instance.last_heartbeat = Utc::now();
 
             let key = format!("instance:{}", instance_id);
-            let value = serde_json::to_string(&*instance)?;
+            let value = bincode::serialize(&*instance)?;
 
             let mut conn = self.redis_client.get_connection().await?;
             redis::cmd("SETEX")
@@ -361,12 +366,10 @@ mod tests {
             latency_ms: 60,
         };
 
-        assert!(
-            manager
-                .update_instance_metrics("test-instance", new_metrics)
-                .await
-                .is_ok()
-        );
+        assert!(manager
+            .update_instance_metrics("test-instance", new_metrics)
+            .await
+            .is_ok());
 
         let instance = manager.instances.get("test-instance").unwrap();
         assert_eq!(instance.metrics.cpu_usage, 0.7);

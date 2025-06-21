@@ -1,6 +1,11 @@
 use crate::domain::{Account, AccountEvent};
+use crate::infrastructure::connection_pool_monitor::{
+    ConnectionPoolMonitor, PoolHealth, PoolMonitorConfig, PoolMonitorTrait,
+};
+use crate::infrastructure::deadlock_detector::{DeadlockConfig, DeadlockDetector, DeadlockStats};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use bincode;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -16,31 +21,29 @@ use thiserror::Error;
 use tokio::sync::{mpsc, Mutex, OnceCell, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use bincode;
-use crate::infrastructure::deadlock_detector::{DeadlockDetector, DeadlockConfig, DeadlockStats};
-use crate::infrastructure::connection_pool_monitor::{ConnectionPoolMonitor, PoolMonitorConfig, PoolHealth, PoolMonitorTrait};
 
 // Macro to track operations with deadlock detection
 macro_rules! track_operation {
-    ($detector:expr, $operation_type:expr, $operation_id:expr, $operation:expr) => {
+    ($detector:expr, $operation_type:expr, $operation_id:expr, $operation:expr) => {{
+        let detector = $detector;
+        let operation_type = $operation_type;
+        let operation_id = $operation_id;
+
+        // Start operation tracking
+        if let Err(e) = detector
+            .start_operation(operation_id.clone(), operation_type.to_string())
+            .await
         {
-            let detector = $detector;
-            let operation_type = $operation_type;
-            let operation_id = $operation_id;
-            
-            // Start operation tracking
-            if let Err(e) = detector.start_operation(operation_id.clone(), operation_type.to_string()).await {
-                warn!("Failed to start operation tracking: {}", e);
-            }
-            
-            let result = $operation.await;
-            
-            // End operation tracking
-            detector.end_operation(&operation_id).await;
-            
-            result
+            warn!("Failed to start operation tracking: {}", e);
         }
-    };
+
+        let result = $operation.await;
+
+        // End operation tracking
+        detector.end_operation(&operation_id).await;
+
+        result
+    }};
 }
 
 // Global connection pool
@@ -56,8 +59,6 @@ pub enum EventStoreError {
     },
     #[error("Database error: {0}")]
     DatabaseError(#[from] sqlx::Error),
-    #[error("Serialization error (serde_json): {0}")]
-    SerializationError(#[from] serde_json::Error),
     #[error("Serialization error (bincode): {0}")]
     SerializationErrorBincode(#[from] Box<bincode::ErrorKind>),
     #[error("Validation error: {0:?}")]
@@ -200,17 +201,19 @@ impl EventStore {
     /// Create EventStore with an existing PgPool
     pub fn new(pool: PgPool) -> Self {
         let deadlock_detector = DeadlockDetector::new(DeadlockConfig::default());
-        let pool_monitor = ConnectionPoolMonitor::new(
-            pool.clone(),
-            PoolMonitorConfig::default()
-        );
-        
-        Self::new_with_config_and_pool(pool, EventStoreConfig::default(), deadlock_detector, pool_monitor)
+        let pool_monitor = ConnectionPoolMonitor::new(pool.clone(), PoolMonitorConfig::default());
+
+        Self::new_with_config_and_pool(
+            pool,
+            EventStoreConfig::default(),
+            deadlock_detector,
+            pool_monitor,
+        )
     }
 
     /// Create EventStore with custom config and existing pool
     pub fn new_with_config_and_pool(
-        pool: PgPool, 
+        pool: PgPool,
         config: EventStoreConfig,
         deadlock_detector: DeadlockDetector,
         pool_monitor: ConnectionPoolMonitor,
@@ -442,7 +445,7 @@ impl EventStore {
         }
 
         let operation_id = format!("save_events_{}", aggregate_id);
-        
+
         track_operation!(
             &*self.deadlock_detector,
             "save_events",
@@ -461,11 +464,13 @@ impl EventStore {
                 // Acquire permit from semaphore with timeout
                 let _permit = tokio::time::timeout(
                     Duration::from_secs(5),
-                    self.batch_semaphore.clone().acquire_owned()
+                    self.batch_semaphore.clone().acquire_owned(),
                 )
                 .await
                 .map_err(|_| {
-                    EventStoreError::InternalError("Failed to acquire batch permit: timeout".to_string())
+                    EventStoreError::InternalError(
+                        "Failed to acquire batch permit: timeout".to_string(),
+                    )
                 })?
                 .map_err(|e| {
                     EventStoreError::InternalError(format!("Failed to acquire batch permit: {}", e))
@@ -486,7 +491,9 @@ impl EventStore {
                         "Failed to receive response: {}",
                         e
                     ))),
-                    Err(_) => Err(EventStoreError::InternalError("Operation timed out".to_string())),
+                    Err(_) => Err(EventStoreError::InternalError(
+                        "Operation timed out".to_string(),
+                    )),
                 }
             }
         )
@@ -557,7 +564,7 @@ impl EventStore {
         version_cache: &DashMap<Uuid, i64>,
     ) -> Result<(), EventStoreError> {
         let operation_id = format!("flush_batch_{}", Uuid::new_v4());
-        
+
         track_operation!(
             // Note: This would need to be passed as a parameter or stored in a global context
             // For now, we'll use a simplified approach
@@ -565,13 +572,14 @@ impl EventStore {
             "flush_batch",
             operation_id,
             async {
-                let mut tx = tokio::time::timeout(
-                    Duration::from_secs(10),
-                    pool.begin()
-                )
-                .await
-                .map_err(|_| EventStoreError::DatabaseError(sqlx::Error::Configuration("Connection timeout".into())))?
-                .map_err(EventStoreError::DatabaseError)?;
+                let mut tx = tokio::time::timeout(Duration::from_secs(10), pool.begin())
+                    .await
+                    .map_err(|_| {
+                        EventStoreError::DatabaseError(sqlx::Error::Configuration(
+                            "Connection timeout".into(),
+                        ))
+                    })?
+                    .map_err(EventStoreError::DatabaseError)?;
 
                 for batched_event in batch {
                     let event_data = Self::prepare_events_for_insert_optimized(&batched_event)
@@ -585,7 +593,8 @@ impl EventStore {
                             metrics
                                 .events_failed
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            validation_error = Some(EventStoreError::ValidationError(validation.errors));
+                            validation_error =
+                                Some(EventStoreError::ValidationError(validation.errors));
                             break;
                         }
                     }
@@ -627,14 +636,15 @@ impl EventStore {
                     let _ = batched_event.response_tx.send(insert_result);
                 }
 
-                tokio::time::timeout(
-                    Duration::from_secs(5),
-                    tx.commit()
-                )
-                .await
-                .map_err(|_| EventStoreError::DatabaseError(sqlx::Error::Configuration("Commit timeout".into())))?
-                .map_err(EventStoreError::DatabaseError)?;
-                
+                tokio::time::timeout(Duration::from_secs(5), tx.commit())
+                    .await
+                    .map_err(|_| {
+                        EventStoreError::DatabaseError(sqlx::Error::Configuration(
+                            "Commit timeout".into(),
+                        ))
+                    })?
+                    .map_err(EventStoreError::DatabaseError)?;
+
                 Ok(())
             }
         )
@@ -797,8 +807,9 @@ impl EventStore {
                     event.event_data,
                     event.version,
                     event.timestamp,
-                    bincode::serialize(&event.metadata)
-                        .unwrap_or_else(|_| bincode::serialize(&EventMetadata::default()).unwrap_or_default()),
+                    bincode::serialize(&event.metadata).unwrap_or_else(|_| {
+                        bincode::serialize(&EventMetadata::default()).unwrap_or_default()
+                    }),
                 ));
 
                 param_index += 7;
@@ -1052,7 +1063,7 @@ impl EventStore {
                 snapshot_data = EXCLUDED.snapshot_data,
                 version = EXCLUDED.version,
                 created_at = EXCLUDED.created_at
-            "#
+            "#,
         )
         .bind(aggregate_id)
         .bind(&snapshot_data)
@@ -1249,7 +1260,8 @@ impl EventStore {
 
         // Get deadlock detection stats
         let deadlock_stats = self.deadlock_detector.get_stats().await;
-        let pool_health = PoolMonitorTrait::health_check(&*self.pool_monitor).await
+        let pool_health = PoolMonitorTrait::health_check(&*self.pool_monitor)
+            .await
             .unwrap_or_else(|_| PoolHealth {
                 is_healthy: false,
                 utilization: 0.0,
@@ -1494,11 +1506,11 @@ impl Default for EventStoreConfig {
             max_lifetime_secs: 900,
 
             // Optimized batching settings
-            batch_size: 2000,     // Increased batch size
-            batch_timeout_ms: 5,  // Lower latency
+            batch_size: 2000,    // Increased batch size
+            batch_timeout_ms: 5, // Lower latency
             max_batch_queue_size: 10000,
             batch_processor_count: 8, // More parallel batch processors
-            snapshot_threshold: 500, // Reduced from 1000 for more frequent snapshots
+            snapshot_threshold: 500,  // Reduced from 1000 for more frequent snapshots
             snapshot_interval_secs: 300,
             snapshot_cache_ttl_secs: 3600,
             max_snapshots_per_run: 100, // Reduced from 500 to prevent overload

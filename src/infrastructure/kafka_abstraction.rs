@@ -14,6 +14,8 @@ use uuid::Uuid;
 use crate::domain::{Account, AccountEvent};
 use crate::infrastructure::kafka_dlq::DeadLetterMessage;
 use anyhow::Result;
+use bincode;
+use chrono::DateTime;
 use chrono::Utc;
 use futures::StreamExt;
 use rdkafka::{
@@ -24,25 +26,27 @@ use rdkafka::{
     util::Timeout,
     Offset, TopicPartitionList,
 };
-use bincode;
 use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{error, info};
-use chrono::DateTime;
 
 // Custom module for bincode-compatible DateTime<Utc> serialization
 mod bincode_datetime {
-    use chrono::{DateTime, Utc, TimeZone};
-    use serde::{self, Serializer, Deserializer};
+    use chrono::{DateTime, TimeZone, Utc};
     use serde::de::Deserialize;
+    use serde::{self, Deserializer, Serializer};
 
     pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         serializer.serialize_i64(dt.timestamp())
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let ts = i64::deserialize(deserializer)?;
         Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
     }
@@ -185,6 +189,9 @@ impl KafkaProducer {
 
         let payload = bincode::serialize(&batch)?;
 
+        // Use modulo to ensure partition is within valid range (32 partitions: 0-31)
+        let partition = (account_id.as_u128() % 32) as i32;
+
         self.producer
             .as_ref()
             .unwrap()
@@ -192,7 +199,7 @@ impl KafkaProducer {
                 FutureRecord::to(&topic)
                     .key(&key)
                     .payload(&payload)
-                    .partition(account_id.as_u128() as i32),
+                    .partition(partition),
                 Duration::from_secs(5),
             )
             .await
@@ -215,6 +222,9 @@ impl KafkaProducer {
 
         let payload = bincode::serialize(account)?;
 
+        // Use modulo to ensure partition is within valid range (32 partitions: 0-31)
+        let partition = (account_id.as_u128() % 32) as i32;
+
         self.producer
             .as_ref()
             .unwrap()
@@ -222,7 +232,7 @@ impl KafkaProducer {
                 FutureRecord::to(&topic)
                     .key(&key)
                     .payload(&payload)
-                    .partition(account_id.as_u128() as i32),
+                    .partition(partition),
                 Duration::from_secs(5),
             )
             .await
@@ -244,6 +254,9 @@ impl KafkaProducer {
 
         let payload = bincode::serialize(message)?;
 
+        // Use modulo to ensure partition is within valid range (32 partitions: 0-31)
+        let partition = (message.account_id.as_u128() % 32) as i32;
+
         self.producer
             .as_ref()
             .unwrap()
@@ -251,7 +264,7 @@ impl KafkaProducer {
                 FutureRecord::to(&topic)
                     .key(&key)
                     .payload(&payload)
-                    .partition(message.account_id.as_u128() as i32),
+                    .partition(partition),
                 Duration::from_secs(5),
             )
             .await
@@ -347,6 +360,16 @@ impl KafkaConsumer {
         }
 
         let topic = format!("{}-cache", self.config.topic_prefix);
+        self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
+        Ok(())
+    }
+
+    pub async fn subscribe_to_dlq(&self) -> Result<(), BankingKafkaError> {
+        if !self.config.enabled || self.consumer.is_none() {
+            return Ok(());
+        }
+
+        let topic = format!("{}-dlq", self.config.topic_prefix);
         self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
         Ok(())
     }
