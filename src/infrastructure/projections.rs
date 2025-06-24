@@ -379,15 +379,75 @@ impl ProjectionStore {
     pub async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>> {
         let start_time = Instant::now();
 
+        // TODO: Use materialized view account_projections_mv for better performance
+        // Run migration: migrations/20241201000000_create_materialized_views.sql
         let accounts = sqlx::query_as!(
             AccountProjection,
             r#"
             SELECT id, owner_name, balance, is_active, created_at, updated_at
             FROM account_projections
             WHERE is_active = true
-            ORDER BY created_at DESC
+            ORDER BY updated_at DESC
             LIMIT 10000
             "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        self.metrics.query_duration.fetch_add(
+            start_time.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(accounts)
+    }
+
+    pub async fn get_accounts_by_balance_range(
+        &self,
+        min_balance: Decimal,
+        max_balance: Decimal,
+    ) -> Result<Vec<AccountProjection>> {
+        let start_time = Instant::now();
+
+        // TODO: Use indexed materialized view for balance range queries
+        let accounts = sqlx::query_as!(
+            AccountProjection,
+            r#"
+            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            FROM account_projections
+            WHERE is_active = true 
+            AND balance BETWEEN $1 AND $2
+            ORDER BY balance DESC
+            LIMIT 1000
+            "#,
+            min_balance,
+            max_balance
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        self.metrics.query_duration.fetch_add(
+            start_time.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(accounts)
+    }
+
+    pub async fn get_top_accounts_by_balance(&self, limit: i64) -> Result<Vec<AccountProjection>> {
+        let start_time = Instant::now();
+
+        // TODO: Use materialized view with balance index for top accounts
+        let accounts = sqlx::query_as!(
+            AccountProjection,
+            r#"
+            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            FROM account_projections
+            WHERE is_active = true
+            ORDER BY balance DESC
+            LIMIT $1
+            "#,
+            limit
         )
         .fetch_all(&self.pool)
         .await?;

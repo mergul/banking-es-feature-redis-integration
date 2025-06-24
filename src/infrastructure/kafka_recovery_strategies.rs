@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -59,7 +58,7 @@ impl RecoveryStrategies {
     }
 
     async fn full_replay(&self, account_id: Option<Uuid>) -> Result<()> {
-        info!("Starting full replay recovery");
+        eprintln!("Starting full replay recovery");
         let accounts = if let Some(id) = account_id {
             vec![self
                 .event_store
@@ -84,12 +83,12 @@ impl RecoveryStrategies {
             }
         }
 
-        info!("Full replay recovery completed");
+        eprintln!("Full replay recovery completed");
         Ok(())
     }
 
     async fn incremental_replay(&self, account_id: Option<Uuid>) -> Result<()> {
-        info!("Starting incremental replay recovery");
+        eprintln!("Starting incremental replay recovery");
         let accounts = if let Some(id) = account_id {
             vec![self
                 .event_store
@@ -119,12 +118,12 @@ impl RecoveryStrategies {
             }
         }
 
-        info!("Incremental replay recovery completed");
+        eprintln!("Incremental replay recovery completed");
         Ok(())
     }
 
     async fn selective_replay(&self, account_id: Option<Uuid>) -> Result<()> {
-        info!("Starting selective replay recovery");
+        eprintln!("Starting selective replay recovery");
         let accounts = if let Some(id) = account_id {
             vec![self
                 .event_store
@@ -165,12 +164,12 @@ impl RecoveryStrategies {
             }
         }
 
-        info!("Selective replay recovery completed");
+        eprintln!("Selective replay recovery completed");
         Ok(())
     }
 
     async fn cache_only_recovery(&self, account_id: Option<Uuid>) -> Result<()> {
-        info!("Starting cache-only recovery");
+        eprintln!("Starting cache-only recovery");
         let accounts = if let Some(id) = account_id {
             vec![self
                 .event_store
@@ -187,15 +186,15 @@ impl RecoveryStrategies {
                 .await?;
         }
 
-        info!("Cache-only recovery completed");
+        eprintln!("Cache-only recovery completed");
         Ok(())
     }
 
     async fn dlq_recovery(&self, account_id: Option<Uuid>) -> Result<()> {
-        info!("Starting DLQ recovery");
+        eprintln!("Starting DLQ recovery");
         // Process all messages in DLQ
         self.dlq.process_dlq().await?;
-        info!("DLQ recovery completed");
+        eprintln!("DLQ recovery completed");
         Ok(())
     }
 

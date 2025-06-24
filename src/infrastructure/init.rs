@@ -34,6 +34,9 @@ pub struct ServiceContext {
     pub timeout_manager: Arc<TimeoutManager>,
     pub deadlock_detector: Arc<DeadlockDetector>,
     pub connection_pool_monitor: Arc<ConnectionPoolMonitor>,
+    pub event_store: Arc<dyn EventStoreTrait + Send + Sync>,
+    pub projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync>,
+    pub cache_service: Arc<dyn CacheServiceTrait + Send + Sync>,
     warmup_handle: tokio::task::JoinHandle<()>,
     l1_handle: tokio::task::JoinHandle<()>,
     kafka_handle: tokio::task::JoinHandle<()>,
@@ -41,7 +44,7 @@ pub struct ServiceContext {
 
 impl ServiceContext {
     pub async fn shutdown(mut self) {
-        info!("Starting graceful shutdown of services...");
+        println!("Starting graceful shutdown of services...");
 
         // Cancel Kafka event processor
         self.kafka_handle.abort();
@@ -63,7 +66,7 @@ impl ServiceContext {
             error!("Error during warmup task shutdown");
         }
 
-        info!("Service shutdown complete");
+        println!("Service shutdown complete");
     }
 
     pub async fn check_background_tasks(mut self) -> Result<()> {
@@ -88,7 +91,7 @@ impl ServiceContext {
 }
 
 pub async fn init_all_services() -> Result<ServiceContext> {
-    info!("Initializing services...");
+    println!("Initializing services...");
 
     // Initialize timeout manager
     let timeout_config = TimeoutConfig {
@@ -184,13 +187,98 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     };
     let deadlock_detector = Arc::new(DeadlockDetector::new(deadlock_config));
 
-    // Initialize Redis client Singleton with connection pool
-    let redis_client = Arc::new(redis::Client::open("redis://127.0.0.1/")?);
-    let redis_client_trait = RealRedisClient::new(redis_client.as_ref().clone(), None);
+    // Initialize Redis client Singleton with connection pool and multiplexing
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+    let redis_client = Arc::new(redis::Client::open(redis_url)?);
 
-    // Initialize EventStore with optimized pool size
+    // Configure Redis connection pool with multiplexing
+    let redis_pool_config = crate::infrastructure::redis_abstraction::RedisPoolConfig {
+        min_connections: std::env::var("REDIS_MIN_CONNECTIONS")
+            .unwrap_or_else(|_| "20".to_string())
+            .parse()
+            .unwrap_or(20),
+        max_connections: std::env::var("REDIS_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "200".to_string())
+            .parse()
+            .unwrap_or(200),
+        connection_timeout: Duration::from_secs(
+            std::env::var("REDIS_CONNECTION_TIMEOUT")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
+        ),
+        idle_timeout: Duration::from_secs(
+            std::env::var("REDIS_IDLE_TIMEOUT")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .unwrap_or(300),
+        ),
+    };
+
+    let redis_client_trait =
+        RealRedisClient::new(redis_client.as_ref().clone(), Some(redis_pool_config));
+
+    // Initialize EventStore with optimized pool size for high throughput
+    let event_store_config = EventStoreConfig {
+        database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        }),
+        max_connections: std::env::var("DB_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "2000".to_string())
+            .parse()
+            .unwrap_or(2000),
+        min_connections: std::env::var("DB_MIN_CONNECTIONS")
+            .unwrap_or_else(|_| "500".to_string())
+            .parse()
+            .unwrap_or(500),
+        acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
+            .unwrap_or_else(|_| "120".to_string())
+            .parse()
+            .unwrap_or(120),
+        idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
+            .unwrap_or_else(|_| "1200".to_string())
+            .parse()
+            .unwrap_or(1200),
+        max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
+            .unwrap_or_else(|_| "1800".to_string())
+            .parse()
+            .unwrap_or(1800),
+        batch_size: std::env::var("DB_BATCH_SIZE")
+            .unwrap_or_else(|_| "1000".to_string())
+            .parse()
+            .unwrap_or(1000),
+        batch_timeout_ms: std::env::var("DB_BATCH_TIMEOUT_MS")
+            .unwrap_or_else(|_| "100".to_string())
+            .parse()
+            .unwrap_or(100),
+        max_batch_queue_size: std::env::var("DB_MAX_BATCH_QUEUE_SIZE")
+            .unwrap_or_else(|_| "10000".to_string())
+            .parse()
+            .unwrap_or(10000),
+        batch_processor_count: std::env::var("DB_BATCH_PROCESSOR_COUNT")
+            .unwrap_or_else(|_| "16".to_string())
+            .parse()
+            .unwrap_or(16),
+        snapshot_threshold: std::env::var("DB_SNAPSHOT_THRESHOLD")
+            .unwrap_or_else(|_| "1000".to_string())
+            .parse()
+            .unwrap_or(1000),
+        snapshot_interval_secs: std::env::var("DB_SNAPSHOT_INTERVAL")
+            .unwrap_or_else(|_| "300".to_string())
+            .parse()
+            .unwrap_or(300),
+        snapshot_cache_ttl_secs: std::env::var("DB_SNAPSHOT_CACHE_TTL")
+            .unwrap_or_else(|_| "3600".to_string())
+            .parse()
+            .unwrap_or(3600),
+        max_snapshots_per_run: std::env::var("DB_MAX_SNAPSHOTS_PER_RUN")
+            .unwrap_or_else(|_| "100".to_string())
+            .parse()
+            .unwrap_or(100),
+    };
+
     let event_store: Arc<dyn EventStoreTrait + Send + Sync> =
-        Arc::new(EventStore::new_with_pool_size(5).await?);
+        Arc::new(EventStore::new_with_config(event_store_config).await?);
 
     // Initialize connection pool monitor
     let pool_monitor_config = PoolMonitorConfig {
@@ -274,24 +362,46 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         user_repository,
     ));
 
-    // Initialize ProjectionStore with optimized config
+    // Initialize ProjectionStore with optimized config for high throughput
     let projection_config = ProjectionConfig {
         max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "5".to_string())
+            .unwrap_or_else(|_| "500".to_string())
             .parse()
-            .unwrap_or(5),
+            .unwrap_or(500),
         min_connections: std::env::var("PROJECTION_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "1".to_string())
+            .unwrap_or_else(|_| "100".to_string())
             .parse()
-            .unwrap_or(1),
-        batch_timeout_ms: 1, // Set to 1ms for immediate batch processing
-        ..ProjectionConfig::default()
+            .unwrap_or(100),
+        acquire_timeout_secs: std::env::var("PROJECTION_ACQUIRE_TIMEOUT")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .unwrap_or(30),
+        idle_timeout_secs: std::env::var("PROJECTION_IDLE_TIMEOUT")
+            .unwrap_or_else(|_| "600".to_string())
+            .parse()
+            .unwrap_or(600),
+        max_lifetime_secs: std::env::var("PROJECTION_MAX_LIFETIME")
+            .unwrap_or_else(|_| "1800".to_string())
+            .parse()
+            .unwrap_or(1800),
+        cache_ttl_secs: std::env::var("PROJECTION_CACHE_TTL")
+            .unwrap_or_else(|_| "600".to_string())
+            .parse()
+            .unwrap_or(600),
+        batch_size: std::env::var("PROJECTION_BATCH_SIZE")
+            .unwrap_or_else(|_| "5000".to_string())
+            .parse()
+            .unwrap_or(5000),
+        batch_timeout_ms: std::env::var("PROJECTION_BATCH_TIMEOUT_MS")
+            .unwrap_or_else(|_| "20".to_string())
+            .parse()
+            .unwrap_or(20),
     };
 
     let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> =
         Arc::new(ProjectionStore::new_with_config(projection_config).await?);
 
-    // Initialize CacheService with optimized config
+    // Initialize CacheService with optimized config for high throughput
     let cache_config = CacheConfig {
         default_ttl: Duration::from_secs(
             std::env::var("CACHE_DEFAULT_TTL")
@@ -300,22 +410,22 @@ pub async fn init_all_services() -> Result<ServiceContext> {
                 .unwrap_or(3600),
         ),
         max_size: std::env::var("CACHE_MAX_SIZE")
-            .unwrap_or_else(|_| "5000".to_string())
+            .unwrap_or_else(|_| "50000".to_string())
             .parse()
-            .unwrap_or(5000),
+            .unwrap_or(50000),
         shard_count: std::env::var("CACHE_SHARD_COUNT")
-            .unwrap_or_else(|_| "8".to_string())
+            .unwrap_or_else(|_| "16".to_string())
             .parse()
-            .unwrap_or(8),
+            .unwrap_or(16),
         warmup_batch_size: std::env::var("CACHE_WARMUP_BATCH_SIZE")
-            .unwrap_or_else(|_| "50".to_string())
+            .unwrap_or_else(|_| "200".to_string())
             .parse()
-            .unwrap_or(50),
+            .unwrap_or(200),
         warmup_interval: Duration::from_secs(
             std::env::var("CACHE_WARMUP_INTERVAL")
-                .unwrap_or_else(|_| "300".to_string())
+                .unwrap_or_else(|_| "15".to_string())
                 .parse()
-                .unwrap_or(300),
+                .unwrap_or(15),
         ),
         eviction_policy: EvictionPolicy::LRU,
     };
@@ -548,7 +658,7 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         }
     });
 
-    info!("All services initialized successfully");
+    println!("All services initialized successfully");
 
     // Create ServiceContext
     let service_context = ServiceContext {
@@ -560,6 +670,9 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         timeout_manager,
         deadlock_detector,
         connection_pool_monitor,
+        event_store,
+        projection_store,
+        cache_service,
         warmup_handle,
         l1_handle,
         kafka_handle,

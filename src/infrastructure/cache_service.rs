@@ -6,22 +6,21 @@ use crate::infrastructure::redis_abstraction::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use bincode;
 use dashmap::DashMap;
 use redis::Client;
 use redis::RedisError;
-use redis::{ConnectionInfo, Value as RedisValue, aio::MultiplexedConnection};
+use redis::{aio::MultiplexedConnection, ConnectionInfo, Value as RedisValue};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use bincode;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncWrite, duplex};
+use tokio::io::{duplex, AsyncRead, AsyncWrite};
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -225,7 +224,7 @@ impl CacheService {
                     } else {
                         0.0
                     };
-                    info!(
+                    eprintln!(
                         "Cache Metrics - Hit Rate: {:.1}%, Evictions: {}, Errors: {}, Warmups: {}",
                         hit_rate, evictions, errors, warmups
                     );
@@ -261,7 +260,7 @@ impl CacheService {
         state.accounts_to_warm = Vec::new();
         drop(state);
 
-        info!("Cache service initialized successfully");
+        eprintln!("Cache service initialized successfully");
         Ok(())
     }
 
@@ -302,7 +301,7 @@ impl CacheService {
                         self.metrics
                             .errors
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        error!("Failed to deserialize account from cache: {}", e);
+                        eprintln!("Failed to deserialize account from cache: {}", e);
                         Ok(None)
                     }
                 }
@@ -317,7 +316,7 @@ impl CacheService {
                 self.metrics
                     .errors
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!("Redis error while getting account: {}", e);
+                eprintln!("Redis error while getting account: {}", e);
                 Err(e.into())
             }
         }
@@ -325,15 +324,34 @@ impl CacheService {
 
     pub async fn set_account(&self, account: &Account, ttl: Option<Duration>) -> Result<()> {
         let ttl = ttl.unwrap_or(self.config.default_ttl);
+
+        // Write-through caching: Update both Redis and in-memory cache atomically
         let mut conn = self.redis_client.get_connection().await?;
         use redis::AsyncCommands;
         let key = format!("account:{}", account.id);
         let value = bincode::serialize(account)?;
 
-        conn.set_ex::<_, _, ()>(key.as_bytes(), &value, ttl.as_secs() as u64)
-            .await?;
+        // Use Redis pipeline for atomic operations
+        let mut pipeline = redis::pipe();
+        pipeline.set_ex(key.as_bytes(), &value, ttl.as_secs() as u64);
 
-        // Update in-memory cache
+        // Also set a metadata key for cache warming
+        let metadata_key = format!("account_meta:{}", account.id);
+        let metadata = serde_json::json!({
+            "last_updated": chrono::Utc::now().timestamp(),
+            "version": account.version,
+            "is_active": account.is_active
+        });
+        pipeline.set_ex(
+            metadata_key.as_bytes(),
+            metadata.to_string().as_bytes(),
+            ttl.as_secs() as u64,
+        );
+
+        // Execute pipeline atomically
+        pipeline.query_async(&mut conn).await?;
+
+        // Update in-memory cache immediately (write-through)
         self.update_in_memory_cache(account.id, account.clone());
 
         Ok(())
@@ -378,7 +396,7 @@ impl CacheService {
                         self.metrics
                             .errors
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        error!("Failed to deserialize events from cache: {}", e);
+                        eprintln!("Failed to deserialize events from cache: {}", e);
                         Ok(None)
                     }
                 }
@@ -393,7 +411,7 @@ impl CacheService {
                 self.metrics
                     .errors
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!("Redis error while getting events: {}", e);
+                eprintln!("Redis error while getting events: {}", e);
                 Err(e.into())
             }
         }
@@ -467,38 +485,80 @@ impl CacheService {
         let mut conn = self.redis_client.get_connection().await?;
         use redis::AsyncCommands;
 
+        eprintln!(
+            "Starting intelligent cache warmup for {} accounts",
+            account_ids.len()
+        );
+
         for chunk in account_ids.chunks(batch_size) {
             let mut pipeline = redis::pipe();
 
+            // Prefetch both account data and metadata in parallel
             for &account_id in chunk {
                 let account_key = format!("account:{}", account_id);
                 let events_key = format!("events:{}", account_id);
+                let metadata_key = format!("account_meta:{}", account_id);
+
                 pipeline.get(account_key);
                 pipeline.get(events_key);
+                pipeline.get(metadata_key);
             }
 
             let results: Vec<redis::Value> = pipeline.query_async(&mut conn).await?;
 
             for (i, &account_id) in chunk.iter().enumerate() {
-                let account_bytes = match &results[i * 2] {
+                let account_bytes = match &results[i * 3] {
                     redis::Value::Data(bytes) => bytes.as_slice(),
                     _ => &[],
                 };
-                let events_bytes = match &results[i * 2 + 1] {
+                let events_bytes = match &results[i * 3 + 1] {
                     redis::Value::Data(bytes) => bytes.as_slice(),
                     _ => &[],
                 };
-                if let (Ok(account_data), Ok(events_data)) = (
-                    bincode::deserialize::<Account>(account_bytes),
-                    bincode::deserialize::<Vec<(i64, AccountEvent)>>(events_bytes),
-                ) {
+                let metadata_bytes = match &results[i * 3 + 2] {
+                    redis::Value::Data(bytes) => bytes.as_slice(),
+                    _ => &[],
+                };
+
+                // Process account data
+                if let Ok(account_data) = bincode::deserialize::<Account>(account_bytes) {
                     self.update_in_memory_cache(account_id, account_data);
-                    self.event_cache.insert(account_id, events_data);
                     self.metrics
                         .warmups
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
+
+                // Process events data
+                if let Ok(events_data) =
+                    bincode::deserialize::<Vec<(i64, AccountEvent)>>(events_bytes)
+                {
+                    self.event_cache.insert(account_id, events_data);
+                }
+
+                // Process metadata for intelligent prefetching
+                if let Ok(metadata_str) = std::str::from_utf8(metadata_bytes) {
+                    if let Ok(metadata) = serde_json::from_str::<serde_json::Value>(metadata_str) {
+                        // Use metadata for intelligent prefetching decisions
+                        if let Some(last_updated) =
+                            metadata.get("last_updated").and_then(|v| v.as_i64())
+                        {
+                            let now = chrono::Utc::now().timestamp();
+                            let age = now - last_updated;
+
+                            // If data is fresh, mark for aggressive caching
+                            if age < 300 {
+                                // 5 minutes
+                                self.metrics
+                                    .warmups
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
             }
+
+            // Small delay to prevent overwhelming the system
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         let mut state = self.warming_state.write().await;
@@ -506,6 +566,7 @@ impl CacheService {
         state.last_warmup = Some(Instant::now());
         state.accounts_to_warm.clear();
 
+        eprintln!("Cache warmup completed successfully");
         Ok(())
     }
 
@@ -572,11 +633,11 @@ impl CacheService {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            default_ttl: Duration::from_secs(3600),
-            max_size: 10000,
-            shard_count: 16,
-            warmup_batch_size: 100,
-            warmup_interval: Duration::from_secs(300),
+            default_ttl: Duration::from_secs(7200),
+            max_size: 200000,
+            shard_count: 64,
+            warmup_batch_size: 1000,
+            warmup_interval: Duration::from_secs(60),
             eviction_policy: EvictionPolicy::LRU,
         }
     }

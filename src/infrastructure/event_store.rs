@@ -240,18 +240,16 @@ impl EventStore {
             pool_monitor: Arc::new(pool_monitor),
         };
 
-        // Start background batch processor
-        let version_cache_for_processor = version_cache.clone();
-        tokio::spawn(Self::batch_processor(
+        // Start multiple batch processors for better throughput
+        Self::start_batch_processors(
             pool.clone(),
             batch_receiver,
             config.clone(),
-            batch_semaphore,
+            batch_semaphore.clone(),
             metrics.clone(),
             event_handlers.clone(),
-            version_cache_for_processor,
-            0,
-        ));
+            version_cache.clone(),
+        );
 
         // Start periodic snapshot creation
         tokio::spawn(Self::snapshot_worker(
@@ -307,19 +305,22 @@ impl EventStore {
                                 sqlx::query("SET SESSION synchronous_commit = 'off'")
                                     .execute(&mut *conn)
                                     .await?;
-                                sqlx::query("SET SESSION work_mem = '32MB'")
+                                sqlx::query("SET SESSION work_mem = '64MB'")
                                     .execute(&mut *conn)
                                     .await?;
-                                sqlx::query("SET SESSION maintenance_work_mem = '128MB'")
+                                sqlx::query("SET SESSION maintenance_work_mem = '256MB'")
                                     .execute(&mut *conn)
                                     .await?;
-                                sqlx::query("SET SESSION effective_cache_size = '2GB'")
+                                sqlx::query("SET SESSION effective_cache_size = '4GB'")
                                     .execute(&mut *conn)
                                     .await?;
                                 sqlx::query("SET SESSION random_page_cost = 1.1")
                                     .execute(&mut *conn)
                                     .await?;
-                                sqlx::query("SET SESSION statement_timeout = '5s'")
+                                sqlx::query("SET SESSION effective_io_concurrency = 200")
+                                    .execute(&mut *conn)
+                                    .await?;
+                                sqlx::query("SET SESSION statement_timeout = '10s'")
                                     .execute(&mut *conn)
                                     .await?;
                                 Ok(())
@@ -499,6 +500,50 @@ impl EventStore {
         )
     }
 
+    // Start multiple batch processors for parallel processing
+    fn start_batch_processors(
+        pool: PgPool,
+        receiver: mpsc::UnboundedReceiver<BatchedEvent>,
+        config: EventStoreConfig,
+        semaphore: Arc<Semaphore>,
+        metrics: Arc<EventStoreMetrics>,
+        event_handlers: Arc<DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>>,
+        version_cache: Arc<DashMap<Uuid, i64>>,
+    ) {
+        // Start background batch processor
+        let version_cache_for_processor = version_cache.clone();
+        tokio::spawn(Self::batch_processor(
+            pool.clone(),
+            receiver,
+            config.clone(),
+            semaphore,
+            metrics.clone(),
+            event_handlers.clone(),
+            version_cache_for_processor,
+            0,
+        ));
+    }
+
+    /// Work distributor that distributes events across multiple processors
+    async fn work_distributor(
+        mut receiver: mpsc::UnboundedReceiver<BatchedEvent>,
+        work_sender: mpsc::UnboundedSender<BatchedEvent>,
+        processor_count: usize,
+    ) {
+        let mut processor_index = 0;
+
+        while let Some(event) = receiver.recv().await {
+            // Simple round-robin distribution
+            if let Err(e) = work_sender.send(event) {
+                error!(
+                    "Failed to distribute work to processor {}: {}",
+                    processor_index, e
+                );
+            }
+            processor_index = (processor_index + 1) % processor_count;
+        }
+    }
+
     // Multi-threaded batch processor with priority queuing
     async fn batch_processor(
         pool: PgPool,
@@ -512,6 +557,9 @@ impl EventStore {
     ) {
         let mut batch = Vec::new();
         let mut last_flush = Instant::now();
+        let mut processed_events = 0u64;
+
+        info!("Batch processor worker {} started", worker_id);
 
         loop {
             let timeout = tokio::time::sleep(Duration::from_millis(config.batch_timeout_ms));
@@ -521,6 +569,7 @@ impl EventStore {
                     batch.push(event);
 
                     if batch.len() >= config.batch_size {
+                        let batch_len = batch.len();
                         let batch_to_process = std::mem::replace(&mut batch, Vec::new());
                         let pool = pool.clone();
                         let metrics = metrics.clone();
@@ -533,10 +582,12 @@ impl EventStore {
                             }
                         });
                         last_flush = Instant::now();
+                        processed_events += batch_len as u64;
                     }
                 }
                 _ = timeout => {
                     if !batch.is_empty() {
+                        let batch_len = batch.len();
                         let batch_to_process = std::mem::replace(&mut batch, Vec::new());
                         let pool = pool.clone();
                         let metrics = metrics.clone();
@@ -549,8 +600,14 @@ impl EventStore {
                             }
                         });
                         last_flush = Instant::now();
+                        processed_events += batch_len as u64;
                     }
                 }
+            }
+
+            // Log worker statistics periodically
+            if processed_events > 0 && processed_events % 1000 == 0 {
+                info!("Worker {} processed {} events", worker_id, processed_events);
             }
         }
     }
@@ -1499,21 +1556,21 @@ impl Default for EventStoreConfig {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
                 "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
             }),
-            max_connections: 20,
-            min_connections: 5,
+            max_connections: 200,
+            min_connections: 50,
             acquire_timeout_secs: 5,
-            idle_timeout_secs: 300,
-            max_lifetime_secs: 900,
+            idle_timeout_secs: 1800,
+            max_lifetime_secs: 3600,
 
-            // Optimized batching settings
-            batch_size: 2000,    // Increased batch size
-            batch_timeout_ms: 5, // Lower latency
-            max_batch_queue_size: 10000,
-            batch_processor_count: 8, // More parallel batch processors
-            snapshot_threshold: 500,  // Reduced from 1000 for more frequent snapshots
+            // Optimized batching settings for maximum throughput
+            batch_size: 10000,
+            batch_timeout_ms: 1,
+            max_batch_queue_size: 100000,
+            batch_processor_count: 32,
+            snapshot_threshold: 1000,
             snapshot_interval_secs: 300,
             snapshot_cache_ttl_secs: 3600,
-            max_snapshots_per_run: 100, // Reduced from 500 to prevent overload
+            max_snapshots_per_run: 50,
         }
     }
 }

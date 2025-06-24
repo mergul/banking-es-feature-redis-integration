@@ -6,6 +6,7 @@ use crate::infrastructure::projections::ProjectionStore;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
 use crate::infrastructure::redis_abstraction::RedisClient;
 use crate::infrastructure::scaling::{ScalingConfig, ScalingManager, ServiceInstance};
+use crate::web::cqrs_routes::create_cqrs_router;
 use crate::web::routes::create_router;
 use anyhow::Result;
 use axum::{
@@ -38,6 +39,7 @@ mod domain;
 mod infrastructure;
 mod web;
 
+use crate::application::services::CQRSAccountService;
 use crate::application::AccountService;
 use crate::infrastructure::middleware::RequestMiddleware;
 use crate::infrastructure::{AccountRepository, EventStoreConfig, UserRepository};
@@ -71,6 +73,17 @@ async fn root() -> Html<&'static str> {
                 <div class="endpoint">POST /accounts/{id}/withdraw - Withdraw money</div>
                 <div class="endpoint">GET /accounts/{id}/transactions - Get account transactions</div>
                 <div class="endpoint">POST /batch/transactions - Batch process transactions</div>
+                <h2>CQRS Endpoints</h2>
+                <div class="endpoint">POST /api/cqrs/accounts - Create new account (CQRS)</div>
+                <div class="endpoint">GET /api/cqrs/accounts/{id} - Get account details (CQRS)</div>
+                <div class="endpoint">POST /api/cqrs/accounts/{id}/deposit - Deposit money (CQRS)</div>
+                <div class="endpoint">POST /api/cqrs/accounts/{id}/withdraw - Withdraw money (CQRS)</div>
+                <div class="endpoint">GET /api/cqrs/accounts/{id}/balance - Get account balance (CQRS)</div>
+                <div class="endpoint">GET /api/cqrs/accounts/{id}/status - Check account status (CQRS)</div>
+                <div class="endpoint">GET /api/cqrs/accounts/{id}/transactions - Get account transactions (CQRS)</div>
+                <div class="endpoint">POST /api/cqrs/transactions/batch - Batch process transactions (CQRS)</div>
+                <div class="endpoint">GET /api/cqrs/health - CQRS health check</div>
+                <div class="endpoint">GET /api/cqrs/metrics - CQRS metrics</div>
             </body>
         </html>
     "#,
@@ -88,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_line_number(true)
         .init();
 
-    println!("Starting high-performance banking service");
+    println!("Starting high-performance banking service with CQRS");
 
     // Load environment variables
     dotenv::dotenv().ok();
@@ -101,6 +114,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_context.account_service.clone(),
         service_context.auth_service.clone(),
     );
+
+    // Initialize CQRS service using the services from ServiceContext
+    let cqrs_service = Arc::new(CQRSAccountService::new(
+        service_context.event_store.clone(),
+        service_context.projection_store.clone(),
+        service_context.cache_service.clone(),
+        1000,                       // max_concurrent_operations
+        100,                        // batch_size
+        Duration::from_millis(100), // batch_timeout
+    ));
 
     // Build the router with optimized middleware stack
     let app = Router::new()
@@ -144,6 +167,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Serve static files as fallback
         .fallback_service(ServeDir::new("static"));
 
+    // Create CQRS router and merge with main app
+    let cqrs_router = create_cqrs_router(cqrs_service, service_context.auth_service.clone());
+    let app = app.merge(cqrs_router);
+
     // Setup TCP listener with optimized settings
     let port = std::env::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
@@ -155,6 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     configure_tcp_listener(&listener)?;
 
     println!("Server running on {}", addr);
+    println!("CQRS endpoints available at /api/cqrs/*");
 
     // Start the server with graceful shutdown
     let server = axum::serve(listener, app);

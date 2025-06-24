@@ -7,17 +7,21 @@ use uuid::Uuid;
 // Custom module for bincode-compatible Decimal serialization
 mod bincode_decimal {
     use rust_decimal::Decimal;
-    use serde::{self, Serializer, Deserializer};
     use serde::de::Deserialize;
+    use serde::{self, Deserializer, Serializer};
 
     pub fn serialize<S>(decimal: &Decimal, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         // Serialize as string to avoid precision issues
         serializer.serialize_str(&decimal.to_string())
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let s = String::deserialize(deserializer)?;
         s.parse::<Decimal>().map_err(serde::de::Error::custom)
     }
@@ -173,7 +177,10 @@ impl Default for Account {
 
 impl std::fmt::Display for Account {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Account(id: {}, owner: {}, balance: {})", 
-            self.id, self.owner_name, self.balance)
+        write!(
+            f,
+            "Account(id: {}, owner: {}, balance: {})",
+            self.id, self.owner_name, self.balance
+        )
     }
 }
