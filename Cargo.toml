@@ -11,10 +11,10 @@ jsonwebtoken = "9.2"
 argon2 = "0.5.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "1.0.56"
 uuid = { version = "1.7", features = ["v4", "serde"] }
 redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
 dashmap = "5.5"
@@ -46,7 +46,7 @@ crossbeam = "0.8" # Lock-free data structures
 
 
 # Observability
-
+tracing-appender = "0.2"
 
 # System
 libc = "0.2"

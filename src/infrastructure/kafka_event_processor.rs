@@ -18,11 +18,11 @@ use async_trait::async_trait;
 use chrono;
 use rdkafka::error::KafkaError;
 use rust_decimal::Decimal;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Default)]
@@ -108,9 +108,9 @@ impl KafkaEventProcessor {
 
     pub async fn start_processing(&self) -> Result<()> {
         // Initialize tracing
-        self.tracing
-            .init_tracing()
-            .map_err(|e| anyhow::anyhow!("Failed to initialize tracing: {}", e))?;
+        self.tracing.init_tracing().map_err(|e| {
+            anyhow::Error::msg("Failed to initialize tracing: ".to_string() + &e.to_string())
+        })?;
 
         self.consumer.subscribe_to_events().await?;
 
@@ -118,7 +118,9 @@ impl KafkaEventProcessor {
         let dlq = self.dlq.clone();
         tokio::spawn(async move {
             if let Err(e) = dlq.process_dlq().await {
-                error!("DLQ processing failed: {}", e);
+                let _ = std::io::stderr().write_all(
+                    ("DLQ processing failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
+                );
             }
         });
 
@@ -160,12 +162,19 @@ impl KafkaEventProcessor {
                             );
                         }
                         Err(e) => {
-                            error!("Failed to process event batch: {}", e);
+                            let _ = std::io::stderr().write_all(
+                                ("Failed to process event batch: ".to_string()
+                                    + &e.to_string()
+                                    + "\n")
+                                    .as_bytes(),
+                            );
                             self.metrics
                                 .processing_errors
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            self.tracing
-                                .trace_error(&anyhow::anyhow!("{}", e), "batch_processing");
+                            self.tracing.trace_error(
+                                &anyhow::Error::msg(e.to_string()),
+                                "batch_processing",
+                            );
 
                             // Send to DLQ
                             self.dlq
@@ -173,7 +182,7 @@ impl KafkaEventProcessor {
                                     batch.account_id,
                                     batch.events,
                                     batch.version,
-                                    format!("Batch processing failed: {}", e),
+                                    "Batch processing failed: ".to_string() + &e.to_string(),
                                 )
                                 .await?;
                         }
@@ -184,19 +193,24 @@ impl KafkaEventProcessor {
                     continue;
                 }
                 Err(e) => {
-                    error!("Error polling Kafka: {}", e);
+                    let _ = std::io::stderr().write_all(
+                        ("Error polling Kafka: ".to_string() + &e.to_string() + "\n").as_bytes(),
+                    );
                     self.metrics
                         .consume_errors
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.tracing
-                        .trace_error(&anyhow::anyhow!("{}", e), "kafka_polling");
+                        .trace_error(&anyhow::Error::msg(e.to_string()), "kafka_polling");
 
                     // If we encounter persistent errors, trigger recovery
                     if self.should_trigger_recovery().await {
                         if let Err(e) = self.recovery.start_recovery().await {
-                            error!("Recovery failed: {}", e);
+                            let _ = std::io::stderr().write_all(
+                                ("Recovery failed: ".to_string() + &e.to_string() + "\n")
+                                    .as_bytes(),
+                            );
                             self.tracing
-                                .trace_error(&anyhow::anyhow!("{}", e), "recovery");
+                                .trace_error(&anyhow::Error::msg(e.to_string()), "recovery");
                         }
                     }
                 }
@@ -241,12 +255,17 @@ impl KafkaEventProcessor {
                 .upsert_accounts_batch(vec![account_proj.clone()])
                 .await
             {
-                error!("Failed to update account projection: {}", e);
+                let _ = std::io::stderr().write_all(
+                    ("Failed to update account projection: ".to_string() + &e.to_string() + "\n")
+                        .as_bytes(),
+                );
                 // Don't fail the entire operation if projection update fails
             } else {
-                info!(
-                    "Successfully updated account projection for account {}",
-                    batch.account_id
+                let _ = std::io::stderr().write_all(
+                    ("Successfully updated account projection for account ".to_string()
+                        + &batch.account_id.to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
 
@@ -291,12 +310,17 @@ impl KafkaEventProcessor {
                 .upsert_accounts_batch(vec![account_proj.clone()])
                 .await
             {
-                error!("Failed to insert account projection: {}", e);
+                let _ = std::io::stderr().write_all(
+                    ("Failed to insert account projection: ".to_string() + &e.to_string() + "\n")
+                        .as_bytes(),
+                );
                 // Don't fail the entire operation if projection insert fails
             } else {
-                info!(
-                    "Successfully created account projection for account {}",
-                    batch.account_id
+                let _ = std::io::stderr().write_all(
+                    ("Successfully created account projection for account ".to_string()
+                        + &batch.account_id.to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
 
@@ -367,12 +391,19 @@ impl KafkaEventProcessor {
                 .insert_transactions_batch(transaction_projections)
                 .await
             {
-                error!("Failed to insert transaction projections: {}", e);
+                let _ = std::io::stderr().write_all(
+                    ("Failed to insert transaction projections: ".to_string()
+                        + &e.to_string()
+                        + "\n")
+                        .as_bytes(),
+                );
                 // Don't fail the entire operation if transaction projections fail
             } else {
-                info!(
-                    "Successfully created {} transaction projections",
-                    transaction_count
+                let _ = std::io::stderr().write_all(
+                    ("Successfully created ".to_string()
+                        + &transaction_count.to_string()
+                        + " transaction projections\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -422,7 +453,7 @@ impl KafkaEventProcessor {
         strategy: RecoveryStrategy,
         account_id: Option<Uuid>,
     ) -> Result<()> {
-        let strategy_str = format!("{:?}", strategy);
+        let strategy_str = "{:?}".to_string() + &(strategy).to_string();
         self.tracing
             .trace_recovery_operation(&strategy_str, account_id, "started");
 
@@ -438,8 +469,8 @@ impl KafkaEventProcessor {
             }
             Err(e) => {
                 self.tracing.trace_error(
-                    &anyhow::anyhow!("{}", e),
-                    &format!("recovery_strategy_{}", strategy_str),
+                    &anyhow::Error::msg(e.to_string()),
+                    &("recovery_strategy_".to_string() + &strategy_str),
                 );
                 Err(e)
             }

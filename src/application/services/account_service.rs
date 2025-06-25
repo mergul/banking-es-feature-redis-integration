@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -85,9 +86,15 @@ impl AccountService {
                 } else {
                     100.0
                 };
-                info!(
-                    "Service metrics: processed={}, failed={}, success_rate={:.2}%",
-                    commands_processed, commands_failed, success_rate
+                let _ = std::io::stderr().write_all(
+                    ("Service metrics: processed=".to_string()
+                        + &commands_processed.to_string()
+                        + &", failed=".to_string()
+                        + &commands_failed.to_string()
+                        + &", success_rate=".to_string()
+                        + &success_rate.to_string()
+                        + &"%\n".to_string())
+                        .as_bytes(),
                 );
             }
         });
@@ -148,9 +155,13 @@ impl AccountService {
             self.metrics
                 .projection_errors
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            warn!(
-                "Failed to update projection for account {}: {}",
-                account_id, e
+            let _ = std::io::stderr().write_all(
+                ("Failed to update projection for account ".to_string()
+                    + &account_id.to_string()
+                    + &": ".to_string()
+                    + &e.to_string()
+                    + "\n")
+                    .as_bytes(),
             );
         } else {
             self.metrics
@@ -195,7 +206,11 @@ impl AccountService {
             let events = account.handle_command(&command)?;
 
             // Save events with current version
-            match self.repository.save_immediate(&account, events.clone()).await {
+            match self
+                .repository
+                .save_immediate(&account, events.clone())
+                .await
+            {
                 Ok(_) => {
                     // Apply events to account after saving
                     for event in &events {
@@ -220,7 +235,9 @@ impl AccountService {
                             self.metrics
                                 .projection_errors
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            AccountError::InfrastructureError(format!("Failed to update projection: {}", e))
+                            AccountError::InfrastructureError(
+                                "Failed to update projection: {}".to_string() + &(e).to_string(),
+                            )
                         })?;
 
                     // Cache the updated account
@@ -284,7 +301,11 @@ impl AccountService {
             let events = account.handle_command(&command)?;
 
             // Save events with current version
-            match self.repository.save_immediate(&account, events.clone()).await {
+            match self
+                .repository
+                .save_immediate(&account, events.clone())
+                .await
+            {
                 Ok(_) => {
                     // Apply events to account after saving
                     for event in &events {
@@ -309,7 +330,9 @@ impl AccountService {
                             self.metrics
                                 .projection_errors
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            AccountError::InfrastructureError(format!("Failed to update projection: {}", e))
+                            AccountError::InfrastructureError(
+                                "Failed to update projection: {}".to_string() + &(e).to_string(),
+                            )
                         })?;
 
                     // Cache the updated account
@@ -490,14 +513,20 @@ impl AccountService {
                     self.metrics
                         .projection_errors
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    error!("Failed to update projection: {}", e);
+                    let _ = std::io::stderr().write_all(
+                        ("Failed to update projection: ".to_string() + &e.to_string() + "\n")
+                            .as_bytes(),
+                    );
                     return Err(AccountError::InfrastructureError(e.to_string()));
                 }
             }
         }
 
         let duration = start_time.elapsed();
-        debug!("Projection update took {:?}", duration);
+        let _ = std::io::stderr().write_all(
+            ("Projection update took ".to_string() + &duration.as_secs_f64().to_string() + "\n")
+                .as_bytes(),
+        );
         Ok(())
     }
 
@@ -606,10 +635,7 @@ mod tests {
 
         fn start_batch_flush_task(&self) {}
 
-        async fn create_account(
-            &self,
-            _owner_name: String,
-        ) -> Result<Account> {
+        async fn create_account(&self, _owner_name: String) -> Result<Account> {
             Ok(Account::default())
         }
 
@@ -653,7 +679,7 @@ mod tests {
         let service = account_service_with_mock_repo(Arc::new(mock_repo));
 
         let result = service.is_duplicate_command(account_id).await;
-        assert!(!result, "New command should not be detected as duplicate");
+        assert!(!result);
     }
 
     #[tokio::test]
@@ -669,14 +695,11 @@ mod tests {
 
         // First call should not be a duplicate
         let first_result = service.is_duplicate_command(account_id_for_deposit).await;
-        assert!(
-            !first_result,
-            "First call should not be detected as duplicate"
-        );
+        assert!(!first_result);
 
         // Second call should be a duplicate
         let second_result = service.is_duplicate_command(account_id_for_deposit).await;
-        assert!(second_result, "Second call should be detected as duplicate");
+        assert!(second_result);
     }
 
     #[tokio::test]
@@ -687,8 +710,10 @@ mod tests {
 
         // Create a real repository for this test
         let repository = Arc::new(AccountRepository::default());
-        let projection_store = Arc::new(ProjectionStore::default()) as Arc<dyn ProjectionStoreTrait + 'static>;
-        let cache_service = Arc::new(CacheService::default()) as Arc<dyn CacheServiceTrait + 'static>;
+        let projection_store =
+            Arc::new(ProjectionStore::default()) as Arc<dyn ProjectionStoreTrait + 'static>;
+        let cache_service =
+            Arc::new(CacheService::default()) as Arc<dyn CacheServiceTrait + 'static>;
         let service = AccountService::new(
             repository,
             projection_store,
@@ -698,8 +723,11 @@ mod tests {
         );
 
         // Create an initial account
-        let account_id = service.create_account("Test User".to_string(), dec!(1000)).await.unwrap();
-        
+        let account_id = service
+            .create_account("Test User".to_string(), dec!(1000))
+            .await
+            .unwrap();
+
         // Number of concurrent operations
         let num_operations = 500; // Increased from 100 to 500
         let success_count = Arc::new(AtomicU64::new(0));
@@ -719,20 +747,29 @@ mod tests {
                 if i % 2 == 0 {
                     // Deposit operation
                     match service_clone.deposit_money(account_id, dec!(100)).await {
-                        Ok(_) => { 
+                        Ok(_) => {
                             success_count.fetch_add(1, Ordering::SeqCst);
                             successful_deposits.fetch_add(1, Ordering::SeqCst);
-                        },
-                        Err(e) => tracing::warn!("Deposit failed: {}", e),
+                        }
+                        Err(e) => {
+                            let _ = std::io::stderr().write_all(
+                                ("Deposit failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
+                            );
+                        }
                     }
                 } else {
                     // Withdraw operation
                     match service_clone.withdraw_money(account_id, dec!(50)).await {
-                        Ok(_) => { 
+                        Ok(_) => {
                             success_count.fetch_add(1, Ordering::SeqCst);
                             successful_withdrawals.fetch_add(1, Ordering::SeqCst);
-                        },
-                        Err(e) => tracing::warn!("Withdraw failed: {}", e),
+                        }
+                        Err(e) => {
+                            let _ = std::io::stderr().write_all(
+                                ("Withdraw failed: ".to_string() + &e.to_string() + "\n")
+                                    .as_bytes(),
+                            );
+                        }
                     }
                 }
             });
@@ -745,24 +782,21 @@ mod tests {
 
         // Get final account state
         let final_account = service.get_account(account_id).await.unwrap().unwrap();
-        
+
         // Verify results
         let successful_operations = success_count.load(Ordering::SeqCst);
         let successful_deposits_count = successful_deposits.load(Ordering::SeqCst);
         let successful_withdrawals_count = successful_withdrawals.load(Ordering::SeqCst);
-        println!("Successful operations: {}", successful_operations);
-        println!("Successful deposits: {}", successful_deposits_count);
-        println!("Successful withdrawals: {}", successful_withdrawals_count);
-        println!("Final balance: {}", final_account.balance);
+        let _ = std::io::stderr().write_all(
+            ("Successful operations: ".to_string() + &successful_operations.to_string() + "\n")
+                .as_bytes(),
+        );
 
         // The final balance should be consistent with the number of successful operations
         // Each successful deposit adds 100, each successful withdraw subtracts 50
-        let expected_balance = dec!(1000)
-            + (dec!(100) * Decimal::from(successful_deposits_count))
+        let expected_balance = dec!(1000) + (dec!(100) * Decimal::from(successful_deposits_count))
             - (dec!(50) * Decimal::from(successful_withdrawals_count));
-        
-        assert_eq!(final_account.balance, expected_balance, 
-            "Final balance {} does not match expected balance {}", 
-            final_account.balance, expected_balance);
+
+        assert_eq!(final_account.balance, expected_balance);
     }
 }

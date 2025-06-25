@@ -1,39 +1,46 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize}; // Added for potential future use, not strictly required by sqlx::FromRow
 use sqlx::{postgres::PgDatabaseError, FromRow, PgPool};
-use thiserror::Error;
 use uuid::Uuid;
 
 // Custom module for bincode-compatible DateTime<Utc> serialization
 mod bincode_datetime {
-    use chrono::{DateTime, Utc, TimeZone};
-    use serde::{self, Serializer, Deserializer};
+    use chrono::{DateTime, TimeZone, Utc};
     use serde::de::Deserialize;
+    use serde::{self, Deserializer, Serializer};
 
     pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         serializer.serialize_i64(dt.timestamp())
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let ts = i64::deserialize(deserializer)?;
         Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
     }
 
     pub mod option {
         use super::*;
-        use chrono::{DateTime, Utc, TimeZone};
+        use chrono::{DateTime, TimeZone, Utc};
         use serde::de::Deserialize;
         pub fn serialize<S>(dt: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
-        where S: Serializer {
+        where
+            S: Serializer,
+        {
             match dt {
                 Some(dt) => serializer.serialize_some(&dt.timestamp()),
                 None => serializer.serialize_none(),
             }
         }
         pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
-        where D: Deserializer<'de> {
+        where
+            D: Deserializer<'de>,
+        {
             let opt = Option::<i64>::deserialize(deserializer)?;
             Ok(opt.map(|ts| Utc.timestamp_opt(ts, 0).single().unwrap()))
         }
@@ -66,20 +73,49 @@ pub struct NewUser<'a> {
     // is_active and registered_at will use database defaults or be set by INSERT query
 }
 
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub enum UserRepositoryError {
-    #[error("User not found for ID: {0}")]
     NotFoundById(Uuid),
-    #[error("User not found for username: {0}")]
     NotFoundByUsername(String),
-    #[error("Username '{0}' already exists")]
     UsernameExists(String),
-    #[error("Email '{0}' already exists")]
     EmailExists(String),
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-    #[error("An unexpected error occurred: {0}")]
+    DatabaseError(sqlx::Error),
     Unexpected(String), // For any other kind of error
+}
+
+impl std::fmt::Display for UserRepositoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UserRepositoryError::NotFoundById(id) => f
+                .write_str("User not found for ID: ")
+                .and_then(|_| f.write_str(&id.to_string())),
+            UserRepositoryError::NotFoundByUsername(username) => f
+                .write_str("User not found for username: ")
+                .and_then(|_| f.write_str(username)),
+            UserRepositoryError::UsernameExists(username) => f
+                .write_str("Username '")
+                .and_then(|_| f.write_str(username))
+                .and_then(|_| f.write_str("' already exists")),
+            UserRepositoryError::EmailExists(email) => f
+                .write_str("Email '")
+                .and_then(|_| f.write_str(email))
+                .and_then(|_| f.write_str("' already exists")),
+            UserRepositoryError::DatabaseError(e) => f
+                .write_str("Database error: ")
+                .and_then(|_| f.write_str(&e.to_string())),
+            UserRepositoryError::Unexpected(msg) => f
+                .write_str("An unexpected error occurred: ")
+                .and_then(|_| f.write_str(msg)),
+        }
+    }
+}
+
+impl std::error::Error for UserRepositoryError {}
+
+impl From<sqlx::Error> for UserRepositoryError {
+    fn from(err: sqlx::Error) -> Self {
+        UserRepositoryError::DatabaseError(err)
+    }
 }
 
 #[derive(Clone)]

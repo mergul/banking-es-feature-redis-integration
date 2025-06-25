@@ -2,6 +2,7 @@ use crate::infrastructure::auth::{AuthConfig, AuthService};
 use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
 use crate::infrastructure::event_store::{EventStore, DB_POOL};
 use crate::infrastructure::kafka_abstraction::KafkaConfig;
+use crate::infrastructure::logging::{init_logging, start_log_rotation_task, LoggingConfig};
 use crate::infrastructure::projections::ProjectionStore;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
 use crate::infrastructure::redis_abstraction::RedisClient;
@@ -20,11 +21,13 @@ use chrono::Utc;
 use dotenv;
 use redis;
 use sqlx::PgPool;
+use std::io::Write;
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::signal;
 use tower_http::cors::CorsLayer;
 use tracing::Level;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -92,16 +95,31 @@ async fn root() -> Html<&'static str> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing with better formatting
-    tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .with_target(false)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true)
-        .init();
+    // Initialize advanced logging configuration
+    let logging_config = LoggingConfig {
+        log_dir: "logs".to_string(),
+        max_files: 30,                    // Keep 30 days of logs
+        max_file_size: 100 * 1024 * 1024, // 100MB
+        enable_console: true,
+        enable_file: true,
+        log_level: Level::INFO,
+        enable_json: false,
+    };
 
-    println!("Starting high-performance banking service with CQRS");
+    init_logging(Some(logging_config))?;
+
+    // Start log rotation task
+    let log_dir = "logs".to_string();
+    let max_files = 30;
+    tokio::spawn(start_log_rotation_task(
+        log_dir,
+        max_files,
+        Duration::from_secs(3600), // Run every hour
+    ));
+
+    // Log application startup
+    let _ = std::io::stderr().write_all(b"Starting high-performance banking service with CQRS\n");
+    let _ = std::io::stderr().write_all(b"Advanced logging initialized with file rotation\n");
 
     // Load environment variables
     dotenv::dotenv().ok();
@@ -155,6 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Health and metrics
         .route("/api/health", get(web::handlers::health_check))
         .route("/api/metrics", get(web::handlers::metrics))
+        .route("/api/logs/stats", get(web::handlers::get_log_statistics))
         // Add optimized middleware stack
         .layer(
             ServiceBuilder::new()
@@ -181,21 +200,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(addr).await?;
     configure_tcp_listener(&listener)?;
 
-    println!("Server running on {}", addr);
-    println!("CQRS endpoints available at /api/cqrs/*");
+    let _ = std::io::stderr()
+        .write_all(("Server running on ".to_string() + &addr.to_string() + "\n").as_bytes());
+    let _ = std::io::stderr().write_all(b"CQRS endpoints available at /api/cqrs/*\n");
 
     // Start the server with graceful shutdown
     let server = axum::serve(listener, app);
     let graceful = server.with_graceful_shutdown(shutdown_signal());
 
     if let Err(e) = graceful.await {
-        eprintln!("Server error: {}", e);
+        let _ = std::io::stderr()
+            .write_all(("Server error: ".to_string() + &e.to_string() + "\n").as_bytes());
         return Err(e.into());
     }
 
     // Graceful shutdown of services
     service_context.shutdown().await;
-    println!("Server shutdown complete");
+    let _ = std::io::stderr().write_all(b"Server shutdown complete\n");
 
     Ok(())
 }
@@ -218,12 +239,16 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
+    // Use futures::select! instead of tokio::select!
+    use futures::future::select;
+    use futures::pin_mut;
 
-    println!("Shutting down gracefully...");
+    pin_mut!(ctrl_c);
+    pin_mut!(terminate);
+
+    select(ctrl_c, terminate).await;
+
+    let _ = std::io::stderr().write_all(b"Shutting down gracefully...\n");
 }
 
 fn configure_tcp_listener(listener: &TcpListener) -> Result<(), Box<dyn std::error::Error>> {

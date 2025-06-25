@@ -7,6 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -129,7 +130,10 @@ impl AccountQueryHandler {
             AccountQuery::GetAccountById { account_id } => {
                 // Try cache first
                 if let Ok(Some(cached_account)) = self.cache_service.get_account(account_id).await {
-                    debug!("Cache hit for account {}", account_id);
+                    let _ = std::io::stderr().write_all(
+                        ("Cache hit for account ".to_string() + &account_id.to_string() + "\n")
+                            .as_bytes(),
+                    );
                     return Ok(QueryResult {
                         success: true,
                         data: Some(serde_json::to_value(cached_account).unwrap()),
@@ -152,15 +156,25 @@ impl AccountQueryHandler {
                                 .set_account(&account, Some(std::time::Duration::from_secs(3600)))
                                 .await
                                 .map_err(|e| {
-                                    warn!("Failed to cache account {}: {}", account_id, e);
+                                    let _ = std::io::stderr().write_all(
+                                        ("Failed to cache account ".to_string()
+                                            + &account_id.to_string()
+                                            + &": ".to_string()
+                                            + &e.to_string()
+                                            + "\n")
+                                            .as_bytes(),
+                                    );
                                     AccountError::InfrastructureError(e.to_string())
                                 })?;
                         }
 
-                        info!(
-                            "Account retrieved: {} in {:?}",
-                            account_id,
-                            start_time.elapsed()
+                        let _ = std::io::stderr().write_all(
+                            ("Account retrieved: ".to_string()
+                                + &account_id.to_string()
+                                + &" in ".to_string()
+                                + &start_time.elapsed().as_secs_f64().to_string()
+                                + "\n")
+                                .as_bytes(),
                         );
 
                         Ok(QueryResult {
@@ -190,16 +204,19 @@ impl AccountQueryHandler {
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                info!(
-                    "All accounts retrieved: {} accounts in {:?}",
-                    accounts.len(),
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("All accounts retrieved: ".to_string()
+                        + &accounts.len().to_string()
+                        + &" accounts in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
 
                 Ok(QueryResult {
                     success: true,
                     data: Some(serde_json::to_value(&accounts).unwrap()),
-                    message: format!("Retrieved {} accounts", accounts.len()),
+                    message: "Retrieved {} accounts".to_string() + &(accounts.len().to_string()),
                 })
             }
             _ => Err(AccountError::InfrastructureError(
@@ -221,7 +238,12 @@ impl AccountQueryHandler {
                 if let Ok(Some(cached_events)) =
                     self.cache_service.get_account_events(account_id).await
                 {
-                    debug!("Cache hit for account transactions {}", account_id);
+                    let _ = std::io::stderr().write_all(
+                        ("Cache hit for account transactions ".to_string()
+                            + &account_id.to_string()
+                            + "\n")
+                            .as_bytes(),
+                    );
                     return Ok(QueryResult {
                         success: true,
                         data: Some(serde_json::to_value(cached_events).unwrap()),
@@ -245,21 +267,32 @@ impl AccountQueryHandler {
                         )
                         .await
                         .map_err(|e| {
-                            warn!("Failed to cache account events {}: {}", account_id, e);
+                            let _ = std::io::stderr().write_all(
+                                ("Failed to cache account events ".to_string()
+                                    + &account_id.to_string()
+                                    + &": ".to_string()
+                                    + &e.to_string()
+                                    + "\n")
+                                    .as_bytes(),
+                            );
                             AccountError::InfrastructureError(e.to_string())
                         })?;
                 }
 
-                info!(
-                    "Account transactions retrieved: {} transactions in {:?}",
-                    transactions.len(),
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account transactions retrieved: ".to_string()
+                        + &transactions.len().to_string()
+                        + &" transactions in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
 
                 Ok(QueryResult {
                     success: true,
                     data: Some(serde_json::to_value(&transactions).unwrap()),
-                    message: format!("Retrieved {} transactions", transactions.len()),
+                    message: "Retrieved {} transactions".to_string()
+                        + &(transactions.len().to_string()),
                 })
             }
             _ => Err(AccountError::InfrastructureError(
@@ -279,7 +312,12 @@ impl AccountQueryHandler {
             AccountQuery::GetAccountBalance { account_id } => {
                 // Try cache first
                 if let Ok(Some(cached_account)) = self.cache_service.get_account(account_id).await {
-                    debug!("Cache hit for account balance {}", account_id);
+                    let _ = std::io::stderr().write_all(
+                        ("Cache hit for account balance ".to_string()
+                            + &account_id.to_string()
+                            + "\n")
+                            .as_bytes(),
+                    );
                     return Ok(QueryResult {
                         success: true,
                         data: Some(serde_json::to_value(cached_account.balance).unwrap()),
@@ -295,11 +333,15 @@ impl AccountQueryHandler {
 
                 match account {
                     Some(projection) => {
-                        info!(
-                            "Account balance retrieved: {} balance {} in {:?}",
-                            account_id,
-                            projection.balance,
-                            start_time.elapsed()
+                        let _ = std::io::stderr().write_all(
+                            ("Account balance retrieved: ".to_string()
+                                + &account_id.to_string()
+                                + &" balance ".to_string()
+                                + &projection.balance.to_string()
+                                + &" in ".to_string()
+                                + &start_time.elapsed().as_secs_f64().to_string()
+                                + "\n")
+                                .as_bytes(),
                         );
 
                         Ok(QueryResult {
@@ -334,24 +376,21 @@ impl AccountQueryHandler {
 
                 match account {
                     Some(projection) => {
-                        info!(
-                            "Account active status checked: {} active {} in {:?}",
-                            account_id,
-                            projection.is_active,
-                            start_time.elapsed()
+                        let _ = std::io::stderr().write_all(
+                            ("Account active status checked: ".to_string()
+                                + &account_id.to_string()
+                                + &" active ".to_string()
+                                + &projection.is_active.to_string()
+                                + &" in ".to_string()
+                                + &start_time.elapsed().as_secs_f64().to_string()
+                                + "\n")
+                                .as_bytes(),
                         );
 
                         Ok(QueryResult {
                             success: true,
                             data: Some(serde_json::to_value(projection.is_active).unwrap()),
-                            message: format!(
-                                "Account is {}",
-                                if projection.is_active {
-                                    "active"
-                                } else {
-                                    "inactive"
-                                }
-                            ),
+                            message: "Account active status checked successfully".to_string(),
                         })
                     }
                     None => Err(AccountError::NotFound),

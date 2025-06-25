@@ -2,6 +2,7 @@ use crate::domain::Account;
 use crate::infrastructure::cache_service::CacheServiceTrait;
 use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaConsumer};
 use anyhow::Result;
+use std::io::Write;
 use std::sync::Arc;
 use tracing::{error, info};
 use uuid::Uuid;
@@ -26,27 +27,42 @@ impl L1CacheUpdater {
         loop {
             match self.consumer.poll_cache_updates().await {
                 Ok(Some(account)) => {
-                    info!("Received cache update for account: {}", account.id);
+                    let _ = std::io::stderr().write_all(
+                        ("Received cache update for account: ".to_string()
+                            + &account.id.to_string()
+                            + "\n")
+                            .as_bytes(),
+                    );
 
                     // Update L1 cache
                     if let Err(e) = self.cache_service.set_account(&account, None).await {
-                        error!(
-                            "Failed to update L1 cache for account {}: {}",
-                            account.id, e
+                        let _ = std::io::stderr().write_all(
+                            ("Failed to update L1 cache for account: ".to_string()
+                                + &account.id.to_string()
+                                + ": "
+                                + &e.to_string()
+                                + "\n")
+                                .as_bytes(),
                         );
                     }
 
                     // Invalidate L1 event cache
                     if let Err(e) = self.cache_service.delete_account_events(account.id).await {
-                        error!(
-                            "Failed to invalidate L1 event cache for account {}: {}",
-                            account.id, e
+                        let _ = std::io::stderr().write_all(
+                            ("Failed to invalidate L1 event cache for account: ".to_string()
+                                + &account.id.to_string()
+                                + ": "
+                                + &e.to_string()
+                                + "\n")
+                                .as_bytes(),
                         );
                     }
                 }
                 Ok(None) => continue,
                 Err(e) => {
-                    error!("Error polling Kafka: {}", e);
+                    let _ = std::io::stderr().write_all(
+                        ("Error polling Kafka: ".to_string() + &e.to_string() + "\n").as_bytes(),
+                    );
                 }
             }
         }

@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -77,20 +78,26 @@ impl CQRSAccountService {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Account created successfully: {} in {:?}",
-                    account_id,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account created successfully: ".to_string()
+                        + &account_id.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to create account: {} in {:?}",
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Failed to create account: ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -116,23 +123,32 @@ impl CQRSAccountService {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Deposit successful: {} amount {} in {:?}",
-                    account_id,
-                    amount,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Deposit successful: ".to_string()
+                        + &account_id.to_string()
+                        + &" amount ".to_string()
+                        + &amount.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to deposit money: {} amount {} error {} in {:?}",
-                    account_id,
-                    amount,
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Failed to deposit money: ".to_string()
+                        + &account_id.to_string()
+                        + &" amount ".to_string()
+                        + &amount.to_string()
+                        + &" error ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -158,23 +174,32 @@ impl CQRSAccountService {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Withdrawal successful: {} amount {} in {:?}",
-                    account_id,
-                    amount,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Withdrawal successful: ".to_string()
+                        + &account_id.to_string()
+                        + &" amount ".to_string()
+                        + &amount.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to withdraw money: {} amount {} error {} in {:?}",
-                    account_id,
-                    amount,
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Failed to withdraw money: ".to_string()
+                        + &account_id.to_string()
+                        + &" amount ".to_string()
+                        + &amount.to_string()
+                        + &" error ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -200,21 +225,28 @@ impl CQRSAccountService {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Account closed successfully: {} in {:?}",
-                    account_id,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account closed successfully: ".to_string()
+                        + &account_id.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to close account: {} error {} in {:?}",
-                    account_id,
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Failed to close account: ".to_string()
+                        + &account_id.to_string()
+                        + &" error ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -239,31 +271,41 @@ impl CQRSAccountService {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Account retrieved successfully: {} in {:?}",
-                    account_id,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account retrieved successfully: ".to_string()
+                        + &account_id.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Ok(None) => {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Account not found: {} in {:?}",
-                    account_id,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account not found: ".to_string()
+                        + &account_id.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to get account: {} error {} in {:?}",
-                    account_id,
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Failed to get account: ".to_string()
+                        + &account_id.to_string()
+                        + &" error ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -286,20 +328,26 @@ impl CQRSAccountService {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "All accounts retrieved successfully: {} accounts in {:?}",
-                    accounts.len(),
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("All accounts retrieved successfully: ".to_string()
+                        + &accounts.len().to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to get all accounts: {} in {:?}",
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Failed to get all accounts: ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -325,21 +373,28 @@ impl CQRSAccountService {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Account transactions retrieved successfully: {} transactions in {:?}",
-                    transactions.len(),
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account transactions retrieved successfully: ".to_string()
+                        + &transactions.len().to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to get account transactions: {} error {} in {:?}",
-                    account_id,
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Failed to get account transactions: ".to_string()
+                        + &account_id.to_string()
+                        + &" error ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -361,22 +416,30 @@ impl CQRSAccountService {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Account balance retrieved successfully: {} balance {} in {:?}",
-                    account_id,
-                    balance,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account balance retrieved successfully: ".to_string()
+                        + &account_id.to_string()
+                        + &" balance ".to_string()
+                        + &balance.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to get account balance: {} error {} in {:?}",
-                    account_id,
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Failed to get account balance: ".to_string()
+                        + &account_id.to_string()
+                        + &" error ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -398,22 +461,30 @@ impl CQRSAccountService {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Account active status checked: {} active {} in {:?}",
-                    account_id,
-                    is_active,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account active status checked: ".to_string()
+                        + &account_id.to_string()
+                        + &" active ".to_string()
+                        + &is_active.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to check account active status: {} error {} in {:?}",
-                    account_id,
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Failed to check account active status: ".to_string()
+                        + &account_id.to_string()
+                        + &" error ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -432,18 +503,25 @@ impl CQRSAccountService {
 
         match &result {
             Ok(batch_result) => {
-                info!(
-                    "Batch processing completed: {} successful, {} failed in {:?}",
-                    batch_result.successful,
-                    batch_result.failed,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Batch processing completed: ".to_string()
+                        + &batch_result.successful.to_string()
+                        + &" successful, ".to_string()
+                        + &batch_result.failed.to_string()
+                        + &" failed in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
-                error!(
-                    "Batch processing failed: {} in {:?}",
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Batch processing failed: ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -512,4 +590,3 @@ pub struct ErrorResponse {
     pub error: String,
     pub message: String,
 }
- 

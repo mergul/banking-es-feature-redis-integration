@@ -8,6 +8,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -51,7 +52,10 @@ impl CQRSHandler {
         R: From<CommandResult>,
     {
         let _permit = self.semaphore.acquire().await.map_err(|e| {
-            error!("Failed to acquire semaphore permit: {}", e);
+            let _ = std::io::stderr().write_all(
+                ("Failed to acquire semaphore permit: ".to_string() + &e.to_string() + "\n")
+                    .as_bytes(),
+            );
             AccountError::InfrastructureError("Service overloaded".to_string())
         })?;
 
@@ -67,19 +71,24 @@ impl CQRSHandler {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Command executed successfully in {:?}",
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Command executed successfully in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Command execution failed: {} in {:?}",
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Command execution failed: ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -94,7 +103,10 @@ impl CQRSHandler {
         R: From<QueryResult>,
     {
         let _permit = self.semaphore.acquire().await.map_err(|e| {
-            error!("Failed to acquire semaphore permit: {}", e);
+            let _ = std::io::stderr().write_all(
+                ("Failed to acquire semaphore permit: ".to_string() + &e.to_string() + "\n")
+                    .as_bytes(),
+            );
             AccountError::InfrastructureError("Service overloaded".to_string())
         })?;
 
@@ -110,16 +122,24 @@ impl CQRSHandler {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!("Query executed successfully in {:?}", start_time.elapsed());
+                let _ = std::io::stderr().write_all(
+                    ("Query executed successfully in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
+                );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Query execution failed: {} in {:?}",
-                    e,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Query execution failed: ".to_string()
+                        + &e.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
         }
@@ -343,7 +363,7 @@ impl BatchTransactionHandler {
                     }
                     Ok(Err(e)) => {
                         failed += 1;
-                        errors.push(format!("Task failed: {}", e));
+                        errors.push("Task failed: {}".to_string() + &(e).to_string());
                     }
                     Err(_) => {
                         failed += 1;
@@ -353,11 +373,15 @@ impl BatchTransactionHandler {
             }
         }
 
-        info!(
-            "Batch processing completed: {} successful, {} failed in {:?}",
-            successful,
-            failed,
-            start_time.elapsed()
+        let _ = std::io::stderr().write_all(
+            ("Batch processing completed: ".to_string()
+                + &successful.to_string()
+                + &" successful, ".to_string()
+                + &failed.to_string()
+                + &" failed in ".to_string()
+                + &start_time.elapsed().as_secs_f64().to_string()
+                + "\n")
+                .as_bytes(),
         );
 
         Ok(BatchTransactionResult {
@@ -385,4 +409,3 @@ pub struct BatchTransactionResult {
     pub errors: Vec<String>,
     pub processing_time: Duration,
 }
- 

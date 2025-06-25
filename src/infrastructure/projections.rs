@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, OnceCell, RwLock};
@@ -15,14 +16,35 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 // Enhanced error types for projections
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ProjectionError {
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-    #[error("Cache error: {0}")]
+    DatabaseError(sqlx::Error),
     CacheError(String),
-    #[error("Batch processing error: {0}")]
     BatchError(String),
+}
+
+impl std::fmt::Display for ProjectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectionError::DatabaseError(e) => {
+                f.write_str(&("Database error: ".to_string() + &e.to_string()))
+            }
+            ProjectionError::CacheError(e) => {
+                f.write_str(&("Cache error: ".to_string() + &e.to_string()))
+            }
+            ProjectionError::BatchError(e) => {
+                f.write_str(&("Batch processing error: ".to_string() + &e.to_string()))
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProjectionError {}
+
+impl From<sqlx::Error> for ProjectionError {
+    fn from(err: sqlx::Error) -> Self {
+        ProjectionError::DatabaseError(err)
+    }
 }
 
 // Projection metrics
@@ -145,7 +167,11 @@ impl ProjectionStoreTrait for ProjectionStore {
     async fn upsert_accounts_batch(&self, accounts: Vec<AccountProjection>) -> Result<()> {
         self.update_sender
             .send(ProjectionUpdate::AccountBatch(accounts))
-            .map_err(|e| anyhow::anyhow!("Failed to send account batch update: {}", e))?;
+            .map_err(|e| {
+                anyhow::Error::msg(
+                    "Failed to send account batch update: ".to_string() + &e.to_string(),
+                )
+            })?;
         Ok(())
     }
 
@@ -155,7 +181,11 @@ impl ProjectionStoreTrait for ProjectionStore {
     ) -> Result<()> {
         self.update_sender
             .send(ProjectionUpdate::TransactionBatch(transactions))
-            .map_err(|e| anyhow::anyhow!("Failed to send transaction batch update: {}", e))?;
+            .map_err(|e| {
+                anyhow::Error::msg(
+                    "Failed to send transaction batch update: ".to_string() + &e.to_string(),
+                )
+            })?;
         Ok(())
     }
 }
@@ -211,7 +241,7 @@ impl ProjectionStore {
         let pool = PROJECTION_POOL
             .get_or_try_init(|| async {
                 let database_url = std::env::var("DATABASE_URL").map_err(|_| {
-                    anyhow::anyhow!("DATABASE_URL environment variable is required")
+                    anyhow::Error::msg("DATABASE_URL environment variable is required")
                 })?;
 
                 let pool = PgPoolOptions::new()
@@ -500,7 +530,10 @@ impl ProjectionStore {
                 )
                 .await
                 {
-                    error!("Failed to flush batches: {}", e);
+                    let _ = std::io::stderr().write_all(
+                        ("Failed to flush batches: ".to_string() + &e.to_string() + "\n")
+                            .as_bytes(),
+                    );
                 }
 
                 last_flush = Instant::now();
@@ -697,9 +730,17 @@ impl ProjectionStore {
                 0.0
             };
 
-            info!(
-                "Projection Metrics - Cache Hit Rate: {:.1}%, Batch Updates: {}, Errors: {}, Avg Query Time: {:.2}ms",
-                hit_rate, batches, errors, avg_query_time
+            let _ = std::io::stderr().write_all(
+                ("Projection Metrics - Cache Hit Rate: ".to_string()
+                    + &hit_rate.to_string()
+                    + "%, Batch Updates: "
+                    + &batches.to_string()
+                    + ", Errors: "
+                    + &errors.to_string()
+                    + ", Avg Query Time: "
+                    + &avg_query_time.to_string()
+                    + "ms\n")
+                    .as_bytes(),
             );
         }
     }

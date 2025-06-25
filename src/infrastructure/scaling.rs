@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use redis;
 use redis::Client;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -119,7 +120,7 @@ impl ScalingManager {
 
     pub async fn register_instance(&self, instance: ServiceInstance) -> Result<()> {
         let instance_id = instance.id.clone();
-        let key = format!("instance:{}", instance_id);
+        let key = "instance:{}".to_string() + &(instance_id).to_string();
         let value = bincode::serialize(&instance)?;
 
         let mut conn = self.redis_client.get_connection().await?;
@@ -131,7 +132,8 @@ impl ScalingManager {
             .await?;
 
         self.instances.insert(instance_id.clone(), instance);
-        info!("Registered new instance: {}", instance_id);
+        let _ = std::io::stderr()
+            .write_all(("Registered new instance: ".to_string() + &instance_id + "\n").as_bytes());
         Ok(())
     }
 
@@ -144,7 +146,7 @@ impl ScalingManager {
             instance.metrics = metrics;
             instance.last_heartbeat = Utc::now();
 
-            let key = format!("instance:{}", instance_id);
+            let key = "instance:{}".to_string() + &(instance_id).to_string();
             let value = bincode::serialize(&*instance)?;
 
             let mut conn = self.redis_client.get_connection().await?;
@@ -169,7 +171,9 @@ impl ScalingManager {
                 if let Err(e) =
                     Self::check_and_scale(&instances, &config, &last_scale_time, &metrics).await
                 {
-                    error!("Scaling check failed: {}", e);
+                    let _ = std::io::stderr().write_all(
+                        ("Scaling check failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
+                    );
                 }
                 tokio::time::sleep(config.health_check_interval).await;
             }
@@ -228,7 +232,7 @@ impl ScalingManager {
     ) -> Result<()> {
         // In a real implementation, this would trigger the creation of a new instance
         // through your container orchestration system (e.g., Kubernetes)
-        info!("Scaling up: Creating new instance");
+        let _ = std::io::stderr().write_all(("Scaling up: Creating new instance\n").as_bytes());
         Ok(())
     }
 
@@ -242,10 +246,14 @@ impl ScalingManager {
             .iter()
             .find(|i| i.status == InstanceStatus::Active)
         {
-            info!("Scaling down: Removing instance {}", instance.id);
+            let _ = std::io::stderr().write_all(
+                ("Scaling down: Removing instance ".to_string() + &instance.id + "\n").as_bytes(),
+            );
             Ok(())
         } else {
-            Err(anyhow::anyhow!("No active instance found to scale down"))
+            Err(anyhow::Error::msg(
+                "No active instance found to scale down".to_string(),
+            ))
         }
     }
 
@@ -265,7 +273,9 @@ impl ScalingManager {
 
         for instance_id in failed_instances {
             if let Some(instance) = self.instances.remove(&instance_id) {
-                warn!("Removing failed instance: {}", instance_id);
+                let _ = std::io::stderr().write_all(
+                    ("Removing failed instance: ".to_string() + &instance_id + "\n").as_bytes(),
+                );
 
                 // In a real implementation, this would trigger cleanup in your container orchestration system
             }

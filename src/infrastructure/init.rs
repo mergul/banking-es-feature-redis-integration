@@ -20,6 +20,7 @@ use crate::infrastructure::timeout_manager::{TimeoutConfig, TimeoutManager};
 use crate::infrastructure::user_repository::UserRepository;
 use anyhow::Result;
 use redis;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
@@ -44,29 +45,29 @@ pub struct ServiceContext {
 
 impl ServiceContext {
     pub async fn shutdown(mut self) {
-        println!("Starting graceful shutdown of services...");
+        let _ = std::io::stderr().write_all(b"Starting graceful shutdown of services...\n");
 
         // Cancel Kafka event processor
         self.kafka_handle.abort();
         // Wait for it to finish
         if let Err(_) = self.kafka_handle.await {
-            error!("Error during Kafka event processor shutdown");
+            let _ = std::io::stderr().write_all(b"Error during Kafka event processor shutdown\n");
         }
 
         // Cancel L1 cache updater
         self.l1_handle.abort();
         // Wait for it to finish
         if let Err(_) = self.l1_handle.await {
-            error!("Error during L1 cache updater shutdown");
+            let _ = std::io::stderr().write_all(b"Error during L1 cache updater shutdown\n");
         }
 
         // Cancel warmup task if it's still running
         self.warmup_handle.abort();
         if let Err(_) = self.warmup_handle.await {
-            error!("Error during warmup task shutdown");
+            let _ = std::io::stderr().write_all(b"Error during warmup task shutdown\n");
         }
 
-        println!("Service shutdown complete");
+        let _ = std::io::stderr().write_all(b"Service shutdown complete\n");
     }
 
     pub async fn check_background_tasks(mut self) -> Result<()> {
@@ -74,16 +75,18 @@ impl ServiceContext {
         let warmup_result = tokio::spawn(async move { self.warmup_handle.await }).await?;
 
         if let Err(_) = warmup_result {
-            error!("Warmup task failed");
-            return Err(anyhow::anyhow!("Warmup task failed"));
+            let _ = std::io::stderr().write_all(b"Warmup task failed\n");
+            return Err(anyhow::Error::msg("Warmup task failed".to_string()));
         }
 
         // Check L1 cache updater status
         let l1_result = tokio::spawn(async move { self.l1_handle.await }).await?;
 
         if let Err(_) = l1_result {
-            error!("L1 cache updater task failed");
-            return Err(anyhow::anyhow!("L1 cache updater task failed"));
+            let _ = std::io::stderr().write_all(b"L1 cache updater task failed\n");
+            return Err(anyhow::Error::msg(
+                "L1 cache updater task failed".to_string(),
+            ));
         }
 
         Ok(())
@@ -91,7 +94,7 @@ impl ServiceContext {
 }
 
 pub async fn init_all_services() -> Result<ServiceContext> {
-    println!("Initializing services...");
+    let _ = std::io::stderr().write_all(b"Initializing services...\n");
 
     // Initialize timeout manager
     let timeout_config = TimeoutConfig {
@@ -277,8 +280,11 @@ pub async fn init_all_services() -> Result<ServiceContext> {
             .unwrap_or(100),
     };
 
-    let event_store: Arc<dyn EventStoreTrait + Send + Sync> =
-        Arc::new(EventStore::new_with_config(event_store_config).await?);
+    let event_store: Arc<dyn EventStoreTrait + Send + Sync> = Arc::new(
+        EventStore::new_with_config(event_store_config)
+            .await
+            .map_err(|e| anyhow::Error::msg(e.to_string()))?,
+    );
 
     // Initialize connection pool monitor
     let pool_monitor_config = PoolMonitorConfig {
@@ -482,7 +488,12 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         match AccountRepository::with_kafka_producer(event_store.clone(), kafka_config.clone()) {
             Ok(repo) => Arc::new(repo),
             Err(e) => {
-                error!("Failed to create repository with Kafka producer: {}", e);
+                let _ = std::io::stderr().write_all(
+                    ("Failed to create repository with Kafka producer: ".to_string()
+                        + &e.to_string()
+                        + "\n")
+                        .as_bytes(),
+                );
                 // Fallback to repository without Kafka producer
                 Arc::new(AccountRepository::new(event_store.clone()))
             }
@@ -623,7 +634,7 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         if let Ok(accounts) = event_store_for_warmup.get_all_accounts().await {
             let account_ids: Vec<Uuid> = accounts.iter().map(|a| a.id).collect();
             if let Err(_) = cache_service_for_warmup.warmup_cache(account_ids).await {
-                error!("Cache warmup error");
+                let _ = std::io::stderr().write_all(b"Cache warmup error\n");
             }
         }
     });
@@ -646,7 +657,7 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     let l1_updater = l1_cache_updater.clone();
     let l1_handle = tokio::spawn(async move {
         if let Err(_) = l1_updater.start().await {
-            error!("L1 cache updater error");
+            let _ = std::io::stderr().write_all(b"L1 cache updater error\n");
         }
     });
 
@@ -654,11 +665,11 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     let kafka_processor_for_start = kafka_processor.clone();
     let kafka_handle = tokio::spawn(async move {
         if let Err(_) = kafka_processor_for_start.start_processing().await {
-            error!("Kafka event processor error");
+            let _ = std::io::stderr().write_all(b"Kafka event processor error\n");
         }
     });
 
-    println!("All services initialized successfully");
+    let _ = std::io::stderr().write_all(b"All services initialized successfully\n");
 
     // Create ServiceContext
     let service_context = ServiceContext {

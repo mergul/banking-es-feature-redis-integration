@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use bincode;
 use chrono::Utc;
 use rust_decimal::Decimal;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -136,9 +137,13 @@ impl AccountCommandHandler {
                     .upsert_accounts_batch(vec![projection])
                     .await
                 {
-                    warn!(
-                        "Failed to update projection for account {}: {}",
-                        account_id, e
+                    let _ = std::io::stderr().write_all(
+                        ("Failed to update projection for account ".to_string()
+                            + &account_id.to_string()
+                            + &": ".to_string()
+                            + &e.to_string()
+                            + "\n")
+                            .as_bytes(),
                     );
                 }
 
@@ -148,10 +153,13 @@ impl AccountCommandHandler {
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                info!(
-                    "Account created successfully: {} in {:?}",
-                    account_id,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account created successfully: ".to_string()
+                        + &account_id.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
 
                 Ok(CommandResult {
@@ -206,9 +214,13 @@ impl AccountCommandHandler {
                     .upsert_accounts_batch(vec![projection])
                     .await
                 {
-                    warn!(
-                        "Failed to update projection for account {}: {}",
-                        account_id, e
+                    let _ = std::io::stderr().write_all(
+                        ("Failed to update projection for account ".to_string()
+                            + &account_id.to_string()
+                            + &": ".to_string()
+                            + &e.to_string()
+                            + "\n")
+                            .as_bytes(),
                     );
                 }
 
@@ -228,7 +240,12 @@ impl AccountCommandHandler {
                             .insert_transactions_batch(vec![transaction])
                             .await
                         {
-                            warn!("Failed to insert transaction projection: {}", e);
+                            let _ = std::io::stderr().write_all(
+                                ("Failed to insert transaction projection: ".to_string()
+                                    + &e.to_string()
+                                    + "\n")
+                                    .as_bytes(),
+                            );
                         }
                     }
                 }
@@ -239,11 +256,15 @@ impl AccountCommandHandler {
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                info!(
-                    "Deposit successful: {} amount {} in {:?}",
-                    account_id,
-                    amount,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Deposit successful: ".to_string()
+                        + &account_id.to_string()
+                        + &" amount ".to_string()
+                        + &amount.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
 
                 Ok(CommandResult {
@@ -298,9 +319,13 @@ impl AccountCommandHandler {
                     .upsert_accounts_batch(vec![projection])
                     .await
                 {
-                    warn!(
-                        "Failed to update projection for account {}: {}",
-                        account_id, e
+                    let _ = std::io::stderr().write_all(
+                        ("Failed to update projection for account ".to_string()
+                            + &account_id.to_string()
+                            + &": ".to_string()
+                            + &e.to_string()
+                            + "\n")
+                            .as_bytes(),
                     );
                 }
 
@@ -320,7 +345,12 @@ impl AccountCommandHandler {
                             .insert_transactions_batch(vec![transaction])
                             .await
                         {
-                            warn!("Failed to insert transaction projection: {}", e);
+                            let _ = std::io::stderr().write_all(
+                                ("Failed to insert transaction projection: ".to_string()
+                                    + &e.to_string()
+                                    + "\n")
+                                    .as_bytes(),
+                            );
                         }
                     }
                 }
@@ -331,11 +361,15 @@ impl AccountCommandHandler {
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                info!(
-                    "Withdrawal successful: {} amount {} in {:?}",
-                    account_id,
-                    amount,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Withdrawal successful: ".to_string()
+                        + &account_id.to_string()
+                        + &" amount ".to_string()
+                        + &amount.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
 
                 Ok(CommandResult {
@@ -397,9 +431,13 @@ impl AccountCommandHandler {
                     .upsert_accounts_batch(vec![projection])
                     .await
                 {
-                    warn!(
-                        "Failed to update projection for account {}: {}",
-                        account_id, e
+                    let _ = std::io::stderr().write_all(
+                        ("Failed to update projection for account ".to_string()
+                            + &account_id.to_string()
+                            + &": ".to_string()
+                            + &e.to_string()
+                            + "\n")
+                            .as_bytes(),
                     );
                 }
 
@@ -409,17 +447,20 @@ impl AccountCommandHandler {
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                info!(
-                    "Account closed successfully: {} in {:?}",
-                    account_id,
-                    start_time.elapsed()
+                let _ = std::io::stderr().write_all(
+                    ("Account closed successfully: ".to_string()
+                        + &account_id.to_string()
+                        + &" in ".to_string()
+                        + &start_time.elapsed().as_secs_f64().to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
 
                 Ok(CommandResult {
                     success: true,
                     account_id: Some(account_id),
                     events,
-                    message: format!("Account closed: {}", reason),
+                    message: "Account closed: {}".to_string() + &(reason).to_string(),
                 })
             }
             _ => Err(AccountError::InfrastructureError(

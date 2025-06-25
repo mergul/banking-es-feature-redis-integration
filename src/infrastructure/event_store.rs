@@ -14,6 +14,7 @@ use sqlx::{
     PgPool, Postgres, Row, Transaction,
 };
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,26 +50,84 @@ macro_rules! track_operation {
 // Global connection pool
 pub static DB_POOL: OnceCell<Arc<PgPool>> = OnceCell::const_new();
 
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub enum EventStoreError {
-    #[error("Optimistic concurrency conflict for aggregate {aggregate_id}: expected version {expected}, but found {actual:?}")]
     OptimisticConcurrencyConflict {
         aggregate_id: Uuid,
         expected: i64,
         actual: Option<i64>,
     },
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-    #[error("Serialization error (bincode): {0}")]
-    SerializationErrorBincode(#[from] Box<bincode::ErrorKind>),
-    #[error("Validation error: {0:?}")]
+    DatabaseError(sqlx::Error),
+    SerializationErrorBincode(Box<bincode::ErrorKind>),
     ValidationError(Vec<String>),
-    #[error("Failed to send response for batch event: {0}")]
     ResponseSendError(String),
-    #[error("Internal error: {0}")]
     InternalError(String),
-    #[error("Event handling error: {0}")]
     EventHandlingError(String),
+}
+
+impl std::fmt::Display for EventStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventStoreError::OptimisticConcurrencyConflict {
+                aggregate_id,
+                expected,
+                actual,
+            } => {
+                let actual_str = match actual {
+                    Some(val) => val.to_string(),
+                    None => "None".to_string(),
+                };
+                let msg = "Optimistic concurrency conflict for aggregate ".to_string()
+                    + &aggregate_id.to_string()
+                    + ": expected version "
+                    + &expected.to_string()
+                    + ", but found "
+                    + &actual_str;
+                f.write_str(&msg)
+            }
+            EventStoreError::DatabaseError(e) => {
+                let msg = "Database error: ".to_string() + &e.to_string();
+                f.write_str(&msg)
+            }
+            EventStoreError::SerializationErrorBincode(e) => {
+                let msg = "Serialization error (bincode): ".to_string() + &e.to_string();
+                f.write_str(&msg)
+            }
+            EventStoreError::ValidationError(errors) => {
+                let errors_str = errors
+                    .iter()
+                    .map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let msg = "Validation error: [".to_string() + &errors_str + "]";
+                f.write_str(&msg)
+            }
+            EventStoreError::ResponseSendError(msg) => {
+                let full_msg = "Failed to send response for batch event: ".to_string() + msg;
+                f.write_str(&full_msg)
+            }
+            EventStoreError::InternalError(msg) => {
+                let full_msg = "Internal error: ".to_string() + msg;
+                f.write_str(&full_msg)
+            }
+            EventStoreError::EventHandlingError(msg) => {
+                let full_msg = "Event handling error: ".to_string() + msg;
+                f.write_str(&full_msg)
+            }
+        }
+    }
+}
+
+impl From<sqlx::Error> for EventStoreError {
+    fn from(err: sqlx::Error) -> Self {
+        EventStoreError::DatabaseError(err)
+    }
+}
+
+impl From<Box<bincode::ErrorKind>> for EventStoreError {
+    fn from(err: Box<bincode::ErrorKind>) -> Self {
+        EventStoreError::SerializationErrorBincode(err)
+    }
 }
 
 impl EventStoreError {
@@ -272,8 +331,11 @@ impl EventStore {
 
     /// Create EventStore with a specific pool size
     pub async fn new_with_pool_size(pool_size: u32) -> Result<Self, EventStoreError> {
-        let database_url = std::env::var("DATABASE_URL")
-            .map_err(|e| EventStoreError::InternalError(format!("DATABASE_URL not set: {}", e)))?;
+        let database_url = std::env::var("DATABASE_URL").map_err(|e| {
+            EventStoreError::InternalError(
+                "DATABASE_URL not set: {}".to_string() + &(e).to_string(),
+            )
+        })?;
         Self::new_with_pool_size_and_url(pool_size, &database_url).await
     }
 
@@ -371,24 +433,24 @@ impl EventStore {
             .acquire_owned()
             .await
             .map_err(|e| {
-                EventStoreError::InternalError(format!("Failed to acquire batch permit: {}", e))
+                EventStoreError::InternalError(
+                    "Failed to acquire batch permit: {}".to_string() + &(e).to_string(),
+                )
             })?;
 
         // Send event to batch processor
         self.batch_sender.send(batched_event).map_err(|e| {
-            EventStoreError::InternalError(format!(
-                "Failed to send event to batch processor: {}",
-                e
-            ))
+            EventStoreError::InternalError(
+                "Failed to send event to batch processor: ".to_string() + &e.to_string(),
+            )
         })?;
 
         // Wait for response
         match response_rx.await {
             Ok(result) => result,
-            Err(e) => Err(EventStoreError::ResponseSendError(format!(
-                "Failed to receive response: {}",
-                e
-            ))),
+            Err(e) => Err(EventStoreError::ResponseSendError(
+                "Failed to receive response: ".to_string() + &e.to_string(),
+            )),
         }
     }
 
@@ -409,18 +471,24 @@ impl EventStore {
                 Err(e) => {
                     if retries >= config.max_retries {
                         return Err(anyhow::anyhow!(
-                            "Operation failed after {} retries: {}",
-                            retries,
-                            e
+                            "Operation failed after ".to_string()
+                                + &retries.to_string()
+                                + " retries: "
+                                + &e.to_string()
                         ));
                     }
 
-                    warn!(
-                        "Operation failed (attempt {}/{}): {}. Retrying in {:?}...",
-                        retries + 1,
-                        config.max_retries,
-                        e,
-                        delay
+                    let _ = std::io::stderr().write_all(
+                        ("Operation failed (attempt ".to_string()
+                            + &(retries + 1).to_string()
+                            + "/"
+                            + &config.max_retries.to_string()
+                            + "): "
+                            + &e.to_string()
+                            + ". Retrying in "
+                            + &delay.as_secs().to_string()
+                            + "s...\n")
+                            .as_bytes(),
                     );
 
                     tokio::time::sleep(delay).await;
@@ -445,59 +513,51 @@ impl EventStore {
             return Ok(());
         }
 
-        let operation_id = format!("save_events_{}", aggregate_id);
+        let operation_id = "save_events_{}".to_string() + &(aggregate_id).to_string();
 
-        track_operation!(
-            &*self.deadlock_detector,
-            "save_events",
-            operation_id,
-            async {
-                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                let batched_event = BatchedEvent {
-                    aggregate_id,
-                    events,
-                    expected_version,
-                    response_tx,
-                    created_at: Instant::now(),
-                    priority: EventPriority::Normal,
-                };
+        // Execute the operation directly without the track_operation macro
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let batched_event = BatchedEvent {
+            aggregate_id,
+            events,
+            expected_version,
+            response_tx,
+            created_at: Instant::now(),
+            priority: EventPriority::Normal,
+        };
 
-                // Acquire permit from semaphore with timeout
-                let _permit = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    self.batch_semaphore.clone().acquire_owned(),
-                )
-                .await
-                .map_err(|_| {
-                    EventStoreError::InternalError(
-                        "Failed to acquire batch permit: timeout".to_string(),
-                    )
-                })?
-                .map_err(|e| {
-                    EventStoreError::InternalError(format!("Failed to acquire batch permit: {}", e))
-                })?;
-
-                // Send event to batch processor
-                self.batch_sender.send(batched_event).map_err(|e| {
-                    EventStoreError::InternalError(format!(
-                        "Failed to send event to batch processor: {}",
-                        e
-                    ))
-                })?;
-
-                // Wait for response with timeout
-                match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(e)) => Err(EventStoreError::ResponseSendError(format!(
-                        "Failed to receive response: {}",
-                        e
-                    ))),
-                    Err(_) => Err(EventStoreError::InternalError(
-                        "Operation timed out".to_string(),
-                    )),
-                }
-            }
+        // Acquire permit from semaphore with timeout
+        let _permit = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.batch_semaphore.clone().acquire_owned(),
         )
+        .await
+        .map_err(|_| {
+            EventStoreError::InternalError("Failed to acquire batch permit: timeout".to_string())
+        })?
+        .map_err(|e| {
+            EventStoreError::InternalError(
+                "Failed to acquire batch permit: ".to_string() + &e.to_string(),
+            )
+        })?;
+
+        // Send event to batch processor
+        self.batch_sender.send(batched_event).map_err(|e| {
+            EventStoreError::InternalError(
+                "Failed to send event to batch processor: ".to_string() + &e.to_string(),
+            )
+        })?;
+
+        // Wait for response with timeout
+        match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => Err(EventStoreError::ResponseSendError(
+                "Failed to receive response: ".to_string() + &e.to_string(),
+            )),
+            Err(_) => Err(EventStoreError::InternalError(
+                "Operation timed out".to_string(),
+            )),
+        }
     }
 
     // Start multiple batch processors for parallel processing
@@ -535,9 +595,13 @@ impl EventStore {
         while let Some(event) = receiver.recv().await {
             // Simple round-robin distribution
             if let Err(e) = work_sender.send(event) {
-                error!(
-                    "Failed to distribute work to processor {}: {}",
-                    processor_index, e
+                let _ = std::io::stderr().write_all(
+                    ("Failed to distribute work to processor ".to_string()
+                        + &processor_index.to_string()
+                        + ": "
+                        + &e.to_string()
+                        + "\n")
+                        .as_bytes(),
                 );
             }
             processor_index = (processor_index + 1) % processor_count;
@@ -559,13 +623,24 @@ impl EventStore {
         let mut last_flush = Instant::now();
         let mut processed_events = 0u64;
 
-        info!("Batch processor worker {} started", worker_id);
+        let _ = std::io::stderr().write_all(
+            ("Batch processor worker ".to_string() + &worker_id.to_string() + " started\n")
+                .as_bytes(),
+        );
 
         loop {
             let timeout = tokio::time::sleep(Duration::from_millis(config.batch_timeout_ms));
 
-            tokio::select! {
-                Some(event) = receiver.recv() => {
+            // Use manual async/await instead of tokio::select!
+            let event_result = receiver.recv();
+
+            // Wait for either an event or timeout
+            let event_opt =
+                tokio::time::timeout(Duration::from_millis(config.batch_timeout_ms), event_result)
+                    .await;
+
+            match event_opt {
+                Ok(Some(event)) => {
                     batch.push(event);
 
                     if batch.len() >= config.batch_size {
@@ -577,15 +652,35 @@ impl EventStore {
                         let version_cache = version_cache.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = Self::flush_batch(&pool, batch_to_process, &metrics, &event_handlers, &version_cache).await {
-                                error!("Worker {} failed to flush batch: {}", worker_id, e);
+                            if let Err(e) = Self::flush_batch(
+                                &pool,
+                                batch_to_process,
+                                &metrics,
+                                &event_handlers,
+                                &version_cache,
+                            )
+                            .await
+                            {
+                                let _ = std::io::stderr().write_all(
+                                    ("Worker ".to_string()
+                                        + &worker_id.to_string()
+                                        + " failed to flush batch: "
+                                        + &e.to_string()
+                                        + "\n")
+                                        .as_bytes(),
+                                );
                             }
                         });
                         last_flush = Instant::now();
                         processed_events += batch_len as u64;
                     }
                 }
-                _ = timeout => {
+                Ok(None) => {
+                    // Channel closed, break the loop
+                    break;
+                }
+                Err(_) => {
+                    // Timeout occurred, flush if we have events
                     if !batch.is_empty() {
                         let batch_len = batch.len();
                         let batch_to_process = std::mem::replace(&mut batch, Vec::new());
@@ -595,8 +690,23 @@ impl EventStore {
                         let version_cache = version_cache.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = Self::flush_batch(&pool, batch_to_process, &metrics, &event_handlers, &version_cache).await {
-                                error!("Worker {} failed to flush batch: {}", worker_id, e);
+                            if let Err(e) = Self::flush_batch(
+                                &pool,
+                                batch_to_process,
+                                &metrics,
+                                &event_handlers,
+                                &version_cache,
+                            )
+                            .await
+                            {
+                                let _ = std::io::stderr().write_all(
+                                    ("Worker ".to_string()
+                                        + &worker_id.to_string()
+                                        + " failed to flush batch: "
+                                        + &e.to_string()
+                                        + "\n")
+                                        .as_bytes(),
+                                );
                             }
                         });
                         last_flush = Instant::now();
@@ -607,7 +717,14 @@ impl EventStore {
 
             // Log worker statistics periodically
             if processed_events > 0 && processed_events % 1000 == 0 {
-                info!("Worker {} processed {} events", worker_id, processed_events);
+                let _ = std::io::stderr().write_all(
+                    ("Worker ".to_string()
+                        + &worker_id.to_string()
+                        + " processed "
+                        + &processed_events.to_string()
+                        + " events\n")
+                        .as_bytes(),
+                );
             }
         }
     }
@@ -620,91 +737,87 @@ impl EventStore {
         event_handlers: &DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>,
         version_cache: &DashMap<Uuid, i64>,
     ) -> Result<(), EventStoreError> {
-        let operation_id = format!("flush_batch_{}", Uuid::new_v4());
+        let operation_id = "flush_batch_{}".to_string() + &(Uuid::new_v4().to_string());
 
-        track_operation!(
-            // Note: This would need to be passed as a parameter or stored in a global context
-            // For now, we'll use a simplified approach
-            DeadlockDetector::new(DeadlockConfig::default()),
-            "flush_batch",
-            operation_id,
-            async {
-                let mut tx = tokio::time::timeout(Duration::from_secs(10), pool.begin())
-                    .await
-                    .map_err(|_| {
-                        EventStoreError::DatabaseError(sqlx::Error::Configuration(
-                            "Connection timeout".into(),
-                        ))
-                    })?
-                    .map_err(EventStoreError::DatabaseError)?;
+        // Execute the operation directly without the track_operation macro
+        let mut tx = tokio::time::timeout(Duration::from_secs(10), pool.begin())
+            .await
+            .map_err(|_| {
+                EventStoreError::DatabaseError(sqlx::Error::Configuration(
+                    "Connection timeout".into(),
+                ))
+            })?
+            .map_err(EventStoreError::DatabaseError)?;
 
-                for batched_event in batch {
-                    let event_data = Self::prepare_events_for_insert_optimized(&batched_event)
-                        .map_err(EventStoreError::SerializationErrorBincode)?;
+        for batched_event in batch {
+            let event_data = Self::prepare_events_for_insert_optimized(&batched_event)
+                .map_err(EventStoreError::SerializationErrorBincode)?;
 
-                    // Validate events
-                    let mut validation_error = None;
-                    for event in &event_data {
-                        let validation = Self::validate_event(event).await;
-                        if !validation.is_valid {
-                            metrics
-                                .events_failed
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            validation_error =
-                                Some(EventStoreError::ValidationError(validation.errors));
-                            break;
-                        }
-                    }
-
-                    // Handle events
-                    let mut handling_error = None;
-                    if validation_error.is_none() {
-                        for event in &event_data {
-                            if let Err(e) = Self::handle_event(event, event_handlers).await {
-                                metrics
-                                    .events_failed
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                handling_error = Some(e);
-                                break;
-                            }
-                        }
-                    }
-
-                    // Insert events
-                    let insert_result = if validation_error.is_none() && handling_error.is_none() {
-                        Self::bulk_insert_events_optimized(
-                            &mut tx,
-                            event_data.clone(),
-                            metrics,
-                            version_cache,
-                        )
-                        .await
-                    } else {
-                        Err(validation_error.unwrap_or_else(|| handling_error.unwrap()))
-                    };
-
-                    // Update metrics and send response
-                    if insert_result.is_ok() {
-                        metrics.events_processed.fetch_add(
-                            event_data.len() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
-                    let _ = batched_event.response_tx.send(insert_result);
+            // Validate events
+            let mut validation_error = None;
+            for event in &event_data {
+                let validation = Self::validate_event(event).await;
+                if !validation.is_valid {
+                    metrics
+                        .events_failed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    validation_error = Some(EventStoreError::ValidationError(validation.errors));
+                    break;
                 }
-
-                tokio::time::timeout(Duration::from_secs(5), tx.commit())
-                    .await
-                    .map_err(|_| {
-                        EventStoreError::DatabaseError(sqlx::Error::Configuration(
-                            "Commit timeout".into(),
-                        ))
-                    })?
-                    .map_err(EventStoreError::DatabaseError)?;
-
-                Ok(())
             }
-        )
+
+            // Handle events
+            let mut handling_error = None;
+            if validation_error.is_none() {
+                for event in &event_data {
+                    if let Err(e) = Self::handle_event(event, event_handlers).await {
+                        metrics
+                            .events_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        handling_error = Some(EventStoreError::EventHandlingError(
+                            "Failed to handle event ".to_string()
+                                + &event.event_type
+                                + " for aggregate "
+                                + &event.aggregate_id.to_string()
+                                + ": "
+                                + &e.to_string(),
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            // Insert events
+            let insert_result = if validation_error.is_none() && handling_error.is_none() {
+                Self::bulk_insert_events_optimized(
+                    &mut tx,
+                    event_data.clone(),
+                    metrics,
+                    version_cache,
+                )
+                .await
+            } else {
+                Err(validation_error.unwrap_or_else(|| handling_error.unwrap()))
+            };
+
+            // Update metrics and send response
+            if insert_result.is_ok() {
+                metrics.events_processed.fetch_add(
+                    event_data.len() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            let _ = batched_event.response_tx.send(insert_result);
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), tx.commit())
+            .await
+            .map_err(|_| {
+                EventStoreError::DatabaseError(sqlx::Error::Configuration("Commit timeout".into()))
+            })?
+            .map_err(EventStoreError::DatabaseError)?;
+
+        Ok(())
     }
 
     // Pre-calculate event data to reduce serialization overhead
@@ -823,11 +936,12 @@ impl EventStore {
             if events.len() > 1 {
                 for (i, event) in events.iter().enumerate() {
                     if event.version != expected_version + i as i64 + 1 {
-                        return Err(EventStoreError::ValidationError(vec![format!(
-                            "Invalid version sequence: expected {}, got {}",
-                            expected_version + i as i64 + 1,
-                            event.version
-                        )]));
+                        return Err(EventStoreError::ValidationError(vec![
+                            "Invalid version sequence: expected ".to_string()
+                                + &(expected_version + i as i64 + 1).to_string()
+                                + ", got "
+                                + &event.version.to_string(),
+                        ]));
                     }
                 }
             }
@@ -846,16 +960,23 @@ impl EventStore {
             let mut param_index = 1;
 
             for event in events.clone() {
-                values.push(format!(
-                    "(${},${},${},${},${},${},${})",
-                    param_index,
-                    param_index + 1,
-                    param_index + 2,
-                    param_index + 3,
-                    param_index + 4,
-                    param_index + 5,
-                    param_index + 6
-                ));
+                values.push(
+                    "($".to_string()
+                        + &param_index.to_string()
+                        + ",$"
+                        + &(param_index + 1).to_string()
+                        + ",$"
+                        + &(param_index + 2).to_string()
+                        + ",$"
+                        + &(param_index + 3).to_string()
+                        + ",$"
+                        + &(param_index + 4).to_string()
+                        + ",$"
+                        + &(param_index + 5).to_string()
+                        + ",$"
+                        + &(param_index + 6).to_string()
+                        + ")",
+                );
 
                 params.push((
                     event.id,
@@ -1047,17 +1168,44 @@ impl EventStore {
                             let config_clone = config.clone();
 
                             snapshot_tasks.push(tokio::spawn(async move {
-                                if let Err(e) =
-                                    Self::create_snapshot(&pool_clone, &cache_clone, aggregate_id, &config_clone)
-                                        .await
+                                if let Err(e) = Self::create_snapshot(
+                                    &pool_clone,
+                                    &cache_clone,
+                                    aggregate_id,
+                                    &config_clone,
+                                )
+                                .await
                                 {
-                                    warn!("Failed to create snapshot for {}: {}", aggregate_id, e);
+                                    let _ = std::io::stderr().write_all(
+                                        ("Failed to create snapshot for ".to_string()
+                                            + &aggregate_id.to_string()
+                                            + ": "
+                                            + &e.to_string()
+                                            + "\n")
+                                            .as_bytes(),
+                                    );
                                 } else {
-                                    info!("Successfully created snapshot for aggregate {} at version {}", aggregate_id, max_version);
+                                    let _ = std::io::stderr().write_all(
+                                        ("Created snapshot for aggregate ".to_string()
+                                            + &aggregate_id.to_string()
+                                            + " at version "
+                                            + &max_version.to_string()
+                                            + "\n")
+                                            .as_bytes(),
+                                    );
                                 }
                             }));
                         } else {
-                            debug!("Skipping snapshot for aggregate {}: no new events (max_version: {}, last_snapshot_version: {})", aggregate_id, max_version, last_snapshot_version);
+                            let _ = std::io::stderr().write_all(
+                                ("Skipping snapshot for aggregate ".to_string()
+                                    + &aggregate_id.to_string()
+                                    + ": no new events (max_version: "
+                                    + &max_version.to_string()
+                                    + ", last_snapshot_version: "
+                                    + &last_snapshot_version.to_string()
+                                    + ")\n")
+                                    .as_bytes(),
+                            );
                         }
                     }
 
@@ -1065,12 +1213,22 @@ impl EventStore {
                     // This ensures backpressure on snapshot creation and provides visibility into their completion.
                     for task in snapshot_tasks {
                         if let Err(join_error) = task.await {
-                            error!("Snapshot task failed to join: {}", join_error);
+                            let _ = std::io::stderr().write_all(
+                                ("Snapshot task failed to join: ".to_string()
+                                    + &join_error.to_string()
+                                    + "\n")
+                                    .as_bytes(),
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Failed to query snapshot candidates: {}", e);
+                    let _ = std::io::stderr().write_all(
+                        ("Failed to query snapshot candidates: ".to_string()
+                            + &e.to_string()
+                            + "\n")
+                            .as_bytes(),
+                    );
                 }
             }
         }
@@ -1104,7 +1262,7 @@ impl EventStore {
 
         for event_row in &events {
             let account_event: AccountEvent = bincode::deserialize(&event_row.event_data)
-                .map_err(EventStoreError::SerializationErrorBincode)?;
+                .map_err(|e| anyhow::anyhow!(EventStoreError::SerializationErrorBincode(e)))?;
             account.apply_event(&account_event);
         }
 
@@ -1142,9 +1300,13 @@ impl EventStore {
             cache_guard.insert(aggregate_id, snapshot);
         }
 
-        debug!(
-            "Created snapshot for aggregate {} at version {}",
-            aggregate_id, max_version
+        let _ = std::io::stderr().write_all(
+            ("Created snapshot for aggregate ".to_string()
+                + &aggregate_id.to_string()
+                + " at version "
+                + &max_version.to_string()
+                + "\n")
+                .as_bytes(),
         );
         Ok(())
     }
@@ -1174,13 +1336,11 @@ impl EventStore {
         }
     }
 
-    // Metrics reporting task
+    // Background metrics reporter
     async fn metrics_reporter(metrics: Arc<EventStoreMetrics>) {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-
             let processed = metrics.events_processed.load(Ordering::Relaxed);
             let failed = metrics.events_failed.load(Ordering::Relaxed);
             let batches = metrics.batch_count.load(Ordering::Relaxed);
@@ -1199,9 +1359,19 @@ impl EventStore {
                 0.0
             };
 
-            info!(
-                "EventStore Metrics - Processed: {}, Failed: {}, Success: {:.2}%, Batches: {}, Cache Hit Rate: {:.2}%",
-                processed, failed, success_rate, batches, cache_hit_rate
+            let _ = std::io::stderr().write_all(
+                ("EventStore Metrics - Processed: ".to_string()
+                    + &processed.to_string()
+                    + ", Failed: "
+                    + &failed.to_string()
+                    + ", Success: "
+                    + &((success_rate * 100.0).round() as i64 / 100).to_string()
+                    + "%, Batches: "
+                    + &batches.to_string()
+                    + ", Cache Hit Rate: "
+                    + &((cache_hit_rate * 100.0).round() as i64 / 100).to_string()
+                    + "%\n")
+                    .as_bytes(),
             );
         }
     }
@@ -1288,12 +1458,17 @@ impl EventStore {
                 let active_queries: i64 = row.get("active_queries");
                 let idle_transactions: i64 = row.get("idle_transactions");
 
-                format!(
-                    "healthy (active: {}, idle: {}, queries: {}, idle_tx: {})",
-                    active_connections, idle_connections, active_queries, idle_transactions
-                )
+                "healthy (active: ".to_string()
+                    + &active_connections.to_string()
+                    + ", idle: "
+                    + &idle_connections.to_string()
+                    + ", queries: "
+                    + &active_queries.to_string()
+                    + ", idle_tx: "
+                    + &idle_transactions.to_string()
+                    + ")"
             }
-            Ok(Err(e)) => format!("unhealthy: {}", e),
+            Ok(Err(e)) => "unhealthy: {}".to_string() + &(e).to_string(),
             Err(_) => "unhealthy: timeout".to_string(),
         };
 
@@ -1309,10 +1484,13 @@ impl EventStore {
             let used_permits = total_permits - available_permits;
             let queue_utilization = (used_permits as f64 / total_permits as f64) * 100.0;
 
-            format!(
-                "Queue: {}/{} permits used ({:.1}% utilization)",
-                used_permits, total_permits, queue_utilization
-            )
+            "Queue: ".to_string()
+                + &used_permits.to_string()
+                + "/"
+                + &total_permits.to_string()
+                + " permits used ("
+                + &((queue_utilization * 10.0).round() / 10.0).to_string()
+                + "% utilization)"
         };
 
         // Get deadlock detection stats
@@ -1352,16 +1530,37 @@ impl EventStore {
             let pool_stats = self.pool_stats();
             let metrics = self.get_metrics();
 
-            info!(
-                "Connection Pool Stats - Total: {}, Idle: {}, Active: {}, Acquire Time: {}ms, Errors: {}, Reuse: {}, Timeouts: {}, Avg Lifetime: {}s",
-                pool_stats.0,
-                pool_stats.1,
-                pool_stats.0 - pool_stats.1,
-                metrics.connection_acquire_time.load(Ordering::Relaxed),
-                metrics.connection_acquire_errors.load(Ordering::Relaxed),
-                metrics.connection_reuse_count.load(Ordering::Relaxed),
-                metrics.connection_timeout_count.load(Ordering::Relaxed),
-                metrics.connection_lifetime.load(Ordering::Relaxed) / 1000
+            let _ = std::io::stderr().write_all(
+                ("Connection Pool Stats - Total: ".to_string()
+                    + &pool_stats.0.to_string()
+                    + ", Idle: "
+                    + &pool_stats.1.to_string()
+                    + ", Active: "
+                    + &(pool_stats.0 - pool_stats.1).to_string()
+                    + ", Acquire Time: "
+                    + &metrics
+                        .connection_acquire_time
+                        .load(Ordering::Relaxed)
+                        .to_string()
+                    + "ms, Errors: "
+                    + &metrics
+                        .connection_acquire_errors
+                        .load(Ordering::Relaxed)
+                        .to_string()
+                    + ", Reuse: "
+                    + &metrics
+                        .connection_reuse_count
+                        .load(Ordering::Relaxed)
+                        .to_string()
+                    + ", Timeouts: "
+                    + &metrics
+                        .connection_timeout_count
+                        .load(Ordering::Relaxed)
+                        .to_string()
+                    + ", Avg Lifetime: "
+                    + &(metrics.connection_lifetime.load(Ordering::Relaxed) / 1000).to_string()
+                    + "s\n")
+                    .as_bytes(),
             );
         }
     }
@@ -1455,10 +1654,14 @@ impl EventStore {
         if let Some(handlers) = event_handlers.get(&event.event_type) {
             for handler in handlers.iter() {
                 handler.handle(event).await.map_err(|e| {
-                    EventStoreError::EventHandlingError(format!(
-                        "Failed to handle event {} for aggregate {}: {}",
-                        event.event_type, event.aggregate_id, e
-                    ))
+                    EventStoreError::EventHandlingError(
+                        "Failed to handle event ".to_string()
+                            + &event.event_type
+                            + " for aggregate "
+                            + &event.aggregate_id.to_string()
+                            + ": "
+                            + &e.to_string(),
+                    )
                 })?;
             }
         }

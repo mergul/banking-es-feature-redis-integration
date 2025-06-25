@@ -1,11 +1,12 @@
+use serde;
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use serde;
 
 #[derive(Debug, Clone)]
 pub struct TimeoutConfig {
@@ -93,16 +94,17 @@ impl TimeoutManager {
         F: std::future::Future<Output = Result<T, E>> + Send,
         E: std::error::Error + Send + Sync + 'static,
     {
-        let timeout_id = format!("{}_{}", operation_type, operation_id);
-        
+        let timeout_id = operation_type.to_string() + "_" + operation_id;
+
         // Register timeout
-        self.register_timeout(&timeout_id, operation_type, timeout_duration).await;
-        
+        self.register_timeout(&timeout_id, operation_type, timeout_duration)
+            .await;
+
         let result = timeout(timeout_duration, operation).await;
-        
+
         // Remove timeout registration
         self.remove_timeout(&timeout_id).await;
-        
+
         match result {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(e)) => Err(TimeoutError::OperationError(Box::new(e))),
@@ -122,7 +124,13 @@ impl TimeoutManager {
         F: std::future::Future<Output = Result<T, E>> + Send,
         E: std::error::Error + Send + Sync + 'static,
     {
-        self.with_timeout("database", operation_id, self.config.database_operation_timeout, operation).await
+        self.with_timeout(
+            "database",
+            operation_id,
+            self.config.database_operation_timeout,
+            operation,
+        )
+        .await
     }
 
     pub async fn with_cache_timeout<F, T, E>(
@@ -134,7 +142,13 @@ impl TimeoutManager {
         F: std::future::Future<Output = Result<T, E>> + Send,
         E: std::error::Error + Send + Sync + 'static,
     {
-        self.with_timeout("cache", operation_id, self.config.cache_operation_timeout, operation).await
+        self.with_timeout(
+            "cache",
+            operation_id,
+            self.config.cache_operation_timeout,
+            operation,
+        )
+        .await
     }
 
     pub async fn with_kafka_timeout<F, T, E>(
@@ -146,7 +160,13 @@ impl TimeoutManager {
         F: std::future::Future<Output = Result<T, E>> + Send,
         E: std::error::Error + Send + Sync + 'static,
     {
-        self.with_timeout("kafka", operation_id, self.config.kafka_operation_timeout, operation).await
+        self.with_timeout(
+            "kafka",
+            operation_id,
+            self.config.kafka_operation_timeout,
+            operation,
+        )
+        .await
     }
 
     pub async fn with_redis_timeout<F, T, E>(
@@ -158,7 +178,13 @@ impl TimeoutManager {
         F: std::future::Future<Output = Result<T, E>> + Send,
         E: std::error::Error + Send + Sync + 'static,
     {
-        self.with_timeout("redis", operation_id, self.config.redis_operation_timeout, operation).await
+        self.with_timeout(
+            "redis",
+            operation_id,
+            self.config.redis_operation_timeout,
+            operation,
+        )
+        .await
     }
 
     pub async fn with_batch_timeout<F, T, E>(
@@ -170,18 +196,32 @@ impl TimeoutManager {
         F: std::future::Future<Output = Result<T, E>> + Send,
         E: std::error::Error + Send + Sync + 'static,
     {
-        self.with_timeout("batch", operation_id, self.config.batch_processing_timeout, operation).await
+        self.with_timeout(
+            "batch",
+            operation_id,
+            self.config.batch_processing_timeout,
+            operation,
+        )
+        .await
     }
 
-    async fn register_timeout(&self, timeout_id: &str, operation_type: &str, timeout_duration: Duration) {
+    async fn register_timeout(
+        &self,
+        timeout_id: &str,
+        operation_type: &str,
+        timeout_duration: Duration,
+    ) {
         let mut timeouts = self.active_timeouts.write().await;
-        timeouts.insert(timeout_id.to_string(), TimeoutInfo {
-            operation_id: timeout_id.to_string(),
-            operation_type: operation_type.to_string(),
-            start_time: Instant::now(),
-            timeout: timeout_duration,
-            resource: "timeout".to_string(),
-        });
+        timeouts.insert(
+            timeout_id.to_string(),
+            TimeoutInfo {
+                operation_id: timeout_id.to_string(),
+                operation_type: operation_type.to_string(),
+                start_time: Instant::now(),
+                timeout: timeout_duration,
+                resource: "timeout".to_string(),
+            },
+        );
     }
 
     async fn remove_timeout(&self, timeout_id: &str) {
@@ -192,7 +232,7 @@ impl TimeoutManager {
     async fn record_timeout(&self, operation_type: &str) {
         let mut stats = self.timeout_stats.write().await;
         stats.total_timeouts += 1;
-        
+
         match operation_type {
             "database" => stats.database_timeouts += 1,
             "cache" => stats.cache_timeouts += 1,
@@ -205,10 +245,10 @@ impl TimeoutManager {
 
     async fn cleanup_expired_timeouts(&self) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
-        
+
         loop {
             interval.tick().await;
-            
+
             let mut timeouts = self.active_timeouts.write().await;
             let now = Instant::now();
             let expired: Vec<String> = timeouts
@@ -216,9 +256,11 @@ impl TimeoutManager {
                 .filter(|(_, info)| now.duration_since(info.start_time) > info.timeout)
                 .map(|(id, _)| id.clone())
                 .collect();
-            
+
             for timeout_id in expired {
-                warn!("Found expired timeout: {}", timeout_id);
+                let _ = std::io::stderr().write_all(
+                    ("Found expired timeout: ".to_string() + &timeout_id + "\n").as_bytes(),
+                );
                 timeouts.remove(&timeout_id);
             }
         }
@@ -234,7 +276,12 @@ impl TimeoutManager {
     }
 
     pub async fn get_active_timeouts(&self) -> Vec<TimeoutInfo> {
-        self.active_timeouts.read().await.values().cloned().collect()
+        self.active_timeouts
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn get_config(&self) -> &TimeoutConfig {
@@ -242,19 +289,39 @@ impl TimeoutManager {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum TimeoutError {
-    #[error("Operation timed out: {0}")]
     Timeout(String),
-    #[error("Operation failed: {0}")]
-    OperationError(#[from] Box<dyn std::error::Error + Send + Sync>),
+    OperationError(Box<dyn std::error::Error + Send + Sync>),
 }
+
+impl std::fmt::Display for TimeoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeoutError::Timeout(msg) => f
+                .write_str("Operation timed out: ")
+                .and_then(|_| f.write_str(msg)),
+            TimeoutError::OperationError(err) => f
+                .write_str("Operation failed: ")
+                .and_then(|_| f.write_str(&err.to_string())),
+        }
+    }
+}
+
+impl std::error::Error for TimeoutError {}
 
 // Helper macro for automatic timeout handling
 #[macro_export]
 macro_rules! with_timeout {
     ($manager:expr, $operation_type:expr, $operation_id:expr, $block:expr) => {
-        $manager.with_timeout($operation_type, $operation_id, $manager.get_config().database_operation_timeout, $block).await
+        $manager
+            .with_timeout(
+                $operation_type,
+                $operation_id,
+                $manager.get_config().database_operation_timeout,
+                $block,
+            )
+            .await
     };
 }
 
@@ -301,4 +368,4 @@ impl Default for TimeoutStats {
                 .as_secs(),
         }
     }
-} 
+}

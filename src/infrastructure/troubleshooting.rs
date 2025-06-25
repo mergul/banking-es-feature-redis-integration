@@ -1,9 +1,12 @@
-use crate::infrastructure::connection_pool_monitor::{ConnectionPoolMonitor, PoolHealth, PoolMonitorTrait};
+use crate::infrastructure::connection_pool_monitor::{
+    ConnectionPoolMonitor, PoolHealth, PoolMonitorTrait,
+};
 use crate::infrastructure::deadlock_detector::{DeadlockDetector, DeadlockStats};
 use crate::infrastructure::timeout_manager::{TimeoutManager, TimeoutStats};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -188,7 +191,8 @@ impl Troubleshooter {
         // Collect health data from all components
         let deadlock_stats = self.deadlock_detector.get_stats().await;
         let timeout_stats = self.timeout_manager.get_stats().await;
-        let pool_health = PoolMonitorTrait::health_check(&*self.connection_pool_monitor).await
+        let pool_health = PoolMonitorTrait::health_check(&*self.connection_pool_monitor)
+            .await
             .unwrap_or_else(|_| PoolHealth {
                 is_healthy: false,
                 utilization: 0.0,
@@ -202,12 +206,14 @@ impl Troubleshooter {
         let stuck_operations = self.analyze_stuck_operations().await;
 
         // Generate recommendations
-        let recommendations = self.generate_recommendations(
-            &deadlock_stats,
-            &timeout_stats,
-            &pool_health,
-            &stuck_operations,
-        ).await;
+        let recommendations = self
+            .generate_recommendations(
+                &deadlock_stats,
+                &timeout_stats,
+                &pool_health,
+                &stuck_operations,
+            )
+            .await;
 
         // Determine overall health status
         let overall_status = self.determine_overall_health(
@@ -293,18 +299,22 @@ impl Troubleshooter {
             recommendations.push(Recommendation {
                 severity: RecommendationSeverity::Critical,
                 title: "High Connection Pool Utilization".to_string(),
-                description: format!("Connection pool utilization is {:.1}%", pool_health.utilization * 100.0),
+                description: "Connection pool utilization is {:.1}%".to_string()
+                    + &(pool_health.utilization * 100.0).to_string(),
                 action: "Consider increasing max_connections or optimizing queries".to_string(),
                 impact: "May cause connection timeouts and degraded performance".to_string(),
             });
         }
 
         // Deadlock recommendations
-        if deadlock_stats.active_operations > self.config.critical_thresholds.max_deadlock_count as usize {
+        if deadlock_stats.active_operations
+            > self.config.critical_thresholds.max_deadlock_count as usize
+        {
             recommendations.push(Recommendation {
                 severity: RecommendationSeverity::Critical,
                 title: "High Deadlock Count".to_string(),
-                description: format!("{} active operations detected", deadlock_stats.active_operations),
+                description: "{} active operations detected".to_string()
+                    + &(deadlock_stats.active_operations).to_string(),
                 action: "Review transaction isolation levels and query patterns".to_string(),
                 impact: "May cause data inconsistency and performance degradation".to_string(),
             });
@@ -317,7 +327,8 @@ impl Troubleshooter {
             recommendations.push(Recommendation {
                 severity: RecommendationSeverity::Warning,
                 title: "High Timeout Rate".to_string(),
-                description: format!("{:.1}% of operations are timing out", timeout_rate * 100.0),
+                description: "{:.1}% of operations are timing out".to_string()
+                    + &(timeout_rate * 100.0).to_string(),
                 action: "Increase timeout values or optimize slow operations".to_string(),
                 impact: "May cause user experience degradation".to_string(),
             });
@@ -328,7 +339,8 @@ impl Troubleshooter {
             recommendations.push(Recommendation {
                 severity: RecommendationSeverity::Critical,
                 title: "Multiple Stuck Operations".to_string(),
-                description: format!("{} operations are stuck", stuck_operations.len()),
+                description: "{} operations are stuck".to_string()
+                    + &(stuck_operations.len().to_string()),
                 action: "Investigate and potentially restart affected services".to_string(),
                 impact: "May cause system-wide performance issues".to_string(),
             });
@@ -351,7 +363,9 @@ impl Troubleshooter {
         if pool_health.utilization > self.config.critical_thresholds.max_connection_utilization {
             critical_issues += 1;
         }
-        if deadlock_stats.active_operations > self.config.critical_thresholds.max_deadlock_count as usize {
+        if deadlock_stats.active_operations
+            > self.config.critical_thresholds.max_deadlock_count as usize
+        {
             critical_issues += 1;
         }
         if stuck_operations.len() > self.config.critical_thresholds.max_stuck_operations {
@@ -431,25 +445,41 @@ impl Troubleshooter {
 
     async fn monitor_health(&self) {
         let mut interval = tokio::time::interval(self.config.health_check_interval);
-        
+
         loop {
             interval.tick().await;
-            
+
             match self.diagnose_system().await {
                 Ok(health) => {
                     match health.overall_status {
                         HealthStatus::Healthy => {
-                            info!("System health check: HEALTHY");
+                            let _ = std::io::stderr().write_all(b"System health check: HEALTHY\n");
                         }
                         HealthStatus::Degraded => {
-                            warn!("System health check: DEGRADED - {} recommendations", health.recommendations.len());
+                            let _ = std::io::stderr().write_all(
+                                ("System health check: DEGRADED - {} recommendations\n"
+                                    .to_string()
+                                    + &health.recommendations.len().to_string())
+                                    .as_bytes(),
+                            );
                         }
                         HealthStatus::Critical => {
-                            error!("System health check: CRITICAL - {} critical issues", 
-                                   health.recommendations.iter().filter(|r| matches!(r.severity, RecommendationSeverity::Critical)).count());
+                            let _ = std::io::stderr().write_all(
+                                ("System health check: CRITICAL - {} critical issues\n"
+                                    .to_string()
+                                    + &health
+                                        .recommendations
+                                        .iter()
+                                        .filter(|r| {
+                                            matches!(r.severity, RecommendationSeverity::Critical)
+                                        })
+                                        .count()
+                                        .to_string())
+                                    .as_bytes(),
+                            );
                         }
                         HealthStatus::Unhealthy => {
-                            error!("System health check: UNHEALTHY - System requires immediate attention");
+                            let _ = std::io::stderr().write_all(b"System health check: UNHEALTHY - System requires immediate attention\n");
                         }
                     }
 
@@ -458,7 +488,10 @@ impl Troubleshooter {
                     }
                 }
                 Err(e) => {
-                    error!("Failed to diagnose system health: {}", e);
+                    let _ = std::io::stderr().write_all(
+                        ("Failed to diagnose system health: {}\n".to_string() + &e.to_string())
+                            .as_bytes(),
+                    );
                 }
             }
         }
@@ -468,13 +501,21 @@ impl Troubleshooter {
         for recommendation in &health.recommendations {
             match recommendation.severity {
                 RecommendationSeverity::Critical => {
-                    warn!("Attempting auto-recovery for critical issue: {}", recommendation.title);
+                    let _ = std::io::stderr().write_all(
+                        ("Attempting auto-recovery for critical issue: {}\n".to_string()
+                            + &recommendation.title)
+                            .as_bytes(),
+                    );
                     // Implement specific recovery actions based on the issue
                     self.execute_recovery_action(recommendation).await;
                 }
                 _ => {
                     // Log but don't auto-recover for non-critical issues
-                    info!("Auto-recovery skipped for non-critical issue: {}", recommendation.title);
+                    let _ = std::io::stderr().write_all(
+                        ("Auto-recovery skipped for non-critical issue: {}\n".to_string()
+                            + &recommendation.title)
+                            .as_bytes(),
+                    );
                 }
             }
         }
@@ -483,16 +524,22 @@ impl Troubleshooter {
     async fn execute_recovery_action(&self, recommendation: &Recommendation) {
         match recommendation.title.as_str() {
             "High Connection Pool Utilization" => {
-                warn!("Auto-recovery: Connection pool utilization is high - consider manual intervention");
+                let _ = std::io::stderr().write_all(b"Auto-recovery: Connection pool utilization is high - consider manual intervention\n");
             }
             "High Deadlock Count" => {
-                warn!("Auto-recovery: Deadlock count is high - consider manual intervention");
+                let _ = std::io::stderr().write_all(
+                    b"Auto-recovery: Deadlock count is high - consider manual intervention\n",
+                );
             }
             "Multiple Stuck Operations" => {
-                warn!("Auto-recovery: Multiple stuck operations detected - consider manual intervention");
+                let _ = std::io::stderr().write_all(b"Auto-recovery: Multiple stuck operations detected - consider manual intervention\n");
             }
             _ => {
-                info!("Auto-recovery: No specific action for {}", recommendation.title);
+                let _ = std::io::stderr().write_all(
+                    ("Auto-recovery: No specific action for {}\n".to_string()
+                        + &recommendation.title)
+                        .as_bytes(),
+                );
             }
         }
     }
@@ -505,4 +552,4 @@ impl Troubleshooter {
         let mut history = self.health_history.write().await;
         history.clear();
     }
-} 
+}

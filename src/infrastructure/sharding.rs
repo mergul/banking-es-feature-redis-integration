@@ -1,36 +1,41 @@
+use crate::infrastructure::redis_abstraction::RealRedisClient;
 use crate::infrastructure::{
     redis_abstraction::{RedisClientTrait, RedisConnectionCommands},
     scaling::InstanceStatus,
 };
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use redis::aio::ConnectionLike;
+use redis::Client;
 use redis::{aio::MultiplexedConnection, AsyncCommands, RedisError};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use redis::aio::ConnectionLike;
-use redis::Client;
-use crate::infrastructure::redis_abstraction::RealRedisClient;
-use chrono::{DateTime, Utc};
 
 pub type ShardId = Uuid;
 
 // Custom module for bincode-compatible DateTime<Utc> serialization
 mod bincode_datetime {
-    use chrono::{DateTime, Utc, TimeZone};
-    use serde::{self, Serializer, Deserializer};
+    use chrono::{DateTime, TimeZone, Utc};
     use serde::de::Deserialize;
+    use serde::{self, Deserializer, Serializer};
 
     pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         serializer.serialize_i64(dt.timestamp())
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let ts = i64::deserialize(deserializer)?;
         Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
     }
@@ -99,9 +104,9 @@ impl ShardManager {
 
     pub async fn initialize_shards(&self) -> Result<()> {
         let range_size = u64::MAX / self.config.shard_count as u64;
-        
+
         for i in 0..self.config.shard_count {
-            let shard_id = format!("shard-{}", i);
+            let shard_id = "shard-{}".to_string() + &(i).to_string();
             let range_start = i as u64 * range_size;
             let range_end = if i == self.config.shard_count - 1 {
                 u64::MAX
@@ -125,8 +130,11 @@ impl ShardManager {
     }
 
     pub async fn assign_shard(&self, shard_id: &str, instance_id: &str) -> Result<()> {
-        let lock_key = format!("shard:lock:{}", shard_id);
-        let lock = self.lock_manager.acquire_lock(&lock_key, self.config.lock_timeout).await?;
+        let lock_key = "shard:lock:{}".to_string() + &(shard_id).to_string();
+        let lock = self
+            .lock_manager
+            .acquire_lock(&lock_key, self.config.lock_timeout)
+            .await?;
 
         if let Some(mut shard) = self.shards.get_mut(shard_id) {
             shard.instance_id = Some(instance_id.to_string());
@@ -140,7 +148,7 @@ impl ShardManager {
 
     pub async fn get_shard_for_key(&self, key: &str) -> Result<Option<ShardInfo>> {
         let hash = self.hash_key(key);
-        
+
         for shard in self.shards.iter() {
             if hash >= shard.range_start && hash <= shard.range_end {
                 return Ok(Some(shard.clone()));
@@ -152,7 +160,10 @@ impl ShardManager {
 
     pub async fn rebalance_shards(&self) -> Result<()> {
         let lock_key = "shard:rebalance:lock";
-        let lock = self.lock_manager.acquire_lock(lock_key, self.config.lock_timeout).await?;
+        let lock = self
+            .lock_manager
+            .acquire_lock(lock_key, self.config.lock_timeout)
+            .await?;
 
         // Calculate current distribution
         let mut instance_shards: DashMap<String, Vec<ShardInfo>> = DashMap::new();
@@ -178,7 +189,7 @@ impl ShardManager {
         }
 
         if needs_rebalancing {
-            info!("Starting shard rebalancing");
+            let _ = std::io::stderr().write_all(b"Starting shard rebalancing\n");
             self.perform_rebalancing(&instance_shards).await?;
         }
 
@@ -198,7 +209,7 @@ impl ShardManager {
         for entry in instance_shards.iter() {
             let instance_id = entry.key().clone();
             let shard_count = entry.value().len() as f64;
-            
+
             if shard_count > avg_shards * (1.0 + self.config.rebalance_threshold) {
                 overloaded.push((instance_id, shard_count));
             } else if shard_count < avg_shards * (1.0 - self.config.rebalance_threshold) {
@@ -223,7 +234,7 @@ impl ShardManager {
     fn hash_key(&self, key: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         hasher.finish()
@@ -244,13 +255,13 @@ impl LockManager {
     }
 
     pub async fn acquire_lock(&self, key: &str, timeout: Duration) -> Result<DistributedLock> {
-        let lock_key = format!("lock:{}", key);
+        let lock_key = "lock:{}".to_string() + &(key).to_string();
         let lock_id = Uuid::new_v4().to_string();
         let mut retries = 0;
 
         while retries < 3 {
             let mut conn = self.redis_client.get_connection().await?;
-            
+
             let acquired: bool = redis::cmd("SET")
                 .arg(&lock_key)
                 .arg(&lock_id)
@@ -272,7 +283,7 @@ impl LockManager {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        Err(anyhow::anyhow!("Failed to acquire lock after retries"))
+        Err(anyhow::Error::msg("Failed to acquire lock after retries"))
     }
 }
 
@@ -285,7 +296,7 @@ pub struct DistributedLock {
 impl DistributedLock {
     pub async fn release_lock(self) -> Result<()> {
         let mut conn = self.redis_client.get_connection().await?;
-        
+
         let script = redis::Script::new(
             r#"
             if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -303,7 +314,12 @@ impl DistributedLock {
             .await?;
 
         if result == 0 {
-            warn!("Lock {} was already released or taken by another client", self.key);
+            let _ = std::io::stderr().write_all(
+                ("Lock ".to_string()
+                    + &self.key
+                    + " was already released or taken by another client\n")
+                    .as_bytes(),
+            );
         }
 
         Ok(())
@@ -315,9 +331,15 @@ impl ConnectionLike for dyn RedisConnectionCommands + Send {
         0 // Default database
     }
 
-    fn req_packed_command<'a>(&'a mut self, cmd: &'a redis::Cmd) -> redis::RedisFuture<'a, redis::Value> {
+    fn req_packed_command<'a>(
+        &'a mut self,
+        cmd: &'a redis::Cmd,
+    ) -> redis::RedisFuture<'a, redis::Value> {
         Box::pin(async move {
-            unimplemented!("req_packed_command not implemented")
+            Err(redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "req_packed_command not implemented",
+            )))
         })
     }
 
@@ -328,7 +350,10 @@ impl ConnectionLike for dyn RedisConnectionCommands + Send {
         count: usize,
     ) -> redis::RedisFuture<'a, Vec<redis::Value>> {
         Box::pin(async move {
-            unimplemented!("req_packed_commands not implemented")
+            Err(redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "req_packed_commands not implemented",
+            )))
         })
     }
 }
@@ -351,15 +376,18 @@ mod tests {
     async fn test_shard_assignment() {
         let redis_client = Client::open("redis://127.0.0.1/").unwrap();
         let redis_client = RealRedisClient::new(redis_client, None);
-        
+
         let config = ShardConfig::default();
         let shard_manager = ShardManager::new(redis_client, config);
-        
+
         shard_manager.initialize_shards().await.unwrap();
-        
+
         let instance_id = "test-instance-1";
-        shard_manager.assign_shard("shard-0", instance_id).await.unwrap();
-        
+        shard_manager
+            .assign_shard("shard-0", instance_id)
+            .await
+            .unwrap();
+
         let shard = shard_manager.shards.get("shard-0").unwrap();
         assert_eq!(shard.instance_id, Some(instance_id.to_string()));
         assert_eq!(shard.status, ShardStatus::Assigned);
@@ -369,30 +397,30 @@ mod tests {
     async fn test_distributed_lock() {
         let redis_client = Client::open("redis://127.0.0.1/").unwrap();
         let redis_client = RealRedisClient::new(redis_client, None);
-        
+
         let lock_manager = LockManager::new(redis_client.clone());
-        
+
         let lock = lock_manager
             .acquire_lock("test-lock", Duration::from_secs(30))
             .await
             .unwrap();
-            
+
         // Try to acquire the same lock
         let result = lock_manager
             .acquire_lock("test-lock", Duration::from_secs(30))
             .await;
-            
+
         assert!(result.is_err());
-        
+
         // Release the lock
         lock.release_lock().await.unwrap();
-        
+
         // Should be able to acquire the lock again
         let lock = lock_manager
             .acquire_lock("test-lock", Duration::from_secs(30))
             .await
             .unwrap();
-            
+
         lock.release_lock().await.unwrap();
     }
-} 
+}

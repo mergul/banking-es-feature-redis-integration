@@ -1,9 +1,9 @@
+use serde;
 use sqlx::PgPool;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
-use serde;
 
 #[derive(Debug, Clone)]
 pub struct PoolMetrics {
@@ -87,21 +87,28 @@ impl ConnectionPoolMonitor {
 
     pub async fn monitor_pool(&self) {
         let mut interval = tokio::time::interval(self.config.health_check_interval);
-        
+
         loop {
             interval.tick().await;
-            
+
             if let Err(e) = self.check_pool_health().await {
-                error!("Pool health check failed: {}", e);
+                let _ = std::io::stderr().write_all(
+                    ("Pool health check failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
+                );
             }
-            
+
             if let Err(e) = self.detect_stuck_connections().await {
-                error!("Stuck connection detection failed: {}", e);
+                let _ = std::io::stderr().write_all(
+                    ("Stuck connection detection failed: ".to_string() + &e.to_string() + "\n")
+                        .as_bytes(),
+                );
             }
-            
+
             if self.config.enable_auto_scaling {
                 if let Err(e) = self.auto_scale_pool().await {
-                    error!("Auto-scaling failed: {}", e);
+                    let _ = std::io::stderr().write_all(
+                        ("Auto-scaling failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
+                    );
                 }
             }
         }
@@ -111,7 +118,7 @@ impl ConnectionPoolMonitor {
         let total = self.pool.size();
         let idle = self.pool.num_idle() as u32;
         let active = total - idle;
-        
+
         let mut metrics = self.metrics.write().await;
         metrics.total_connections = total;
         metrics.active_connections = active;
@@ -121,13 +128,28 @@ impl ConnectionPoolMonitor {
         // Check for pool exhaustion
         let utilization = active as f64 / total as f64;
         if utilization > self.config.pool_exhaustion_threshold {
-            warn!("Connection pool utilization high: {:.2}% ({}/{})", 
-                  utilization * 100.0, active, total);
+            let _ = std::io::stderr().write_all(
+                ("Connection pool utilization high: ".to_string()
+                    + &(utilization * 100.0).to_string()
+                    + "% ("
+                    + &active.to_string()
+                    + "/"
+                    + &total.to_string()
+                    + ")\n")
+                    .as_bytes(),
+            );
         }
 
         // Check for connection leaks
         if active > total * 9 / 10 {
-            error!("Potential connection leak detected: {}/{} connections active", active, total);
+            let _ = std::io::stderr().write_all(
+                ("Potential connection leak detected: ".to_string()
+                    + &active.to_string()
+                    + "/"
+                    + &total.to_string()
+                    + " connections active\n")
+                    .as_bytes(),
+            );
         }
 
         Ok(())
@@ -136,11 +158,9 @@ impl ConnectionPoolMonitor {
     async fn detect_stuck_connections(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut stuck_connections = self.stuck_connections.write().await;
         let now = Instant::now();
-        
+
         // Remove expired stuck connections
-        stuck_connections.retain(|conn| {
-            now.duration_since(conn.acquired_at) < conn.timeout
-        });
+        stuck_connections.retain(|conn| now.duration_since(conn.acquired_at) < conn.timeout);
 
         // Check for new stuck connections
         let metrics = self.metrics.read().await;
@@ -148,8 +168,14 @@ impl ConnectionPoolMonitor {
             // This is a simplified check - in a real implementation, you'd track individual connections
             let avg_connection_time = metrics.connection_acquire_time;
             if avg_connection_time > self.config.connection_timeout {
-                warn!("Average connection time ({:?}) exceeds timeout ({:?})", 
-                      avg_connection_time, self.config.connection_timeout);
+                let _ = std::io::stderr().write_all(
+                    ("Average connection time (".to_string()
+                        + &avg_connection_time.as_secs_f64().to_string()
+                        + "s) exceeds timeout ("
+                        + &self.config.connection_timeout.as_secs_f64().to_string()
+                        + "s)\n")
+                        .as_bytes(),
+                );
             }
         }
 
@@ -159,21 +185,35 @@ impl ConnectionPoolMonitor {
     async fn auto_scale_pool(&self) -> Result<(), Box<dyn std::error::Error>> {
         let metrics = self.metrics.read().await;
         let utilization = metrics.active_connections as f64 / metrics.total_connections as f64;
-        
+
         if utilization > 0.9 && metrics.total_connections < self.config.max_connections {
             // Scale up
             let new_max = (metrics.total_connections as f64 * 1.5) as u32;
             let new_max = std::cmp::min(new_max, self.config.max_connections);
-            
-            info!("Auto-scaling pool up: {} -> {}", metrics.total_connections, new_max);
+
+            let _ = std::io::stderr().write_all(
+                ("Auto-scaling pool up: ".to_string()
+                    + &metrics.total_connections.to_string()
+                    + " -> "
+                    + &new_max.to_string()
+                    + "\n")
+                    .as_bytes(),
+            );
             // Note: In a real implementation, you'd need to reconfigure the pool
             // This is a simplified version
         } else if utilization < 0.3 && metrics.total_connections > self.config.min_connections {
             // Scale down
             let new_max = (metrics.total_connections as f64 * 0.8) as u32;
             let new_max = std::cmp::max(new_max, self.config.min_connections);
-            
-            info!("Auto-scaling pool down: {} -> {}", metrics.total_connections, new_max);
+
+            let _ = std::io::stderr().write_all(
+                ("Auto-scaling pool down: ".to_string()
+                    + &metrics.total_connections.to_string()
+                    + " -> "
+                    + &new_max.to_string()
+                    + "\n")
+                    .as_bytes(),
+            );
         }
 
         Ok(())
@@ -188,34 +228,34 @@ impl ConnectionPoolMonitor {
     }
 
     pub async fn force_cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("Forcing connection pool cleanup");
-        
+        let _ = std::io::stderr().write_all(b"Forcing connection pool cleanup\n");
+
         // Clear stuck connections
         let mut stuck_connections = self.stuck_connections.write().await;
         stuck_connections.clear();
-        
+
         // Reset metrics
         let mut metrics = self.metrics.write().await;
         metrics.connection_acquire_errors = 0;
         metrics.connection_timeouts = 0;
-        
-        info!("Connection pool cleanup completed");
+
+        let _ = std::io::stderr().write_all(b"Connection pool cleanup completed\n");
         Ok(())
     }
 
     pub async fn test_connection(&self) -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
-        
+
         let mut conn = self.pool.acquire().await?;
         let acquire_time = start.elapsed();
-        
+
         // Test the connection
         sqlx::query("SELECT 1").execute(&mut *conn).await?;
-        
+
         // Update metrics
         let mut metrics = self.metrics.write().await;
         metrics.connection_acquire_time = acquire_time;
-        
+
         Ok(())
     }
 }
@@ -230,7 +270,7 @@ impl PoolMonitorTrait for ConnectionPoolMonitor {
     fn get_monitor(&self) -> &ConnectionPoolMonitor {
         self
     }
-    
+
     async fn health_check(&self) -> Result<PoolHealth, Box<dyn std::error::Error>> {
         Ok(PoolHealth::new(self).await)
     }
@@ -250,7 +290,7 @@ impl PoolHealth {
     pub async fn new(monitor: &ConnectionPoolMonitor) -> Self {
         let metrics = monitor.metrics.read().await;
         let stuck_connections = monitor.stuck_connections.read().await;
-        
+
         Self {
             is_healthy: metrics.active_connections < metrics.total_connections * 9 / 10,
             utilization: metrics.active_connections as f64 / metrics.total_connections as f64,
@@ -260,4 +300,4 @@ impl PoolHealth {
             last_check_timestamp: metrics.last_health_check.elapsed().as_secs(),
         }
     }
-} 
+}
