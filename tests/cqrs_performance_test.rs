@@ -504,6 +504,7 @@ async fn test_cqrs_high_throughput_performance() {
         } else {
             0.0
         };
+        tracing::info!("💾 Cache Performance:");
         tracing::info!("Cache Hits: {}", cache_hits);
         tracing::info!("Cache Misses: {}", cache_misses);
         tracing::info!("Cache Hit Rate: {:.2}%", cache_hit_rate);
@@ -511,6 +512,27 @@ async fn test_cqrs_high_throughput_performance() {
         // Also show total cache operations for context
         let total_cache_ops = cache_hits + cache_misses;
         tracing::info!("Total Cache Operations: {}", total_cache_ops);
+
+        // Print a summary table
+        println!("\n{}", "=".repeat(80));
+        println!("🚀 CQRS PERFORMANCE SUMMARY");
+        println!("{}", "=".repeat(80));
+        println!("📊 Operations/Second: {:.2} OPS", ops);
+        println!("✅ Success Rate: {:.2}%", success_rate);
+        println!("💾 Cache Hit Rate: {:.2}%", cache_hit_rate);
+        println!("⚡ Conflict Rate: {:.2}%", conflict_rate);
+        println!("📈 Total Operations: {}", total_ops);
+        println!(
+            "🔧 Commands Processed: {}",
+            cqrs_metrics.commands_processed.load(Ordering::Relaxed)
+        );
+        println!(
+            "🔍 Queries Processed: {}",
+            cqrs_metrics.queries_processed.load(Ordering::Relaxed)
+        );
+        println!("💾 Cache Hits: {}", cache_hits);
+        println!("💾 Cache Misses: {}", cache_misses);
+        println!("{}", "=".repeat(80));
 
         // Assertions for performance targets
         assert!(
