@@ -197,8 +197,8 @@ async fn setup_test_environment() -> Result<TestContext, Box<dyn std::error::Err
     });
 
     let pool = PgPoolOptions::new()
-        .max_connections(5000) // Increased from 3000 to 5000 for maximum throughput
-        .min_connections(2000) // Increased from 1000 to 2000 for better connection availability
+        .max_connections(10000) // Increased from 5000 to 10000
+        .min_connections(5000) // Increased from 2000 to 5000
         .acquire_timeout(Duration::from_secs(30)) // Reduced from 60 to 30 seconds for faster acquisition
         .idle_timeout(Duration::from_secs(3600)) // Increased from 1800 to 3600 seconds
         .max_lifetime(Duration::from_secs(7200)) // Increased from 3600 to 7200 seconds

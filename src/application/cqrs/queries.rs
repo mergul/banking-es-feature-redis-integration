@@ -46,6 +46,10 @@ impl QueryBus {
         let result = self.account_query_handler.handle(account_query).await?;
         Ok(R::from(result))
     }
+
+    pub fn get_cache_metrics(&self) -> &crate::infrastructure::cache_service::CacheMetrics {
+        self.account_query_handler.get_cache_metrics()
+    }
 }
 
 /// Result of query execution
@@ -119,6 +123,10 @@ impl AccountQueryHandler {
         }
     }
 
+    pub fn get_cache_metrics(&self) -> &crate::infrastructure::cache_service::CacheMetrics {
+        self.cache_service.get_metrics()
+    }
+
     /// Get account by ID
     pub async fn get_account_by_id(
         &self,
@@ -130,6 +138,11 @@ impl AccountQueryHandler {
             AccountQuery::GetAccountById { account_id } => {
                 // Try cache first
                 if let Ok(Some(cached_account)) = self.cache_service.get_account(account_id).await {
+                    // Increment cache hit metric
+                    self.cache_service
+                        .get_metrics()
+                        .hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = std::io::stderr().write_all(
                         ("Cache hit for account ".to_string() + &account_id.to_string() + "\n")
                             .as_bytes(),
@@ -140,6 +153,12 @@ impl AccountQueryHandler {
                         message: "Account retrieved from cache".to_string(),
                     });
                 }
+
+                // Increment cache miss metric
+                self.cache_service
+                    .get_metrics()
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Cache miss - get from projection store
                 let account = self
@@ -238,6 +257,11 @@ impl AccountQueryHandler {
                 if let Ok(Some(cached_events)) =
                     self.cache_service.get_account_events(account_id).await
                 {
+                    // Increment cache hit metric
+                    self.cache_service
+                        .get_metrics()
+                        .hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = std::io::stderr().write_all(
                         ("Cache hit for account transactions ".to_string()
                             + &account_id.to_string()
@@ -250,6 +274,12 @@ impl AccountQueryHandler {
                         message: "Account transactions retrieved from cache".to_string(),
                     });
                 }
+
+                // Increment cache miss metric
+                self.cache_service
+                    .get_metrics()
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 let transactions = self
                     .projection_store
@@ -312,6 +342,11 @@ impl AccountQueryHandler {
             AccountQuery::GetAccountBalance { account_id } => {
                 // Try cache first
                 if let Ok(Some(cached_account)) = self.cache_service.get_account(account_id).await {
+                    // Increment cache hit metric
+                    self.cache_service
+                        .get_metrics()
+                        .hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = std::io::stderr().write_all(
                         ("Cache hit for account balance ".to_string()
                             + &account_id.to_string()
@@ -324,6 +359,12 @@ impl AccountQueryHandler {
                         message: "Account balance retrieved from cache".to_string(),
                     });
                 }
+
+                // Increment cache miss metric
+                self.cache_service
+                    .get_metrics()
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 let account = self
                     .projection_store

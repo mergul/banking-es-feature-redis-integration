@@ -71,25 +71,11 @@ impl CQRSHandler {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = std::io::stderr().write_all(
-                    ("Command executed successfully in ".to_string()
-                        + &start_time.elapsed().as_secs_f64().to_string()
-                        + "\n")
-                        .as_bytes(),
-                );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = std::io::stderr().write_all(
-                    ("Command execution failed: ".to_string()
-                        + &e.to_string()
-                        + &" in ".to_string()
-                        + &start_time.elapsed().as_secs_f64().to_string()
-                        + "\n")
-                        .as_bytes(),
-                );
             }
         }
 
@@ -122,25 +108,11 @@ impl CQRSHandler {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = std::io::stderr().write_all(
-                    ("Query executed successfully in ".to_string()
-                        + &start_time.elapsed().as_secs_f64().to_string()
-                        + "\n")
-                        .as_bytes(),
-                );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = std::io::stderr().write_all(
-                    ("Query execution failed: ".to_string()
-                        + &e.to_string()
-                        + &" in ".to_string()
-                        + &start_time.elapsed().as_secs_f64().to_string()
-                        + "\n")
-                        .as_bytes(),
-                );
             }
         }
 
@@ -230,7 +202,12 @@ impl CQRSHandler {
 
     /// Get metrics
     pub fn get_metrics(&self) -> &CQRSMetrics {
-        self.metrics.as_ref()
+        &self.metrics
+    }
+
+    /// Get cache metrics
+    pub fn get_cache_metrics(&self) -> &crate::infrastructure::cache_service::CacheMetrics {
+        self.query_bus.get_cache_metrics()
     }
 
     /// Health check
