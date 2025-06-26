@@ -36,6 +36,7 @@ use tokio::sync::mpsc;
 use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tracing;
 use uuid::Uuid;
 
 struct CQRSTestContext {
@@ -88,7 +89,7 @@ async fn setup_cqrs_test_environment(
         .get_connection()
         .expect("Failed to get Redis connection");
     let _: () = redis::cmd("PING").execute(&mut redis_conn);
-    let _ = std::io::stderr().write_all("✅ Redis connection test successful\n".as_bytes());
+    tracing::info!("✅ Redis connection test successful");
 
     let redis_client_trait = RealRedisClient::new(redis_client, None);
 
@@ -133,15 +134,11 @@ async fn setup_cqrs_test_environment(
     let monitor_handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
-            let _ = std::io::stderr().write_all(
-                ("📊 DB Pool Stats - Active: ".to_string()
-                    + &pool_clone.size().to_string()
-                    + ", Idle: "
-                    + &pool_clone.num_idle().to_string()
-                    + ", Size: "
-                    + &pool_clone.size().to_string()
-                    + "\n")
-                    .as_bytes(),
+            tracing::info!(
+                "📊 DB Pool Stats - Active: {}, Idle: {}, Size: {}",
+                pool_clone.size(),
+                pool_clone.num_idle(),
+                pool_clone.size()
             );
         }
     });
@@ -190,8 +187,7 @@ enum OperationResult {
 
 #[tokio::test]
 async fn test_cqrs_high_throughput_performance() {
-    let _ = std::io::stderr()
-        .write_all("🚀 Starting CQRS high throughput performance test...\n".as_bytes());
+    tracing::info!("🚀 Starting CQRS high throughput performance test...");
 
     // Add global timeout for the entire test
     let test_future = async {
@@ -204,16 +200,14 @@ async fn test_cqrs_high_throughput_performance() {
         let test_duration = Duration::from_secs(30); // Longer test for better measurement
         let operation_timeout = Duration::from_millis(500); // Increased from 200ms to 500ms for better reliability
 
-        let _ = std::io::stderr().write_all("Initializing CQRS test environment...\n".as_bytes());
+        tracing::info!("Initializing CQRS test environment...");
         let context = setup_cqrs_test_environment()
             .await
             .expect("Failed to setup CQRS test environment");
-        let _ = std::io::stderr().write_all("CQRS test environment setup complete\n".as_bytes());
+        tracing::info!("CQRS test environment setup complete");
 
         // Create accounts for testing
-        let _ = std::io::stderr().write_all(
-            ("Creating {} test accounts...\n".to_string() + &account_count.to_string()).as_bytes(),
-        );
+        tracing::info!("Creating {} test accounts...", account_count);
         let mut account_ids = Vec::new();
         for i in 0..account_count {
             let owner_name = "CQRSTestUser_".to_string() + &i.to_string();
@@ -224,19 +218,12 @@ async fn test_cqrs_high_throughput_performance() {
                 .await?;
             account_ids.push(account_id);
             if i % 200 == 0 {
-                let _ = std::io::stderr().write_all(
-                    ("Created {}/{} accounts\n".to_string()
-                        + &i.to_string()
-                        + "/"
-                        + &account_count.to_string())
-                        .as_bytes(),
-                );
+                tracing::info!("Created {}/{} accounts", i, account_count);
             }
         }
 
         // Enhanced cache warmup phase adopting integration test strategy
-        let _ = std::io::stderr()
-            .write_all("🔥 Warming up cache with integration test strategy...\n".as_bytes());
+        tracing::info!("🔥 Warming up cache with integration test strategy...");
         let warmup_start = Instant::now();
         let mut warmup_handles = Vec::new();
 
@@ -260,43 +247,29 @@ async fn test_cqrs_high_throughput_performance() {
             handle.await.expect("Warmup task failed");
         }
         let warmup_duration = warmup_start.elapsed();
-        let _ = std::io::stderr().write_all(
-            ("✅ Cache warmup completed in {:.2}s for {} accounts\n".to_string()
-                + &warmup_duration.as_secs_f64().to_string()
-                + " "
-                + &account_count.to_string())
-                .as_bytes(),
+        tracing::info!(
+            "✅ Cache warmup completed in {:.2}s for {} accounts",
+            warmup_duration.as_secs_f64(),
+            account_count
         );
 
         // Shorter stabilization period like integration tests
         tokio::time::sleep(Duration::from_millis(1000)).await; // Reduced from 2000ms to 1000ms
 
         // Start CQRS performance test
-        let _ = std::io::stderr()
-            .write_all("🚀 Starting CQRS high throughput performance test...\n".as_bytes());
-        let _ = std::io::stderr().write_all("📊 CQRS Test parameters:\n".as_bytes());
-        let _ = std::io::stderr()
-            .write_all(("  - Target OPS: {}\n".to_string() + &target_ops.to_string()).as_bytes());
-        let _ = std::io::stderr().write_all(
-            ("  - Worker count: {}\n".to_string() + &worker_count.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("  - Account count: {}\n".to_string() + &account_count.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("  - Test duration: {:.1}s\n".to_string() + &test_duration.as_secs_f64().to_string())
-                .as_bytes(),
-        );
+        tracing::info!("🚀 Starting CQRS high throughput performance test...");
+        tracing::info!("📊 CQRS Test parameters:");
+        tracing::info!("  - Target OPS: {}", target_ops);
+        tracing::info!("  - Worker count: {}", worker_count);
+        tracing::info!("  - Account count: {}", account_count);
+        tracing::info!("  - Test duration: {:.1}s", test_duration.as_secs_f64());
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(channel_buffer_size);
         let start_time = Instant::now();
         let end_time = start_time + test_duration;
 
         // Spawn CQRS worker tasks with ultra-optimized workload
-        let _ = std::io::stderr().write_all(
-            ("👥 Spawning {} CQRS worker tasks...\n".to_string() + &worker_count.to_string())
-                .as_bytes(),
-        );
+        tracing::info!("👥 Spawning {} CQRS worker tasks...", worker_count);
         let mut handles = Vec::new();
         for worker_id in 0..worker_count {
             let tx = tx.clone();
@@ -442,12 +415,10 @@ async fn test_cqrs_high_throughput_performance() {
                 }
 
                 if worker_id % 25 == 0 {
-                    let _ = std::io::stderr().write_all(
-                        ("✅ CQRS Worker {} completed after {} operations\n".to_string()
-                            + &worker_id.to_string()
-                            + " "
-                            + &operations.to_string())
-                            .as_bytes(),
+                    tracing::info!(
+                        "✅ CQRS Worker {} completed after {} operations",
+                        worker_id,
+                        operations
                     );
                 }
             });
@@ -455,7 +426,7 @@ async fn test_cqrs_high_throughput_performance() {
         }
         drop(tx);
 
-        let _ = std::io::stderr().write_all("📈 Collecting CQRS results...\n".as_bytes());
+        tracing::info!("📈 Collecting CQRS results...");
         let mut total_ops = 0;
         let mut successful_ops = 0;
         let mut failed_ops = 0;
@@ -474,97 +445,54 @@ async fn test_cqrs_high_throughput_performance() {
                 let elapsed = start_time.elapsed();
                 let current_ops = total_ops as f64 / elapsed.as_secs_f64();
                 let current_success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
-                let _ = std::io::stderr().write_all(
-                    ("📊 CQRS Progress: {} ops, {:.2} OPS, {:.1}% success\n".to_string()
-                        + &total_ops.to_string()
-                        + " "
-                        + &current_ops.to_string()
-                        + " "
-                        + &current_success_rate.to_string())
-                        .as_bytes(),
+                tracing::info!(
+                    "📊 CQRS Progress: {} ops, {:.2} OPS, {:.1}% success",
+                    total_ops,
+                    current_ops,
+                    current_success_rate
                 );
             }
         }
 
-        let _ =
-            std::io::stderr().write_all("⏳ Waiting for CQRS workers to complete...\n".as_bytes());
+        tracing::info!("⏳ Waiting for CQRS workers to complete...");
         for handle in handles {
             handle.await.expect("CQRS Worker task failed");
         }
-        let _ = std::io::stderr()
-            .write_all("✅ All CQRS worker tasks completed successfully\n".as_bytes());
+        tracing::info!("✅ All CQRS worker tasks completed successfully");
 
         let duration = start_time.elapsed();
         let ops = total_ops as f64 / duration.as_secs_f64();
         let success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
 
-        let _ = std::io::stderr().write_all(
-            ("🎯 CQRS High Throughput Test Results:\n".to_string()
-                + "==========================================\n"
-                + &duration.as_secs_f64().to_string())
-                .as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("📊 Total Operations: {}\n".to_string() + &total_ops.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("✅ Successful Operations: {}\n".to_string() + &successful_ops.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("❌ Failed Operations: {}\n".to_string() + &failed_ops.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("⚡ Conflict Operations: {}\n".to_string() + &conflict_ops.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("🚀 Operations Per Second: {:.2}\n".to_string() + &ops.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("📈 Success Rate: {:.2}%\n".to_string() + &success_rate.to_string()).as_bytes(),
-        );
+        tracing::info!("🎯 CQRS High Throughput Test Results:");
+        tracing::info!("==========================================");
+        tracing::info!("📊 Total Operations: {}", total_ops);
+        tracing::info!("✅ Successful Operations: {}", successful_ops);
+        tracing::info!("❌ Failed Operations: {}", failed_ops);
+        tracing::info!("⚡ Conflict Operations: {}", conflict_ops);
+        tracing::info!("🚀 Operations Per Second: {:.2}", ops);
+        tracing::info!("📈 Success Rate: {:.2}%", success_rate);
         let conflict_rate = (conflict_ops as f64 / total_ops as f64) * 100.0;
-        let _ = std::io::stderr().write_all(
-            ("⚡ Conflict Rate: {:.2}%\n".to_string() + &conflict_rate.to_string()).as_bytes(),
-        );
+        tracing::info!("⚡ Conflict Rate: {:.2}%", conflict_rate);
 
         // CQRS-specific metrics
         let cqrs_metrics = context.cqrs_service.get_metrics();
-        let _ = std::io::stderr().write_all("🔧 CQRS System Metrics:\n".as_bytes());
-        let _ = std::io::stderr().write_all(
-            ("Commands Processed: ".to_string()
-                + &cqrs_metrics
-                    .commands_processed
-                    .load(Ordering::Relaxed)
-                    .to_string()
-                + "\n")
-                .as_bytes(),
+        tracing::info!("🔧 CQRS System Metrics:");
+        tracing::info!(
+            "Commands Processed: {}",
+            cqrs_metrics.commands_processed.load(Ordering::Relaxed)
         );
-        let _ = std::io::stderr().write_all(
-            ("Commands Failed: ".to_string()
-                + &cqrs_metrics
-                    .commands_failed
-                    .load(Ordering::Relaxed)
-                    .to_string()
-                + "\n")
-                .as_bytes(),
+        tracing::info!(
+            "Commands Failed: {}",
+            cqrs_metrics.commands_failed.load(Ordering::Relaxed)
         );
-        let _ = std::io::stderr().write_all(
-            ("Queries Processed: ".to_string()
-                + &cqrs_metrics
-                    .queries_processed
-                    .load(Ordering::Relaxed)
-                    .to_string()
-                + "\n")
-                .as_bytes(),
+        tracing::info!(
+            "Queries Processed: {}",
+            cqrs_metrics.queries_processed.load(Ordering::Relaxed)
         );
-        let _ = std::io::stderr().write_all(
-            ("Queries Failed: ".to_string()
-                + &cqrs_metrics
-                    .queries_failed
-                    .load(Ordering::Relaxed)
-                    .to_string()
-                + "\n")
-                .as_bytes(),
+        tracing::info!(
+            "Queries Failed: {}",
+            cqrs_metrics.queries_failed.load(Ordering::Relaxed)
         );
 
         // Calculate cache hit rate from cache service metrics
@@ -576,21 +504,13 @@ async fn test_cqrs_high_throughput_performance() {
         } else {
             0.0
         };
-        let _ = std::io::stderr()
-            .write_all(("Cache Hits: ".to_string() + &cache_hits.to_string() + "\n").as_bytes());
-        let _ = std::io::stderr().write_all(
-            ("Cache Misses: ".to_string() + &cache_misses.to_string() + "\n").as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("Cache Hit Rate: ".to_string() + &cache_hit_rate.to_string() + "%\n").as_bytes(),
-        );
+        tracing::info!("Cache Hits: {}", cache_hits);
+        tracing::info!("Cache Misses: {}", cache_misses);
+        tracing::info!("Cache Hit Rate: {:.2}%", cache_hit_rate);
 
         // Also show total cache operations for context
         let total_cache_ops = cache_hits + cache_misses;
-        let _ = std::io::stderr().write_all(
-            ("Total Cache Operations: ".to_string() + &total_cache_ops.to_string() + "\n")
-                .as_bytes(),
-        );
+        tracing::info!("Total Cache Operations: {}", total_cache_ops);
 
         // Assertions for performance targets
         assert!(
@@ -605,25 +525,23 @@ async fn test_cqrs_high_throughput_performance() {
             success_rate
         );
 
-        let _ = std::io::stderr().write_all("🎉 All CQRS performance targets met! Optimized CQRS high throughput test completed successfully.\n".as_bytes());
+        tracing::info!("🎉 All CQRS performance targets met! Optimized CQRS high throughput test completed successfully.");
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     };
 
     match tokio::time::timeout(Duration::from_secs(300), test_future).await {
         Ok(_) => {
-            let _ = std::io::stderr().write_all("✅ CQRS test completed successfully\n".as_bytes());
+            tracing::info!("✅ CQRS test completed successfully");
         }
         Err(_) => {
-            let _ = std::io::stderr()
-                .write_all("❌ CQRS test timed out after 300 seconds\n".as_bytes());
+            tracing::error!("❌ CQRS test timed out after 300 seconds");
         }
     }
 }
 
 #[tokio::test]
 async fn test_cqrs_vs_standard_performance_comparison() {
-    let _ = std::io::stderr()
-        .write_all("🔄 Starting CQRS vs Standard performance comparison...\n".as_bytes());
+    tracing::info!("🔄 Starting CQRS vs Standard performance comparison...");
 
     let test_future = async {
         let context = setup_cqrs_test_environment()
@@ -665,31 +583,24 @@ async fn test_cqrs_vs_standard_performance_comparison() {
         let standard_duration = standard_start.elapsed();
         let standard_ops = standard_operations as f64 / standard_duration.as_secs_f64();
 
-        let _ = std::io::stderr().write_all("📊 Performance Comparison Results:\n".as_bytes());
-        let _ = std::io::stderr().write_all(
-            ("CQRS Service: {:.2} OPS ({:.3}s for {} operations)\n".to_string()
-                + &cqrs_ops.to_string()
-                + " "
-                + &cqrs_duration.as_secs_f64().to_string()
-                + " "
-                + &cqrs_operations.to_string())
-                .as_bytes(),
+        tracing::info!("📊 Performance Comparison Results:");
+        tracing::info!(
+            "CQRS Service: {:.2} OPS ({:.3}s for {} operations)",
+            cqrs_ops,
+            cqrs_duration.as_secs_f64(),
+            cqrs_operations
         );
-        let _ = std::io::stderr().write_all(
-            ("Standard Service: {:.2} OPS ({:.3}s for {} operations)\n".to_string()
-                + &standard_ops.to_string()
-                + " "
-                + &standard_duration.as_secs_f64().to_string()
-                + " "
-                + &standard_operations.to_string())
-                .as_bytes(),
+        tracing::info!(
+            "Standard Service: {:.2} OPS ({:.3}s for {} operations)",
+            standard_ops,
+            standard_duration.as_secs_f64(),
+            standard_operations
         );
 
         let performance_ratio = cqrs_ops / standard_ops;
-        let _ = std::io::stderr().write_all(
-            ("Performance Ratio (CQRS/Standard): {:.2}x\n".to_string()
-                + &performance_ratio.to_string())
-                .as_bytes(),
+        tracing::info!(
+            "Performance Ratio (CQRS/Standard): {:.2}x",
+            performance_ratio
         );
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
@@ -697,11 +608,10 @@ async fn test_cqrs_vs_standard_performance_comparison() {
 
     match tokio::time::timeout(Duration::from_secs(60), test_future).await {
         Ok(_) => {
-            let _ = std::io::stderr()
-                .write_all("✅ Performance comparison completed successfully\n".as_bytes());
+            tracing::info!("✅ Performance comparison completed successfully");
         }
         Err(_) => {
-            let _ = std::io::stderr().write_all("❌ Performance comparison timed out\n".as_bytes());
+            tracing::error!("❌ Performance comparison timed out");
         }
     }
 }

@@ -27,42 +27,27 @@ impl L1CacheUpdater {
         loop {
             match self.consumer.poll_cache_updates().await {
                 Ok(Some(account)) => {
-                    let _ = std::io::stderr().write_all(
-                        ("Received cache update for account: ".to_string()
-                            + &account.id.to_string()
-                            + "\n")
-                            .as_bytes(),
-                    );
+                    info!("Received cache update for account: {}", account.id);
 
                     // Update L1 cache
                     if let Err(e) = self.cache_service.set_account(&account, None).await {
-                        let _ = std::io::stderr().write_all(
-                            ("Failed to update L1 cache for account: ".to_string()
-                                + &account.id.to_string()
-                                + ": "
-                                + &e.to_string()
-                                + "\n")
-                                .as_bytes(),
+                        error!(
+                            "Failed to update L1 cache for account {}: {}",
+                            account.id, e
                         );
                     }
 
                     // Invalidate L1 event cache
                     if let Err(e) = self.cache_service.delete_account_events(account.id).await {
-                        let _ = std::io::stderr().write_all(
-                            ("Failed to invalidate L1 event cache for account: ".to_string()
-                                + &account.id.to_string()
-                                + ": "
-                                + &e.to_string()
-                                + "\n")
-                                .as_bytes(),
+                        error!(
+                            "Failed to invalidate L1 event cache for account {}: {}",
+                            account.id, e
                         );
                     }
                 }
                 Ok(None) => continue,
                 Err(e) => {
-                    let _ = std::io::stderr().write_all(
-                        ("Error polling Kafka: ".to_string() + &e.to_string() + "\n").as_bytes(),
-                    );
+                    error!("Error polling Kafka: {}", e);
                 }
             }
         }

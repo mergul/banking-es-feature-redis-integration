@@ -189,7 +189,7 @@ impl ShardManager {
         }
 
         if needs_rebalancing {
-            let _ = std::io::stderr().write_all(b"Starting shard rebalancing\n");
+            info!("Starting shard rebalancing");
             self.perform_rebalancing(&instance_shards).await?;
         }
 
@@ -314,11 +314,9 @@ impl DistributedLock {
             .await?;
 
         if result == 0 {
-            let _ = std::io::stderr().write_all(
-                ("Lock ".to_string()
-                    + &self.key
-                    + " was already released or taken by another client\n")
-                    .as_bytes(),
+            warn!(
+                "Lock {} was already released or taken by another client",
+                self.key
             );
         }
 

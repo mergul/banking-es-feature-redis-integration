@@ -9,6 +9,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 // Custom module for bincode-compatible DateTime<Utc> serialization
@@ -136,13 +137,9 @@ impl DeadLetterQueue {
         loop {
             if let Some(message) = self.consumer.poll_dlq_message().await? {
                 if message.retry_count >= self.max_retries {
-                    let _ = std::io::stderr().write_all(
-                        ("Message for account ".to_string()
-                            + &message.account_id.to_string()
-                            + " exceeded max retries ("
-                            + &self.max_retries.to_string()
-                            + "), giving up\n")
-                            .as_bytes(),
+                    warn!(
+                        "Message for account {} exceeded max retries ({}), giving up",
+                        message.account_id, self.max_retries
                     );
                     continue;
                 }
@@ -160,24 +157,18 @@ impl DeadLetterQueue {
                         self.metrics
                             .dlq_retry_success
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _ = std::io::stderr().write_all(
-                            ("Successfully retried message for account ".to_string()
-                                + &message.account_id.to_string()
-                                + "\n")
-                                .as_bytes(),
+                        info!(
+                            "Successfully retried message for account {}",
+                            message.account_id
                         );
                     }
                     Err(e) => {
                         self.metrics
                             .dlq_retry_failures
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _ = std::io::stderr().write_all(
-                            ("Failed to retry message for account ".to_string()
-                                + &message.account_id.to_string()
-                                + ": "
-                                + &e.to_string()
-                                + "\n")
-                                .as_bytes(),
+                        error!(
+                            "Failed to retry message for account {}: {}",
+                            message.account_id, e
                         );
 
                         // Update retry count and send back to DLQ
@@ -228,13 +219,9 @@ impl DeadLetterQueueTrait for DeadLetterQueue {
     async fn process_dlq(&self) -> Result<()> {
         if let Some(message) = self.consumer.poll_dlq_message().await? {
             if message.retry_count >= self.max_retries {
-                let _ = std::io::stderr().write_all(
-                    ("Message for account ".to_string()
-                        + &message.account_id.to_string()
-                        + " exceeded max retries ("
-                        + &self.max_retries.to_string()
-                        + "), giving up\n")
-                        .as_bytes(),
+                warn!(
+                    "Message for account {} exceeded max retries ({}), giving up",
+                    message.account_id, self.max_retries
                 );
                 return Ok(());
             }

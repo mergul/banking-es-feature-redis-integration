@@ -37,6 +37,7 @@ use tokio::sync::mpsc;
 use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tracing;
 use uuid::Uuid;
 
 // Type alias for boxed future
@@ -215,7 +216,7 @@ async fn setup_test_environment() -> Result<TestContext, Box<dyn std::error::Err
         .get_connection()
         .expect("Failed to get Redis connection");
     let _: () = redis::cmd("PING").execute(&mut redis_conn);
-    let _ = std::io::stderr().write_all("✅ Redis connection test successful\n".as_bytes());
+    tracing::info!("✅ Redis connection test successful");
 
     let redis_client_trait = RealRedisClient::new(redis_client, None);
 
@@ -250,15 +251,11 @@ async fn setup_test_environment() -> Result<TestContext, Box<dyn std::error::Err
     let monitor_handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await; // Reduced frequency from 5s to 10s
-            let _ = std::io::stderr().write_all(
-                ("📊 DB Pool Stats - Active: ".to_string()
-                    + &pool_clone.size().to_string()
-                    + ", Idle: "
-                    + &pool_clone.num_idle().to_string()
-                    + ", Size: "
-                    + &pool_clone.size().to_string()
-                    + "\n")
-                    .as_bytes(),
+            tracing::info!(
+                "📊 DB Pool Stats - Active: {}, Idle: {}, Size: {}",
+                pool_clone.size(),
+                pool_clone.num_idle(),
+                pool_clone.size()
             );
         }
     });
@@ -614,8 +611,7 @@ async fn test_duplicate_command_handling() {
 
 #[tokio::test]
 async fn test_high_throughput_performance() {
-    let _ =
-        std::io::stderr().write_all("🚀 Starting optimized high throughput test...\n".as_bytes());
+    tracing::info!("🚀 Starting optimized high throughput test...");
 
     // Add global timeout for the entire test
     let test_future = async {
@@ -628,16 +624,14 @@ async fn test_high_throughput_performance() {
         let test_duration = Duration::from_secs(15); // Reduced from 20s to 15s
         let operation_timeout = Duration::from_secs(1); // Reduced from 2s to 1s
 
-        let _ = std::io::stderr().write_all("Initializing test environment...\n".as_bytes());
+        tracing::info!("Initializing test environment...");
         let context = setup_test_environment()
             .await
             .expect("Failed to setup test environment");
-        let _ = std::io::stderr().write_all("Test environment setup complete\n".as_bytes());
+        tracing::info!("Test environment setup complete");
 
         // Create accounts for testing with better distribution
-        let _ = std::io::stderr().write_all(
-            ("Creating {} test accounts...\n".to_string() + &account_count.to_string()).as_bytes(),
-        );
+        tracing::info!("Creating {} test accounts...", account_count);
         let mut account_ids = Vec::new();
         for i in 0..account_count {
             let owner_name = "TestUser_".to_string() + &i.to_string();
@@ -648,21 +642,12 @@ async fn test_high_throughput_performance() {
                 .await?;
             account_ids.push(account_id);
             if i % 300 == 0 {
-                let _ = std::io::stderr().write_all(
-                    ("Created {}/{} accounts\n".to_string()
-                        + &i.to_string()
-                        + "/"
-                        + &account_count.to_string())
-                        .as_bytes(),
-                );
+                tracing::info!("Created {}/{} accounts", i, account_count);
             }
         }
 
         // Enhanced cache warmup phase with more aggressive warming
-        let _ = std::io::stderr().write_all(
-            ("🔥 Warming up cache with {} accounts...\n".to_string() + &account_count.to_string())
-                .as_bytes(),
-        );
+        tracing::info!("🔥 Warming up cache with {} accounts...", account_count);
         let warmup_start = Instant::now();
         let mut warmup_handles = Vec::new();
         for chunk in account_ids.chunks(50) {
@@ -682,34 +667,22 @@ async fn test_high_throughput_performance() {
             handle.await.expect("Warmup task failed");
         }
         let warmup_duration = warmup_start.elapsed();
-        let _ = std::io::stderr().write_all(
-            ("✅ Cache warmup completed in {:.2}s\n".to_string()
-                + &warmup_duration.as_secs_f64().to_string())
-                .as_bytes(),
+        tracing::info!(
+            "✅ Cache warmup completed in {:.2}s",
+            warmup_duration.as_secs_f64()
         );
         tokio::time::sleep(Duration::from_millis(1000)).await; // Increased delay for cache stabilization
 
         // Start performance test
-        let _ = std::io::stderr().write_all(
-            ("🚀 Starting high throughput performance test...\n".to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(("📊 Test parameters:\n".to_string()).as_bytes());
-        let _ = std::io::stderr()
-            .write_all(("  - Target EPS: {}\n".to_string() + &target_eps.to_string()).as_bytes());
-        let _ = std::io::stderr().write_all(
-            ("  - Worker count: {}\n".to_string() + &worker_count.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("  - Account count: {}\n".to_string() + &account_count.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("  - Test duration: {:.1}s\n".to_string() + &test_duration.as_secs_f64().to_string())
-                .as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("  - Operation timeout: {:.1}s\n".to_string()
-                + &operation_timeout.as_secs_f64().to_string())
-                .as_bytes(),
+        tracing::info!("🚀 Starting high throughput performance test...");
+        tracing::info!("📊 Test parameters:");
+        tracing::info!("  - Target EPS: {}", target_eps);
+        tracing::info!("  - Worker count: {}", worker_count);
+        tracing::info!("  - Account count: {}", account_count);
+        tracing::info!("  - Test duration: {:.1}s", test_duration.as_secs_f64());
+        tracing::info!(
+            "  - Operation timeout: {:.1}s",
+            operation_timeout.as_secs_f64()
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(channel_buffer_size);
@@ -717,9 +690,7 @@ async fn test_high_throughput_performance() {
         let end_time = start_time + test_duration;
 
         // Spawn worker tasks with optimized logic
-        let _ = std::io::stderr().write_all(
-            ("👥 Spawning {} worker tasks...\n".to_string() + &worker_count.to_string()).as_bytes(),
-        );
+        tracing::info!("👥 Spawning {} worker tasks...", worker_count);
         let mut handles = Vec::new();
         for worker_id in 0..worker_count {
             let tx = tx.clone();
@@ -816,19 +787,17 @@ async fn test_high_throughput_performance() {
                     tokio::time::sleep(sleep_time).await;
                 }
                 if worker_id % 10 == 0 {
-                    let _ = std::io::stderr().write_all(
-                        ("✅ Worker {} completed after {} operations\n".to_string()
-                            + &worker_id.to_string()
-                            + " "
-                            + &operations.to_string())
-                            .as_bytes(),
+                    tracing::info!(
+                        "✅ Worker {} completed after {} operations",
+                        worker_id,
+                        operations
                     );
                 }
             });
             handles.push(handle);
         }
         drop(tx);
-        let _ = std::io::stderr().write_all("📈 Collecting results...\n".as_bytes());
+        tracing::info!("📈 Collecting results...");
         let mut total_ops = 0;
         let mut successful_ops = 0;
         let mut failed_ops = 0;
@@ -844,83 +813,47 @@ async fn test_high_throughput_performance() {
                 let elapsed = start_time.elapsed();
                 let current_eps = total_ops as f64 / elapsed.as_secs_f64();
                 let current_success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
-                let _ = std::io::stderr().write_all(
-                    ("📊 Progress: {} ops, {:.2} EPS, {:.1}% success\n".to_string()
-                        + &total_ops.to_string()
-                        + " "
-                        + &current_eps.to_string()
-                        + " "
-                        + &current_success_rate.to_string())
-                        .as_bytes(),
+                tracing::info!(
+                    "📊 Progress: {} ops, {:.2} EPS, {:.1}% success",
+                    total_ops,
+                    current_eps,
+                    current_success_rate
                 );
             }
         }
-        let _ = std::io::stderr().write_all("⏳ Waiting for workers to complete...\n".as_bytes());
+        tracing::info!("⏳ Waiting for workers to complete...");
         for handle in handles {
             handle.await.expect("Worker task failed");
         }
-        let _ =
-            std::io::stderr().write_all("✅ All worker tasks completed successfully\n".as_bytes());
+        tracing::info!("✅ All worker tasks completed successfully");
         let duration = start_time.elapsed();
         let eps = total_ops as f64 / duration.as_secs_f64();
         let success_rate = (successful_ops as f64 / total_ops as f64) * 100.0;
-        let _ = std::io::stderr().write_all(
-            ("🎯 Optimized High Throughput Test Results:\n".to_string()
-                + "==========================================\n"
-                + &duration.as_secs_f64().to_string())
-                .as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("📊 Total Operations: {}\n".to_string() + &total_ops.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("✅ Successful Operations: {}\n".to_string() + &successful_ops.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("❌ Failed Operations: {}\n".to_string() + &failed_ops.to_string()).as_bytes(),
-        );
-        let _ = std::io::stderr()
-            .write_all(("🚀 Events Per Second: {:.2}\n".to_string() + &eps.to_string()).as_bytes());
-        let _ = std::io::stderr().write_all(
-            ("📈 Success Rate: {:.2}%\n".to_string() + &success_rate.to_string()).as_bytes(),
-        );
+        tracing::info!("🎯 Optimized High Throughput Test Results:");
+        tracing::info!("==========================================");
+        tracing::info!("📊 Total Operations: {}", total_ops);
+        tracing::info!("✅ Successful Operations: {}", successful_ops);
+        tracing::info!("❌ Failed Operations: {}", failed_ops);
+        tracing::info!("🚀 Events Per Second: {:.2}", eps);
+        tracing::info!("📈 Success Rate: {:.2}%", success_rate);
         let metrics = context.account_service.get_metrics();
-        let _ = std::io::stderr().write_all("🔧 System Metrics:\n".as_bytes());
-        let _ = std::io::stderr().write_all(
-            ("Commands Processed: ".to_string()
-                + &metrics
-                    .commands_processed
-                    .load(Ordering::Relaxed)
-                    .to_string()
-                + "\n")
-                .as_bytes(),
+        tracing::info!("🔧 System Metrics:");
+        tracing::info!(
+            "Commands Processed: {}",
+            metrics.commands_processed.load(Ordering::Relaxed)
         );
-        let _ = std::io::stderr().write_all(
-            ("Commands Failed: ".to_string()
-                + &metrics.commands_failed.load(Ordering::Relaxed).to_string()
-                + "\n")
-                .as_bytes(),
+        tracing::info!(
+            "Commands Failed: {}",
+            metrics.commands_failed.load(Ordering::Relaxed)
         );
-        let _ = std::io::stderr().write_all(
-            ("Projection Updates: ".to_string()
-                + &metrics
-                    .projection_updates
-                    .load(Ordering::Relaxed)
-                    .to_string()
-                + "\n")
-                .as_bytes(),
+        tracing::info!(
+            "Projection Updates: {}",
+            metrics.projection_updates.load(Ordering::Relaxed)
         );
-        let _ = std::io::stderr().write_all(
-            ("Cache Hits: ".to_string()
-                + &metrics.cache_hits.load(Ordering::Relaxed).to_string()
-                + "\n")
-                .as_bytes(),
-        );
-        let _ = std::io::stderr().write_all(
-            ("Cache Misses: ".to_string()
-                + &metrics.cache_misses.load(Ordering::Relaxed).to_string()
-                + "\n")
-                .as_bytes(),
+        tracing::info!("Cache Hits: {}", metrics.cache_hits.load(Ordering::Relaxed));
+        tracing::info!(
+            "Cache Misses: {}",
+            metrics.cache_misses.load(Ordering::Relaxed)
         );
         let cache_hit_rate = if metrics.cache_hits.load(Ordering::Relaxed)
             + metrics.cache_misses.load(Ordering::Relaxed)
@@ -933,34 +866,25 @@ async fn test_high_throughput_performance() {
         } else {
             0.0
         };
-        let _ = std::io::stderr().write_all(
-            ("Cache Hit Rate: ".to_string() + &cache_hit_rate.to_string() + "%\n").as_bytes(),
-        );
-        let _ = std::io::stderr().write_all("\n💰 Final Account States (Sample):\n".as_bytes());
+        tracing::info!("Cache Hit Rate: {:.2}%", cache_hit_rate);
+        tracing::info!("\n💰 Final Account States (Sample):");
         for (i, account_id) in account_ids.iter().take(5).enumerate() {
             if let Ok(Some(account)) = context.account_service.get_account(*account_id).await {
-                let _ = std::io::stderr().write_all(
-                    ("Account ".to_string()
-                        + &i.to_string()
-                        + ": Balance = "
-                        + &account.balance.to_string()
-                        + "\n")
-                        .as_bytes(),
-                );
+                tracing::info!("Account {}: Balance = {}", i, account.balance);
             }
         }
         assert!(eps >= target_eps as f64 * 0.8);
         assert!(success_rate >= 85.0);
         assert!(total_ops >= 1500);
-        let _ = std::io::stderr().write_all("🎉 All performance targets met! Optimized high throughput test completed successfully.\n".as_bytes());
+        tracing::info!("🎉 All performance targets met! Optimized high throughput test completed successfully.");
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     };
     match tokio::time::timeout(Duration::from_secs(180), test_future).await {
         Ok(_) => {
-            let _ = std::io::stderr().write_all("✅ Test completed successfully\n".as_bytes());
+            tracing::info!("✅ Test completed successfully");
         }
         Err(_) => {
-            let _ = std::io::stderr().write_all("❌ Test timed out after 180 seconds\n".as_bytes());
+            tracing::error!("❌ Test timed out after 180 seconds");
         }
     }
 }

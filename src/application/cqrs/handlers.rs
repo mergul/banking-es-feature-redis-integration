@@ -52,10 +52,7 @@ impl CQRSHandler {
         R: From<CommandResult>,
     {
         let _permit = self.semaphore.acquire().await.map_err(|e| {
-            let _ = std::io::stderr().write_all(
-                ("Failed to acquire semaphore permit: ".to_string() + &e.to_string() + "\n")
-                    .as_bytes(),
-            );
+            error!("Failed to acquire semaphore permit: {}", e);
             AccountError::InfrastructureError("Service overloaded".to_string())
         })?;
 
@@ -89,10 +86,7 @@ impl CQRSHandler {
         R: From<QueryResult>,
     {
         let _permit = self.semaphore.acquire().await.map_err(|e| {
-            let _ = std::io::stderr().write_all(
-                ("Failed to acquire semaphore permit: ".to_string() + &e.to_string() + "\n")
-                    .as_bytes(),
-            );
+            error!("Failed to acquire semaphore permit: {}", e);
             AccountError::InfrastructureError("Service overloaded".to_string())
         })?;
 
@@ -350,15 +344,11 @@ impl BatchTransactionHandler {
             }
         }
 
-        let _ = std::io::stderr().write_all(
-            ("Batch processing completed: ".to_string()
-                + &successful.to_string()
-                + &" successful, ".to_string()
-                + &failed.to_string()
-                + &" failed in ".to_string()
-                + &start_time.elapsed().as_secs_f64().to_string()
-                + "\n")
-                .as_bytes(),
+        info!(
+            "Batch processing completed: {} successful, {} failed in {:.2}s",
+            successful,
+            failed,
+            start_time.elapsed().as_secs_f64()
         );
 
         Ok(BatchTransactionResult {

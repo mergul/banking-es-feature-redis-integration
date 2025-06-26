@@ -141,17 +141,9 @@ impl AccountRepository {
                     0.0
                 };
 
-                let _ = std::io::stderr().write_all(
-                    ("Repository Metrics - Cache Hit Rate: ".to_string()
-                        + &hit_rate.to_string()
-                        + "%, Batch Flushes: "
-                        + &flushes.to_string()
-                        + ", Events Processed: "
-                        + &processed.to_string()
-                        + ", Errors: "
-                        + &errors.to_string()
-                        + "\n")
-                        .as_bytes(),
+                info!(
+                    "Repository Metrics - Cache Hit Rate: {:.1}%, Batch Flushes: {}, Events Processed: {}, Errors: {}",
+                    hit_rate, flushes, processed, errors
                 );
             }
         });
@@ -233,23 +225,16 @@ impl AccountRepositoryTrait for AccountRepository {
                 .send_event_batch(account.id, events.clone(), account.version)
                 .await
             {
-                let _ = std::io::stderr().write_all(
-                    ("Failed to publish events to Kafka for account ".to_string()
-                        + &account.id.to_string()
-                        + ": "
-                        + &e.to_string()
-                        + "\n")
-                        .as_bytes(),
+                error!(
+                    "Failed to publish events to Kafka for account {}",
+                    account.id
                 );
                 // Don't fail the operation if Kafka publishing fails, just log the error
             } else {
-                let _ = std::io::stderr().write_all(
-                    ("Successfully published ".to_string()
-                        + &events.len().to_string()
-                        + " events to Kafka for account "
-                        + &account.id.to_string()
-                        + "\n")
-                        .as_bytes(),
+                info!(
+                    "Successfully published {} events to Kafka for account {}",
+                    events.len(),
+                    account.id
                 );
             }
         }
@@ -267,14 +252,7 @@ impl AccountRepositoryTrait for AccountRepository {
 
     async fn get_by_id(&self, id: Uuid) -> Result<Option<Account>, AccountError> {
         let stored_events = self.event_store.get_events(id, None).await.map_err(|e| {
-            let _ = std::io::stderr().write_all(
-                ("Failed to get events for account ".to_string()
-                    + &id.to_string()
-                    + ": "
-                    + &e.to_string()
-                    + "\n")
-                    .as_bytes(),
-            );
+            error!("Failed to get events for account {}: {}", id, e);
             AccountError::InfrastructureError("Event store error: ".to_string() + &e.to_string())
         })?;
         if stored_events.is_empty() {
@@ -322,14 +300,7 @@ impl AccountRepositoryTrait for AccountRepository {
         self.pending_events.clear();
         for (account_id, events) in all_events {
             if let Err(e) = self.event_store.save_events(account_id, events, 0).await {
-                let _ = std::io::stderr().write_all(
-                    ("Failed to flush events for account ".to_string()
-                        + &account_id.to_string()
-                        + ": "
-                        + &e.to_string()
-                        + "\n")
-                        .as_bytes(),
-                );
+                error!("Failed to flush events for account {}: {}", account_id, e);
             }
         }
         Ok(())
@@ -361,14 +332,7 @@ impl AccountRepositoryTrait for AccountRepository {
                         }
                         for (account_id, events) in grouped {
                             if let Err(e) = event_store.save_events(account_id, events, 0).await {
-                                let _ = std::io::stderr().write_all(
-                                    ("Failed to flush events for account ".to_string()
-                                        + &account_id.to_string()
-                                        + ": "
-                                        + &e.to_string()
-                                        + "\n")
-                                        .as_bytes(),
-                                );
+                                error!("Failed to flush events for account {}: {}", account_id, e);
                                 metrics
                                     .errors
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

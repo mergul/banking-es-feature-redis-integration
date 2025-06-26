@@ -8,6 +8,7 @@ use opentelemetry_sdk::Resource;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::{error, info, warn};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -75,36 +76,21 @@ impl KafkaTracing {
         );
 
         let _guard = span.enter();
-        let _ = std::io::stderr().write_all(
-            ("Processing events for account ".to_string() + &account_id.to_string() + "\n")
-                .as_bytes(),
-        );
+        info!("Processing events for account {}", account_id);
 
         for event in events {
             match event {
                 AccountEvent::AccountCreated { .. } => {
-                    let _ = std::io::stderr().write_all(b"Processing AccountCreated event\n");
+                    info!("Processing AccountCreated event");
                 }
                 AccountEvent::MoneyDeposited { amount, .. } => {
-                    let _ = std::io::stderr().write_all(
-                        ("Processing MoneyDeposited event: ".to_string()
-                            + &amount.to_string()
-                            + "\n")
-                            .as_bytes(),
-                    );
+                    info!("Processing MoneyDeposited event: {}", amount);
                 }
                 AccountEvent::MoneyWithdrawn { amount, .. } => {
-                    let _ = std::io::stderr().write_all(
-                        ("Processing MoneyWithdrawn event: ".to_string()
-                            + &amount.to_string()
-                            + "\n")
-                            .as_bytes(),
-                    );
+                    info!("Processing MoneyWithdrawn event: {}", amount);
                 }
                 AccountEvent::AccountClosed { reason, .. } => {
-                    let _ = std::io::stderr().write_all(
-                        ("Processing AccountClosed event: ".to_string() + reason + "\n").as_bytes(),
-                    );
+                    info!("Processing AccountClosed event: {}", reason);
                 }
             }
         }
@@ -119,15 +105,9 @@ impl KafkaTracing {
         );
 
         let _guard = span.enter();
-        let _ = std::io::stderr().write_all(
-            ("DLQ operation '".to_string()
-                + operation
-                + "' for account "
-                + &account_id.to_string()
-                + " (retry "
-                + &retry_count.to_string()
-                + ")\n")
-                .as_bytes(),
+        info!(
+            "DLQ operation '{}' for account {} (retry {})",
+            operation, account_id, retry_count
         );
     }
 
@@ -143,15 +123,9 @@ impl KafkaTracing {
         let account_str = account_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "None".to_string());
-        let _ = std::io::stderr().write_all(
-            ("Recovery operation '".to_string()
-                + strategy
-                + "' for account "
-                + &account_str
-                + ": "
-                + status
-                + "\n")
-                .as_bytes(),
+        info!(
+            "Recovery operation '{}' for account {}: {}",
+            strategy, account_str, status
         );
     }
 
@@ -166,31 +140,19 @@ impl KafkaTracing {
             .consumer_lag
             .load(std::sync::atomic::Ordering::Relaxed);
 
-        let _ = std::io::stderr().write_all(
-            ("Metrics snapshot: error_rate=".to_string()
-                + &(error_rate * 100.0).to_string()
-                + "%, processing_latency="
-                + &processing_latency.to_string()
-                + "ms, consumer_lag="
-                + &consumer_lag.to_string()
-                + "\n")
-                .as_bytes(),
+        info!(
+            "Metrics snapshot: error_rate={:.1}%, processing_latency={}ms, consumer_lag={}",
+            error_rate * 100.0,
+            processing_latency,
+            consumer_lag
         );
 
         if error_rate > 0.1 {
-            let _ = std::io::stderr().write_all(
-                ("High error rate detected: ".to_string()
-                    + &(error_rate * 100.0).to_string()
-                    + "%\n")
-                    .as_bytes(),
-            );
+            warn!("High error rate detected: {:.1}%", error_rate * 100.0);
         }
 
         if consumer_lag > 1000 {
-            let _ = std::io::stderr().write_all(
-                ("High consumer lag detected: ".to_string() + &consumer_lag.to_string() + "\n")
-                    .as_bytes(),
-            );
+            warn!("High consumer lag detected: {}", consumer_lag);
         }
     }
 
@@ -211,31 +173,19 @@ impl KafkaTracing {
             .thread_count
             .load(std::sync::atomic::Ordering::Relaxed);
 
-        let _ = std::io::stderr().write_all(
-            ("Performance metrics: memory=".to_string()
-                + &(memory_usage as f64 / 1_000_000.0).to_string()
-                + "MB, cpu="
-                + &(cpu_usage as f64 / 100.0).to_string()
-                + "%, threads="
-                + &thread_count.to_string()
-                + "\n")
-                .as_bytes(),
+        info!(
+            "Performance metrics: memory={:.1}MB, cpu={:.1}%, threads={}",
+            memory_usage as f64 / 1_000_000.0,
+            cpu_usage as f64 / 100.0,
+            thread_count
         );
 
         if memory_usage > 1_000_000_000 {
-            let _ = std::io::stderr().write_all(
-                ("High memory usage: ".to_string()
-                    + &(memory_usage as f64 / 1e9).to_string()
-                    + "GB\n")
-                    .as_bytes(),
-            );
+            warn!("High memory usage: {:.1}GB", memory_usage as f64 / 1e9);
         }
 
         if cpu_usage > 80 {
-            let _ = std::io::stderr().write_all(
-                ("High CPU usage: ".to_string() + &(cpu_usage as f64 / 100.0).to_string() + "%\n")
-                    .as_bytes(),
-            );
+            warn!("High CPU usage: {:.1}%", cpu_usage as f64 / 100.0);
         }
     }
 
@@ -247,9 +197,7 @@ impl KafkaTracing {
         );
 
         let _guard = span.enter();
-        let _ = std::io::stderr().write_all(
-            ("Error in ".to_string() + context + ": " + &error.to_string() + "\n").as_bytes(),
-        );
+        error!("Error in {}: {}", context, error);
     }
 }
 

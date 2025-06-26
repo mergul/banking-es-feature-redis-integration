@@ -754,81 +754,24 @@ impl StuckOperationDiagnosticService {
     }
 
     async fn log_diagnostic_results(&self, diagnostic: &StuckOperationDiagnostic) {
-        match diagnostic.overall_status {
-            DiagnosticStatus::Healthy => {
-                let _ = std::io::stderr()
-                    .write_all(b"System diagnostic: HEALTHY - No issues detected\n");
-            }
-            DiagnosticStatus::Degraded => {
-                let _ = std::io::stderr().write_all(
-                    ("System diagnostic: DEGRADED - ".to_string()
-                        + &diagnostic.recommendations.len().to_string()
-                        + " issues detected\n")
-                        .as_bytes(),
-                );
-            }
-            DiagnosticStatus::Critical => {
-                let critical_count = diagnostic
-                    .recommendations
-                    .iter()
-                    .filter(|r| matches!(r.severity, IssueSeverity::Critical))
-                    .count();
-                let _ = std::io::stderr().write_all(
-                    ("System diagnostic: CRITICAL - ".to_string()
-                        + &critical_count.to_string()
-                        + " critical issues\n")
-                        .as_bytes(),
-                );
-            }
-            DiagnosticStatus::Emergency => {
-                let _ = std::io::stderr()
-                    .write_all(b"System diagnostic: EMERGENCY - Immediate attention required\n");
-            }
-        }
-
-        for operation in &diagnostic.stuck_operations {
-            let _ = std::io::stderr().write_all(
-                ("Stuck operation: ".to_string()
-                    + &operation.operation_id
-                    + " (type: "
-                    + &operation.operation_type
-                    + ") running for "
-                    + &operation.duration_seconds.to_string()
-                    + "s\n")
-                    .as_bytes(),
-            );
-        }
-
         for issue in &diagnostic.connection_pool_issues {
-            let _ = std::io::stderr().write_all(
-                ("Connection pool issue: ".to_string()
-                    + &issue.issue_type.to_string()
-                    + " - "
-                    + &issue.description
-                    + "\n")
-                    .as_bytes(),
+            warn!(
+                "Connection pool issue: {} - {}",
+                issue.issue_type, issue.description
             );
         }
 
         for issue in &diagnostic.deadlock_issues {
-            let _ = std::io::stderr().write_all(
-                ("Deadlock issue: ".to_string()
-                    + &issue.issue_type.to_string()
-                    + " - "
-                    + &issue.description
-                    + "\n")
-                    .as_bytes(),
+            warn!(
+                "Deadlock issue: {} - {}",
+                issue.issue_type, issue.description
             );
         }
 
         for issue in &diagnostic.timeout_issues {
-            let _ = std::io::stderr().write_all(
-                ("Timeout issue: ".to_string()
-                    + &issue.issue_type.to_string()
-                    + " - "
-                    + &issue.description
-                    + "\n")
-                    .as_bytes(),
+            warn!(
+                "Timeout issue: {} - {}",
+                issue.issue_type, issue.description
             );
         }
     }
@@ -838,35 +781,18 @@ impl StuckOperationDiagnosticService {
             if action.can_auto_execute {
                 match action.action_type {
                     RecoveryActionType::ClearConnectionPool => {
-                        let _ = std::io::stderr().write_all(
-                            ("Auto-executing: ".to_string() + &action.description + "\n")
-                                .as_bytes(),
-                        );
+                        info!("Auto-executing: {}", action.description);
                         if let Err(e) = self.connection_pool_monitor.force_cleanup().await {
-                            let _ = std::io::stderr().write_all(
-                                ("Failed to clear connection pool: ".to_string()
-                                    + &e.to_string()
-                                    + "\n")
-                                    .as_bytes(),
-                            );
+                            error!("Failed to clear connection pool: {}", e);
                         }
                     }
                     RecoveryActionType::KillStuckOperations => {
-                        let _ = std::io::stderr().write_all(
-                            ("Auto-executing: ".to_string() + &action.description + "\n")
-                                .as_bytes(),
-                        );
+                        info!("Auto-executing: {}", action.description);
                         // This would need to be implemented in the deadlock detector
-                        let _ = std::io::stderr()
-                            .write_all(b"Kill stuck operations not yet implemented\n");
+                        warn!("Kill stuck operations not yet implemented");
                     }
                     _ => {
-                        let _ = std::io::stderr().write_all(
-                            ("Skipping auto-execution for: ".to_string()
-                                + &action.description
-                                + "\n")
-                                .as_bytes(),
-                        );
+                        info!("Skipping auto-execution for: {}", action.description);
                     }
                 }
             }

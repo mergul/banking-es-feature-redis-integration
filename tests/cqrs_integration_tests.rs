@@ -10,6 +10,7 @@ use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing;
 use uuid::Uuid;
 
 async fn setup_cqrs_test_environment() -> Result<CQRSAccountService, Box<dyn std::error::Error>> {
@@ -70,7 +71,7 @@ async fn test_cqrs_create_account() {
         .expect("Failed to create account");
 
     if !(!account_id.is_nil()) {
-        let _ = std::io::stderr().write_all("Account ID should not be nil\n".as_bytes());
+        tracing::error!("Account ID should not be nil");
         return;
     }
 
@@ -82,33 +83,33 @@ async fn test_cqrs_create_account() {
         .expect("Account should exist");
 
     if account_id.is_nil() {
-        let _ = std::io::stderr().write_all("Account ID should not be nil\n".as_bytes());
+        tracing::error!("Account ID should not be nil");
         return;
     }
 
     if account.owner_name != "CQRS Test User" {
-        let _ = std::io::stderr().write_all("Assertion failed: owner name mismatch\n".as_bytes());
+        tracing::error!("Assertion failed: owner name mismatch");
         return;
     }
     if account.balance != Decimal::new(1000, 0) {
-        let _ = std::io::stderr().write_all("Assertion failed: balance mismatch\n".as_bytes());
+        tracing::error!("Assertion failed: balance mismatch");
         return;
     }
     if !(account.is_active) {
-        let _ = std::io::stderr().write_all("Assertion failed\n".as_bytes());
+        tracing::error!("Assertion failed");
         return;
     }
 
     if account.owner_name != "CQRS Test User" {
-        let _ = std::io::stderr().write_all("Owner name should be 'CQRS Test User'\n".as_bytes());
+        tracing::error!("Owner name should be 'CQRS Test User'");
         return;
     }
     if account.balance != Decimal::new(1000, 0) {
-        let _ = std::io::stderr().write_all("Balance should be 1000\n".as_bytes());
+        tracing::error!("Balance should be 1000");
         return;
     }
     if !account.is_active {
-        let _ = std::io::stderr().write_all("Account should be active\n".as_bytes());
+        tracing::error!("Account should be active");
         return;
     }
 }
@@ -160,7 +161,7 @@ async fn test_cqrs_deposit_and_withdraw() {
         .expect("Failed to get account status");
 
     if !(is_active) {
-        let _ = std::io::stderr().write_all("Account should be active\n".as_bytes());
+        tracing::error!("Account should be active");
         return;
     }
 }
@@ -198,11 +199,7 @@ async fn test_cqrs_get_transactions() {
         .expect("Failed to get account transactions");
 
     if transactions.len() != 3 {
-        let _ = std::io::stderr().write_all(
-            ("Assertion failed: transactions.len() != 3
-")
-            .as_bytes(),
-        );
+        tracing::error!("Assertion failed: transactions.len() != 3");
         return;
     } // Create + Deposit + Withdraw
 
@@ -240,7 +237,7 @@ async fn test_cqrs_close_account() {
         .expect("Failed to get account status");
 
     if !(is_active) {
-        let _ = std::io::stderr().write_all("Account should be active\n".as_bytes());
+        tracing::error!("Account should be active");
         return;
     }
 }
@@ -335,17 +332,17 @@ async fn test_cqrs_get_all_accounts() {
         .expect("Failed to get all accounts");
 
     if !(accounts.len() >= 2) {
-        let _ = std::io::stderr().write_all("Should have at least 2 accounts\n".as_bytes());
+        tracing::error!("Should have at least 2 accounts");
         return;
     }
 
     let account_ids: Vec<Uuid> = accounts.iter().map(|a| a.id).collect();
     if !(account_ids.contains(&account1)) {
-        let _ = std::io::stderr().write_all("Assertion failed\n".as_bytes());
+        tracing::error!("Assertion failed");
         return;
     }
     if !(account_ids.contains(&account2)) {
-        let _ = std::io::stderr().write_all("Assertion failed\n".as_bytes());
+        tracing::error!("Assertion failed");
         return;
     }
 }
@@ -363,12 +360,11 @@ async fn test_cqrs_health_check() {
         .expect("Failed to get health status");
 
     if health.status != "healthy" {
-        let _ =
-            std::io::stderr().write_all("Assertion failed: health.status != healthy\n".as_bytes());
+        tracing::error!("Assertion failed: health.status != healthy");
         return;
     }
     if !(health.total_permits > 0) {
-        let _ = std::io::stderr().write_all("Assertion failed\n".as_bytes());
+        tracing::error!("Assertion failed");
         return;
     }
     // if !(health.uptime_seconds > 0.0) { unsafe { panic!("Assertion failed") } } // <-- Commented out missing field assertion
@@ -404,7 +400,7 @@ async fn test_cqrs_metrics() {
         .load(std::sync::atomic::Ordering::Relaxed)
         > 0)
     {
-        let _ = std::io::stderr().write_all("Assertion failed\n".as_bytes());
+        tracing::error!("Assertion failed");
         return;
     }
     if !(metrics
@@ -412,7 +408,7 @@ async fn test_cqrs_metrics() {
         .load(std::sync::atomic::Ordering::Relaxed)
         > 0)
     {
-        let _ = std::io::stderr().write_all("Assertion failed\n".as_bytes());
+        tracing::error!("Assertion failed");
         return;
     }
 }
@@ -427,7 +423,7 @@ async fn test_cqrs_error_handling() {
     let non_existent_id = Uuid::new_v4();
     let result = service.get_account(non_existent_id).await;
     if !(matches!(result, Ok(None))) {
-        let _ = std::io::stderr().write_all("Assertion failed\n".as_bytes());
+        tracing::error!("Assertion failed");
         return;
     }
 
@@ -442,11 +438,11 @@ async fn test_cqrs_error_handling() {
         .await;
 
     if !(result.is_err()) {
-        let _ = std::io::stderr().write_all("Assertion failed\n".as_bytes());
+        tracing::error!("Assertion failed");
         return;
     }
     if !(result.unwrap_err().to_string().contains("Insufficient")) {
-        let _ = std::io::stderr().write_all("Assertion failed\n".as_bytes());
+        tracing::error!("Assertion failed");
         return;
     }
 }

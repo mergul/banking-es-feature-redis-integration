@@ -530,10 +530,7 @@ impl ProjectionStore {
                 )
                 .await
                 {
-                    let _ = std::io::stderr().write_all(
-                        ("Failed to flush batches: ".to_string() + &e.to_string() + "\n")
-                            .as_bytes(),
-                    );
+                    error!("Failed to flush batches: {}", e);
                 }
 
                 last_flush = Instant::now();

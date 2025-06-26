@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
+use tracing::{error, info};
 use uuid::Uuid;
 
 #[derive(Debug, Default)]
@@ -255,17 +256,12 @@ impl KafkaEventProcessor {
                 .upsert_accounts_batch(vec![account_proj.clone()])
                 .await
             {
-                let _ = std::io::stderr().write_all(
-                    ("Failed to update account projection: ".to_string() + &e.to_string() + "\n")
-                        .as_bytes(),
-                );
+                error!("Failed to update account projection: {}", e);
                 // Don't fail the entire operation if projection update fails
             } else {
-                let _ = std::io::stderr().write_all(
-                    ("Successfully updated account projection for account ".to_string()
-                        + &batch.account_id.to_string()
-                        + "\n")
-                        .as_bytes(),
+                info!(
+                    "Successfully updated account projection for account {}",
+                    batch.account_id
                 );
             }
 
@@ -310,17 +306,12 @@ impl KafkaEventProcessor {
                 .upsert_accounts_batch(vec![account_proj.clone()])
                 .await
             {
-                let _ = std::io::stderr().write_all(
-                    ("Failed to insert account projection: ".to_string() + &e.to_string() + "\n")
-                        .as_bytes(),
-                );
+                error!("Failed to insert account projection: {}", e);
                 // Don't fail the entire operation if projection insert fails
             } else {
-                let _ = std::io::stderr().write_all(
-                    ("Successfully created account projection for account ".to_string()
-                        + &batch.account_id.to_string()
-                        + "\n")
-                        .as_bytes(),
+                info!(
+                    "Successfully created account projection for account {}",
+                    batch.account_id
                 );
             }
 
@@ -391,19 +382,12 @@ impl KafkaEventProcessor {
                 .insert_transactions_batch(transaction_projections)
                 .await
             {
-                let _ = std::io::stderr().write_all(
-                    ("Failed to insert transaction projections: ".to_string()
-                        + &e.to_string()
-                        + "\n")
-                        .as_bytes(),
-                );
+                error!("Failed to insert transaction projections: {}", e);
                 // Don't fail the entire operation if transaction projections fail
             } else {
-                let _ = std::io::stderr().write_all(
-                    ("Successfully created ".to_string()
-                        + &transaction_count.to_string()
-                        + " transaction projections\n")
-                        .as_bytes(),
+                info!(
+                    "Successfully created {} transaction projections",
+                    transaction_count
                 );
             }
         }

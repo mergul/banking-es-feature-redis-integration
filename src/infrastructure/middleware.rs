@@ -78,17 +78,13 @@ impl RateLimiter {
 
         // Check if we're within the rate limit
         if limit_info.requests >= self.config.requests_per_minute {
-            let _ = std::io::stderr().write_all(
-                ("Rate limit exceeded for client ".to_string() + client_id + "\n").as_bytes(),
-            );
+            warn!("Rate limit exceeded for client {}", client_id);
             return Ok(false);
         }
 
         // Try to acquire semaphore for burst control
         if limit_info.semaphore.try_acquire().is_err() {
-            let _ = std::io::stderr().write_all(
-                ("Burst limit exceeded for client ".to_string() + client_id + "\n").as_bytes(),
-            );
+            warn!("Burst limit exceeded for client {}", client_id);
             return Ok(false);
         }
 

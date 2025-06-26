@@ -86,15 +86,9 @@ impl AccountService {
                 } else {
                     100.0
                 };
-                let _ = std::io::stderr().write_all(
-                    ("Service metrics: processed=".to_string()
-                        + &commands_processed.to_string()
-                        + &", failed=".to_string()
-                        + &commands_failed.to_string()
-                        + &", success_rate=".to_string()
-                        + &success_rate.to_string()
-                        + &"%\n".to_string())
-                        .as_bytes(),
+                info!(
+                    "Service metrics: processed={}, failed={}, success_rate={:.1}%",
+                    commands_processed, commands_failed, success_rate
                 );
             }
         });
@@ -155,13 +149,9 @@ impl AccountService {
             self.metrics
                 .projection_errors
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _ = std::io::stderr().write_all(
-                ("Failed to update projection for account ".to_string()
-                    + &account_id.to_string()
-                    + &": ".to_string()
-                    + &e.to_string()
-                    + "\n")
-                    .as_bytes(),
+            error!(
+                "Failed to update projection for account {}: {}",
+                account_id, e
             );
         } else {
             self.metrics
@@ -513,20 +503,14 @@ impl AccountService {
                     self.metrics
                         .projection_errors
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let _ = std::io::stderr().write_all(
-                        ("Failed to update projection: ".to_string() + &e.to_string() + "\n")
-                            .as_bytes(),
-                    );
+                    error!("Failed to update projection: {}", e);
                     return Err(AccountError::InfrastructureError(e.to_string()));
                 }
             }
         }
 
         let duration = start_time.elapsed();
-        let _ = std::io::stderr().write_all(
-            ("Projection update took ".to_string() + &duration.as_secs_f64().to_string() + "\n")
-                .as_bytes(),
-        );
+        info!("Projection update took {:.2}s", duration.as_secs_f64());
         Ok(())
     }
 
@@ -752,9 +736,7 @@ mod tests {
                             successful_deposits.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(e) => {
-                            let _ = std::io::stderr().write_all(
-                                ("Deposit failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
-                            );
+                            error!("Deposit failed: {}", e);
                         }
                     }
                 } else {
@@ -765,10 +747,7 @@ mod tests {
                             successful_withdrawals.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(e) => {
-                            let _ = std::io::stderr().write_all(
-                                ("Withdraw failed: ".to_string() + &e.to_string() + "\n")
-                                    .as_bytes(),
-                            );
+                            error!("Withdraw failed: {}", e);
                         }
                     }
                 }
@@ -787,10 +766,7 @@ mod tests {
         let successful_operations = success_count.load(Ordering::SeqCst);
         let successful_deposits_count = successful_deposits.load(Ordering::SeqCst);
         let successful_withdrawals_count = successful_withdrawals.load(Ordering::SeqCst);
-        let _ = std::io::stderr().write_all(
-            ("Successful operations: ".to_string() + &successful_operations.to_string() + "\n")
-                .as_bytes(),
-        );
+        info!("Successful operations: {}", successful_operations);
 
         // The final balance should be consistent with the number of successful operations
         // Each successful deposit adds 100, each successful withdraw subtracts 50

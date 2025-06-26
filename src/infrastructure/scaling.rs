@@ -132,8 +132,7 @@ impl ScalingManager {
             .await?;
 
         self.instances.insert(instance_id.clone(), instance);
-        let _ = std::io::stderr()
-            .write_all(("Registered new instance: ".to_string() + &instance_id + "\n").as_bytes());
+        info!("Registered new instance: {}", instance_id);
         Ok(())
     }
 
@@ -171,9 +170,7 @@ impl ScalingManager {
                 if let Err(e) =
                     Self::check_and_scale(&instances, &config, &last_scale_time, &metrics).await
                 {
-                    let _ = std::io::stderr().write_all(
-                        ("Scaling check failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
-                    );
+                    error!("Scaling check failed: {}", e);
                 }
                 tokio::time::sleep(config.health_check_interval).await;
             }
@@ -232,7 +229,7 @@ impl ScalingManager {
     ) -> Result<()> {
         // In a real implementation, this would trigger the creation of a new instance
         // through your container orchestration system (e.g., Kubernetes)
-        let _ = std::io::stderr().write_all(("Scaling up: Creating new instance\n").as_bytes());
+        info!("Scaling up: Creating new instance");
         Ok(())
     }
 
@@ -246,9 +243,7 @@ impl ScalingManager {
             .iter()
             .find(|i| i.status == InstanceStatus::Active)
         {
-            let _ = std::io::stderr().write_all(
-                ("Scaling down: Removing instance ".to_string() + &instance.id + "\n").as_bytes(),
-            );
+            info!("Scaling down: Removing instance {}", instance.id);
             Ok(())
         } else {
             Err(anyhow::Error::msg(
@@ -273,9 +268,7 @@ impl ScalingManager {
 
         for instance_id in failed_instances {
             if let Some(instance) = self.instances.remove(&instance_id) {
-                let _ = std::io::stderr().write_all(
-                    ("Removing failed instance: ".to_string() + &instance_id + "\n").as_bytes(),
-                );
+                info!("Removing failed instance: {}", instance_id);
 
                 // In a real implementation, this would trigger cleanup in your container orchestration system
             }

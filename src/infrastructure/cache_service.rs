@@ -22,6 +22,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{duplex, AsyncRead, AsyncWrite};
 use tokio::sync::RwLock;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -225,17 +226,9 @@ impl CacheService {
                     } else {
                         0.0
                     };
-                    let _ = std::io::stderr().write_all(
-                        ("Cache Metrics - Hit Rate: ".to_string()
-                            + &hit_rate.to_string()
-                            + "%, Evictions: "
-                            + &evictions.to_string()
-                            + ", Errors: "
-                            + &errors.to_string()
-                            + ", Warmups: "
-                            + &warmups.to_string()
-                            + "\n")
-                            .as_bytes(),
+                    info!(
+                        "Cache Metrics - Hit Rate: {:.1}%, Evictions: {}, Errors: {}, Warmups: {}",
+                        hit_rate, evictions, errors, warmups
                     );
                 }
             });
@@ -269,7 +262,7 @@ impl CacheService {
         state.accounts_to_warm = Vec::new();
         drop(state);
 
-        let _ = std::io::stderr().write_all(b"Cache service initialized successfully\n");
+        info!("Cache service initialized successfully");
         Ok(())
     }
 
@@ -310,12 +303,7 @@ impl CacheService {
                         self.metrics
                             .errors
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _ = std::io::stderr().write_all(
-                            ("Failed to deserialize account from cache: ".to_string()
-                                + &e.to_string()
-                                + "\n")
-                                .as_bytes(),
-                        );
+                        error!("Failed to deserialize account from cache: {}", e);
                         Ok(None)
                     }
                 }
@@ -330,10 +318,7 @@ impl CacheService {
                 self.metrics
                     .errors
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = std::io::stderr().write_all(
-                    ("Redis error while getting account: ".to_string() + &e.to_string() + "\n")
-                        .as_bytes(),
-                );
+                error!("Redis error while getting account: {}", e);
                 Err(e.into())
             }
         }
@@ -413,12 +398,7 @@ impl CacheService {
                         self.metrics
                             .errors
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _ = std::io::stderr().write_all(
-                            ("Failed to deserialize events from cache: ".to_string()
-                                + &e.to_string()
-                                + "\n")
-                                .as_bytes(),
-                        );
+                        error!("Failed to deserialize events from cache: {}", e);
                         Ok(None)
                     }
                 }
@@ -433,10 +413,7 @@ impl CacheService {
                 self.metrics
                     .errors
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = std::io::stderr().write_all(
-                    ("Redis error while getting events: ".to_string() + &e.to_string() + "\n")
-                        .as_bytes(),
-                );
+                error!("Redis error while getting events: {}", e);
                 Err(e.into())
             }
         }
@@ -510,12 +487,7 @@ impl CacheService {
         let mut conn = self.redis_client.get_connection().await?;
         use redis::AsyncCommands;
 
-        let _ = std::io::stderr().write_all(
-            ("Starting intelligent cache warmup for ".to_string()
-                + &account_ids.len().to_string()
-                + " accounts\n")
-                .as_bytes(),
-        );
+        info!("Starting cache warmup for {} accounts", account_ids.len());
 
         for chunk in account_ids.chunks(batch_size) {
             let mut pipeline = redis::pipe();
@@ -593,7 +565,7 @@ impl CacheService {
         state.last_warmup = Some(Instant::now());
         state.accounts_to_warm.clear();
 
-        let _ = std::io::stderr().write_all(b"Cache warmup completed successfully\n");
+        info!("Cache warmup completed successfully");
         Ok(())
     }
 

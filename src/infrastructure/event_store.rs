@@ -478,17 +478,12 @@ impl EventStore {
                         ));
                     }
 
-                    let _ = std::io::stderr().write_all(
-                        ("Operation failed (attempt ".to_string()
-                            + &(retries + 1).to_string()
-                            + "/"
-                            + &config.max_retries.to_string()
-                            + "): "
-                            + &e.to_string()
-                            + ". Retrying in "
-                            + &delay.as_secs().to_string()
-                            + "s...\n")
-                            .as_bytes(),
+                    warn!(
+                        "Operation failed (attempt {}/{}): {}. Retrying in {}s...",
+                        retries + 1,
+                        config.max_retries,
+                        e,
+                        delay.as_secs()
                     );
 
                     tokio::time::sleep(delay).await;
@@ -595,13 +590,9 @@ impl EventStore {
         while let Some(event) = receiver.recv().await {
             // Simple round-robin distribution
             if let Err(e) = work_sender.send(event) {
-                let _ = std::io::stderr().write_all(
-                    ("Failed to distribute work to processor ".to_string()
-                        + &processor_index.to_string()
-                        + ": "
-                        + &e.to_string()
-                        + "\n")
-                        .as_bytes(),
+                error!(
+                    "Failed to distribute work to processor {}: {}",
+                    processor_index, e
                 );
             }
             processor_index = (processor_index + 1) % processor_count;
@@ -623,10 +614,7 @@ impl EventStore {
         let mut last_flush = Instant::now();
         let mut processed_events = 0u64;
 
-        let _ = std::io::stderr().write_all(
-            ("Batch processor worker ".to_string() + &worker_id.to_string() + " started\n")
-                .as_bytes(),
-        );
+        info!("Batch processor worker {} started", worker_id);
 
         loop {
             let timeout = tokio::time::sleep(Duration::from_millis(config.batch_timeout_ms));
@@ -661,14 +649,7 @@ impl EventStore {
                             )
                             .await
                             {
-                                let _ = std::io::stderr().write_all(
-                                    ("Worker ".to_string()
-                                        + &worker_id.to_string()
-                                        + " failed to flush batch: "
-                                        + &e.to_string()
-                                        + "\n")
-                                        .as_bytes(),
-                                );
+                                error!("Worker {} failed to flush batch: {}", worker_id, e);
                             }
                         });
                         last_flush = Instant::now();
@@ -699,14 +680,7 @@ impl EventStore {
                             )
                             .await
                             {
-                                let _ = std::io::stderr().write_all(
-                                    ("Worker ".to_string()
-                                        + &worker_id.to_string()
-                                        + " failed to flush batch: "
-                                        + &e.to_string()
-                                        + "\n")
-                                        .as_bytes(),
-                                );
+                                error!("Worker {} failed to flush batch: {}", worker_id, e);
                             }
                         });
                         last_flush = Instant::now();
@@ -717,14 +691,7 @@ impl EventStore {
 
             // Log worker statistics periodically
             if processed_events > 0 && processed_events % 1000 == 0 {
-                let _ = std::io::stderr().write_all(
-                    ("Worker ".to_string()
-                        + &worker_id.to_string()
-                        + " processed "
-                        + &processed_events.to_string()
-                        + " events\n")
-                        .as_bytes(),
-                );
+                info!("Worker {} processed {} events", worker_id, processed_events);
             }
         }
     }
@@ -1176,36 +1143,13 @@ impl EventStore {
                                 )
                                 .await
                                 {
-                                    let _ = std::io::stderr().write_all(
-                                        ("Failed to create snapshot for ".to_string()
-                                            + &aggregate_id.to_string()
-                                            + ": "
-                                            + &e.to_string()
-                                            + "\n")
-                                            .as_bytes(),
-                                    );
+                                    error!("Failed to create snapshot for {}: {}", aggregate_id, e);
                                 } else {
-                                    let _ = std::io::stderr().write_all(
-                                        ("Created snapshot for aggregate ".to_string()
-                                            + &aggregate_id.to_string()
-                                            + " at version "
-                                            + &max_version.to_string()
-                                            + "\n")
-                                            .as_bytes(),
-                                    );
+                                    info!("Created snapshot for aggregate {}", aggregate_id);
                                 }
                             }));
                         } else {
-                            let _ = std::io::stderr().write_all(
-                                ("Skipping snapshot for aggregate ".to_string()
-                                    + &aggregate_id.to_string()
-                                    + ": no new events (max_version: "
-                                    + &max_version.to_string()
-                                    + ", last_snapshot_version: "
-                                    + &last_snapshot_version.to_string()
-                                    + ")\n")
-                                    .as_bytes(),
-                            );
+                            info!("Skipping snapshot for aggregate {}: no new events (max_version: {}, last_snapshot_version: {})", aggregate_id, max_version, last_snapshot_version);
                         }
                     }
 
@@ -1213,22 +1157,12 @@ impl EventStore {
                     // This ensures backpressure on snapshot creation and provides visibility into their completion.
                     for task in snapshot_tasks {
                         if let Err(join_error) = task.await {
-                            let _ = std::io::stderr().write_all(
-                                ("Snapshot task failed to join: ".to_string()
-                                    + &join_error.to_string()
-                                    + "\n")
-                                    .as_bytes(),
-                            );
+                            error!("Snapshot task failed to join: {}", join_error);
                         }
                     }
                 }
                 Err(e) => {
-                    let _ = std::io::stderr().write_all(
-                        ("Failed to query snapshot candidates: ".to_string()
-                            + &e.to_string()
-                            + "\n")
-                            .as_bytes(),
-                    );
+                    error!("Failed to query snapshot candidates: {}", e);
                 }
             }
         }
@@ -1300,14 +1234,7 @@ impl EventStore {
             cache_guard.insert(aggregate_id, snapshot);
         }
 
-        let _ = std::io::stderr().write_all(
-            ("Created snapshot for aggregate ".to_string()
-                + &aggregate_id.to_string()
-                + " at version "
-                + &max_version.to_string()
-                + "\n")
-                .as_bytes(),
-        );
+        info!("Created snapshot for aggregate {}", aggregate_id);
         Ok(())
     }
 
@@ -1359,20 +1286,7 @@ impl EventStore {
                 0.0
             };
 
-            let _ = std::io::stderr().write_all(
-                ("EventStore Metrics - Processed: ".to_string()
-                    + &processed.to_string()
-                    + ", Failed: "
-                    + &failed.to_string()
-                    + ", Success: "
-                    + &((success_rate * 100.0).round() as i64 / 100).to_string()
-                    + "%, Batches: "
-                    + &batches.to_string()
-                    + ", Cache Hit Rate: "
-                    + &((cache_hit_rate * 100.0).round() as i64 / 100).to_string()
-                    + "%\n")
-                    .as_bytes(),
-            );
+            info!("EventStore Metrics - Processed: {}, Failed: {}, Success: {}%, Batches: {}, Cache Hit Rate: {}%", processed, failed, (success_rate * 100.0).round(), batches, (cache_hit_rate * 100.0).round());
         }
     }
 
@@ -1530,38 +1444,7 @@ impl EventStore {
             let pool_stats = self.pool_stats();
             let metrics = self.get_metrics();
 
-            let _ = std::io::stderr().write_all(
-                ("Connection Pool Stats - Total: ".to_string()
-                    + &pool_stats.0.to_string()
-                    + ", Idle: "
-                    + &pool_stats.1.to_string()
-                    + ", Active: "
-                    + &(pool_stats.0 - pool_stats.1).to_string()
-                    + ", Acquire Time: "
-                    + &metrics
-                        .connection_acquire_time
-                        .load(Ordering::Relaxed)
-                        .to_string()
-                    + "ms, Errors: "
-                    + &metrics
-                        .connection_acquire_errors
-                        .load(Ordering::Relaxed)
-                        .to_string()
-                    + ", Reuse: "
-                    + &metrics
-                        .connection_reuse_count
-                        .load(Ordering::Relaxed)
-                        .to_string()
-                    + ", Timeouts: "
-                    + &metrics
-                        .connection_timeout_count
-                        .load(Ordering::Relaxed)
-                        .to_string()
-                    + ", Avg Lifetime: "
-                    + &(metrics.connection_lifetime.load(Ordering::Relaxed) / 1000).to_string()
-                    + "s\n")
-                    .as_bytes(),
-            );
+            info!("Connection Pool Stats - Total: {}, Idle: {}, Active: {}, Acquire Time: {}ms, Errors: {}, Reuse: {}, Timeouts: {}, Avg Lifetime: {}s", pool_stats.0, pool_stats.1, (pool_stats.0 - pool_stats.1), metrics.connection_acquire_time.load(Ordering::Relaxed), metrics.connection_acquire_errors.load(Ordering::Relaxed), metrics.connection_reuse_count.load(Ordering::Relaxed), metrics.connection_timeout_count.load(Ordering::Relaxed), (metrics.connection_lifetime.load(Ordering::Relaxed) / 1000).to_string());
         }
     }
 

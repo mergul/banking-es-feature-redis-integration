@@ -4,11 +4,13 @@ use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaConsumer, Kafka
 use crate::infrastructure::kafka_dlq::DeadLetterQueue;
 use crate::infrastructure::kafka_metrics::KafkaMetrics;
 use anyhow::{Context, Result};
+use bincode;
 use std::fmt;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,7 +97,7 @@ impl RecoveryStrategies {
     }
 
     async fn full_replay(&self, account_id: Option<Uuid>) -> Result<()> {
-        let _ = std::io::stderr().write_all(b"Starting full replay recovery\n");
+        info!("Starting full replay recovery");
         let accounts = if let Some(id) = account_id {
             vec![self
                 .event_store
@@ -129,12 +131,12 @@ impl RecoveryStrategies {
             }
         }
 
-        let _ = std::io::stderr().write_all(b"Full replay recovery completed\n");
+        info!("Full replay recovery completed");
         Ok(())
     }
 
     async fn incremental_replay(&self, account_id: Option<Uuid>) -> Result<()> {
-        let _ = std::io::stderr().write_all(b"Starting incremental replay recovery\n");
+        info!("Starting incremental replay recovery");
         let accounts = if let Some(id) = account_id {
             vec![self
                 .event_store
@@ -174,12 +176,12 @@ impl RecoveryStrategies {
             }
         }
 
-        let _ = std::io::stderr().write_all(b"Incremental replay recovery completed\n");
+        info!("Incremental replay recovery completed");
         Ok(())
     }
 
     async fn selective_replay(&self, account_id: Option<Uuid>) -> Result<()> {
-        let _ = std::io::stderr().write_all(b"Starting selective replay recovery\n");
+        info!("Starting selective replay recovery");
         let accounts = if let Some(id) = account_id {
             vec![self
                 .event_store
@@ -236,12 +238,12 @@ impl RecoveryStrategies {
             }
         }
 
-        let _ = std::io::stderr().write_all(b"Selective replay recovery completed\n");
+        info!("Selective replay recovery completed");
         Ok(())
     }
 
     async fn cache_only_recovery(&self, account_id: Option<Uuid>) -> Result<()> {
-        let _ = std::io::stderr().write_all(b"Starting cache-only recovery\n");
+        info!("Starting cache-only recovery");
         let accounts = if let Some(id) = account_id {
             vec![self
                 .event_store
@@ -263,15 +265,15 @@ impl RecoveryStrategies {
             // as cache_service is not available in this context
         }
 
-        let _ = std::io::stderr().write_all(b"Cache-only recovery completed\n");
+        info!("Cache-only recovery completed");
         Ok(())
     }
 
     async fn dlq_recovery(&self, account_id: Option<Uuid>) -> Result<()> {
-        let _ = std::io::stderr().write_all(b"Starting DLQ recovery\n");
+        info!("Starting DLQ recovery");
         // Process all messages in DLQ
         self.dlq.process_dlq().await?;
-        let _ = std::io::stderr().write_all(b"DLQ recovery completed\n");
+        info!("DLQ recovery completed");
         Ok(())
     }
 

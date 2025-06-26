@@ -258,9 +258,7 @@ impl TimeoutManager {
                 .collect();
 
             for timeout_id in expired {
-                let _ = std::io::stderr().write_all(
-                    ("Found expired timeout: ".to_string() + &timeout_id + "\n").as_bytes(),
-                );
+                info!("Found expired timeout: {}", timeout_id);
                 timeouts.remove(&timeout_id);
             }
         }

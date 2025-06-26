@@ -1,3 +1,4 @@
+use anyhow::Result;
 use serde;
 use std::collections::HashMap;
 use std::io::Write;
@@ -105,15 +106,9 @@ impl DeadlockDetector {
         if let Some(existing_op) = resource_locks.get(resource) {
             if existing_op != operation_id {
                 // Potential deadlock detected
-                let _ = std::io::stderr().write_all(
-                    ("Potential deadlock detected: operation ".to_string()
-                        + operation_id
-                        + " trying to acquire resource "
-                        + resource
-                        + " held by "
-                        + existing_op
-                        + "\n")
-                        .as_bytes(),
+                warn!(
+                    "Potential deadlock detected: operation {} trying to acquire resource {} held by {}",
+                    operation_id, resource, existing_op
                 );
                 return Ok(false);
             }
@@ -158,26 +153,14 @@ impl DeadlockDetector {
             }
 
             if !stuck_operations.is_empty() {
-                let _ = std::io::stderr().write_all(
-                    ("Found ".to_string()
-                        + &stuck_operations.len().to_string()
-                        + " stuck operations\n")
-                        .as_bytes(),
-                );
+                warn!("Found {} stuck operations", stuck_operations.len());
 
                 for (op_id, info) in stuck_operations {
-                    let _ = std::io::stderr().write_all(
-                        ("Stuck operation: ".to_string()
-                            + &op_id
-                            + " (type: "
-                            + &info.operation_type
-                            + &") running for ".to_string()
-                            + &now
-                                .duration_since(info.start_time)
-                                .as_secs_f64()
-                                .to_string()
-                            + "s\n")
-                            .as_bytes(),
+                    warn!(
+                        "Stuck operation: {} (type: {}) running for {:.2}s",
+                        op_id,
+                        info.operation_type,
+                        now.duration_since(info.start_time).as_secs_f64()
                     );
 
                     if self.config.enable_auto_resolution {
@@ -191,15 +174,11 @@ impl DeadlockDetector {
                 for (op_id, info) in operations.iter() {
                     let duration = now.duration_since(info.start_time);
                     if duration > info.timeout / 2 {
-                        let _ = std::io::stderr().write_all(
-                            ("Suspicious operation: ".to_string()
-                                + op_id
-                                + " (type: "
-                                + &info.operation_type
-                                + &") running for ".to_string()
-                                + &duration.as_secs_f64().to_string()
-                                + "s\n")
-                                .as_bytes(),
+                        warn!(
+                            "Suspicious operation: {} (type: {}) running for {:.2}s",
+                            op_id,
+                            info.operation_type,
+                            duration.as_secs_f64()
                         );
                     }
                 }
@@ -208,10 +187,7 @@ impl DeadlockDetector {
     }
 
     async fn attempt_resolution(&self, operation_id: &str, info: &DeadlockInfo) {
-        let _ = std::io::stderr().write_all(
-            ("Attempting to resolve stuck operation: ".to_string() + operation_id + "\n")
-                .as_bytes(),
-        );
+        info!("Attempting to resolve stuck operation: {}", operation_id);
 
         // Release all resources held by this operation
         let mut resource_locks = self.resource_locks.write().await;
@@ -221,10 +197,7 @@ impl DeadlockDetector {
         let mut operations = self.active_operations.write().await;
         operations.remove(operation_id);
 
-        let _ = std::io::stderr().write_all(
-            ("Successfully resolved stuck operation: ".to_string() + operation_id + "\n")
-                .as_bytes(),
-        );
+        info!("Successfully resolved stuck operation: {}", operation_id);
     }
 
     pub async fn get_stats(&self) -> DeadlockStats {

@@ -4,6 +4,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct PoolMetrics {
@@ -92,23 +93,16 @@ impl ConnectionPoolMonitor {
             interval.tick().await;
 
             if let Err(e) = self.check_pool_health().await {
-                let _ = std::io::stderr().write_all(
-                    ("Pool health check failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
-                );
+                error!("Pool health check failed: {}", e);
             }
 
             if let Err(e) = self.detect_stuck_connections().await {
-                let _ = std::io::stderr().write_all(
-                    ("Stuck connection detection failed: ".to_string() + &e.to_string() + "\n")
-                        .as_bytes(),
-                );
+                error!("Stuck connection detection failed: {}", e);
             }
 
             if self.config.enable_auto_scaling {
                 if let Err(e) = self.auto_scale_pool().await {
-                    let _ = std::io::stderr().write_all(
-                        ("Auto-scaling failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
-                    );
+                    error!("Auto-scaling failed: {}", e);
                 }
             }
         }
@@ -128,27 +122,19 @@ impl ConnectionPoolMonitor {
         // Check for pool exhaustion
         let utilization = active as f64 / total as f64;
         if utilization > self.config.pool_exhaustion_threshold {
-            let _ = std::io::stderr().write_all(
-                ("Connection pool utilization high: ".to_string()
-                    + &(utilization * 100.0).to_string()
-                    + "% ("
-                    + &active.to_string()
-                    + "/"
-                    + &total.to_string()
-                    + ")\n")
-                    .as_bytes(),
+            warn!(
+                "Connection pool utilization high: {:.1}% ({}/{})",
+                utilization * 100.0,
+                active,
+                total
             );
         }
 
         // Check for connection leaks
         if active > total * 9 / 10 {
-            let _ = std::io::stderr().write_all(
-                ("Potential connection leak detected: ".to_string()
-                    + &active.to_string()
-                    + "/"
-                    + &total.to_string()
-                    + " connections active\n")
-                    .as_bytes(),
+            warn!(
+                "Potential connection leak detected: {}/{} connections active",
+                active, total
             );
         }
 
@@ -168,13 +154,10 @@ impl ConnectionPoolMonitor {
             // This is a simplified check - in a real implementation, you'd track individual connections
             let avg_connection_time = metrics.connection_acquire_time;
             if avg_connection_time > self.config.connection_timeout {
-                let _ = std::io::stderr().write_all(
-                    ("Average connection time (".to_string()
-                        + &avg_connection_time.as_secs_f64().to_string()
-                        + "s) exceeds timeout ("
-                        + &self.config.connection_timeout.as_secs_f64().to_string()
-                        + "s)\n")
-                        .as_bytes(),
+                warn!(
+                    "Average connection time ({:.1}s) exceeds timeout ({:.1}s)",
+                    avg_connection_time.as_secs_f64(),
+                    self.config.connection_timeout.as_secs_f64()
                 );
             }
         }
@@ -191,13 +174,9 @@ impl ConnectionPoolMonitor {
             let new_max = (metrics.total_connections as f64 * 1.5) as u32;
             let new_max = std::cmp::min(new_max, self.config.max_connections);
 
-            let _ = std::io::stderr().write_all(
-                ("Auto-scaling pool up: ".to_string()
-                    + &metrics.total_connections.to_string()
-                    + " -> "
-                    + &new_max.to_string()
-                    + "\n")
-                    .as_bytes(),
+            info!(
+                "Auto-scaling pool up: {} -> {}",
+                metrics.total_connections, new_max
             );
             // Note: In a real implementation, you'd need to reconfigure the pool
             // This is a simplified version
@@ -206,13 +185,9 @@ impl ConnectionPoolMonitor {
             let new_max = (metrics.total_connections as f64 * 0.8) as u32;
             let new_max = std::cmp::max(new_max, self.config.min_connections);
 
-            let _ = std::io::stderr().write_all(
-                ("Auto-scaling pool down: ".to_string()
-                    + &metrics.total_connections.to_string()
-                    + " -> "
-                    + &new_max.to_string()
-                    + "\n")
-                    .as_bytes(),
+            info!(
+                "Auto-scaling pool down: {} -> {}",
+                metrics.total_connections, new_max
             );
         }
 
@@ -228,7 +203,7 @@ impl ConnectionPoolMonitor {
     }
 
     pub async fn force_cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let _ = std::io::stderr().write_all(b"Forcing connection pool cleanup\n");
+        info!("Forcing connection pool cleanup");
 
         // Clear stuck connections
         let mut stuck_connections = self.stuck_connections.write().await;
@@ -239,7 +214,7 @@ impl ConnectionPoolMonitor {
         metrics.connection_acquire_errors = 0;
         metrics.connection_timeouts = 0;
 
-        let _ = std::io::stderr().write_all(b"Connection pool cleanup completed\n");
+        info!("Connection pool cleanup completed");
         Ok(())
     }
 

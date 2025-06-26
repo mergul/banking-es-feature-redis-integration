@@ -453,33 +453,28 @@ impl Troubleshooter {
                 Ok(health) => {
                     match health.overall_status {
                         HealthStatus::Healthy => {
-                            let _ = std::io::stderr().write_all(b"System health check: HEALTHY\n");
+                            info!("System health check: HEALTHY");
                         }
                         HealthStatus::Degraded => {
-                            let _ = std::io::stderr().write_all(
-                                ("System health check: DEGRADED - {} recommendations\n"
-                                    .to_string()
-                                    + &health.recommendations.len().to_string())
-                                    .as_bytes(),
+                            warn!(
+                                "System health check: DEGRADED - {} recommendations",
+                                health.recommendations.len()
                             );
                         }
                         HealthStatus::Critical => {
-                            let _ = std::io::stderr().write_all(
-                                ("System health check: CRITICAL - {} critical issues\n"
-                                    .to_string()
-                                    + &health
-                                        .recommendations
-                                        .iter()
-                                        .filter(|r| {
-                                            matches!(r.severity, RecommendationSeverity::Critical)
-                                        })
-                                        .count()
-                                        .to_string())
-                                    .as_bytes(),
+                            error!(
+                                "System health check: CRITICAL - {} critical issues",
+                                health
+                                    .recommendations
+                                    .iter()
+                                    .filter(|r| {
+                                        matches!(r.severity, RecommendationSeverity::Critical)
+                                    })
+                                    .count()
                             );
                         }
                         HealthStatus::Unhealthy => {
-                            let _ = std::io::stderr().write_all(b"System health check: UNHEALTHY - System requires immediate attention\n");
+                            error!("System health check: UNHEALTHY - System requires immediate attention");
                         }
                     }
 
@@ -488,10 +483,7 @@ impl Troubleshooter {
                     }
                 }
                 Err(e) => {
-                    let _ = std::io::stderr().write_all(
-                        ("Failed to diagnose system health: {}\n".to_string() + &e.to_string())
-                            .as_bytes(),
-                    );
+                    error!("Failed to diagnose system health: {}", e);
                 }
             }
         }
@@ -501,20 +493,18 @@ impl Troubleshooter {
         for recommendation in &health.recommendations {
             match recommendation.severity {
                 RecommendationSeverity::Critical => {
-                    let _ = std::io::stderr().write_all(
-                        ("Attempting auto-recovery for critical issue: {}\n".to_string()
-                            + &recommendation.title)
-                            .as_bytes(),
+                    info!(
+                        "Attempting auto-recovery for critical issue: {}",
+                        recommendation.title
                     );
                     // Implement specific recovery actions based on the issue
                     self.execute_recovery_action(recommendation).await;
                 }
                 _ => {
                     // Log but don't auto-recover for non-critical issues
-                    let _ = std::io::stderr().write_all(
-                        ("Auto-recovery skipped for non-critical issue: {}\n".to_string()
-                            + &recommendation.title)
-                            .as_bytes(),
+                    info!(
+                        "Auto-recovery skipped for non-critical issue: {}",
+                        recommendation.title
                     );
                 }
             }
@@ -524,21 +514,18 @@ impl Troubleshooter {
     async fn execute_recovery_action(&self, recommendation: &Recommendation) {
         match recommendation.title.as_str() {
             "High Connection Pool Utilization" => {
-                let _ = std::io::stderr().write_all(b"Auto-recovery: Connection pool utilization is high - consider manual intervention\n");
+                warn!("Auto-recovery: Connection pool utilization is high - consider manual intervention");
             }
             "High Deadlock Count" => {
-                let _ = std::io::stderr().write_all(
-                    b"Auto-recovery: Deadlock count is high - consider manual intervention\n",
-                );
+                warn!("Auto-recovery: Deadlock count is high - consider manual intervention");
             }
             "Multiple Stuck Operations" => {
-                let _ = std::io::stderr().write_all(b"Auto-recovery: Multiple stuck operations detected - consider manual intervention\n");
+                warn!("Auto-recovery: Multiple stuck operations detected - consider manual intervention");
             }
             _ => {
-                let _ = std::io::stderr().write_all(
-                    ("Auto-recovery: No specific action for {}\n".to_string()
-                        + &recommendation.title)
-                        .as_bytes(),
+                info!(
+                    "Auto-recovery: No specific action for {}",
+                    recommendation.title
                 );
             }
         }

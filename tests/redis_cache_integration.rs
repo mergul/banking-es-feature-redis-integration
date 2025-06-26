@@ -18,6 +18,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
+use tracing;
 use uuid::Uuid;
 
 // Helper structure to hold common test dependencies
@@ -88,18 +89,16 @@ async fn test_account_data_caching_and_invalidation() -> Result<(), Box<dyn std:
     // 2. Fetch the account using AccountRepository::get_by_id (first fetch)
     let account_v1_opt = context.account_repository.get_by_id(account_id).await?;
     if !(account_v1_opt.is_some()) {
-        let _ = std::io::stderr().write_all("Account not found after creation\\n".as_bytes());
+        tracing::error!("Account not found after creation");
         return Ok(());
     }
     let account_v1 = account_v1_opt.unwrap();
     if account_v1.owner_name != owner_name {
-        let _ =
-            std::io::stderr().write_all("Assertion failed: owner_name != owner_name\\n".as_bytes());
+        tracing::error!("Assertion failed: owner_name != owner_name");
         return Ok(());
     }
     if account_v1.balance != initial_balance {
-        let _ = std::io::stderr()
-            .write_all("Assertion failed: balance != initial_balance\\n".as_bytes());
+        tracing::error!("Assertion failed: balance != initial_balance");
         return Ok(());
     }
 
@@ -113,7 +112,7 @@ async fn test_account_data_caching_and_invalidation() -> Result<(), Box<dyn std:
     // 4. Fetch the account again using AccountRepository::get_by_id
     let account_v2_opt = context.account_repository.get_by_id(account_id).await?;
     if !(account_v2_opt.is_some()) {
-        let _ = std::io::stderr().write_all("Assertion failed\\n".as_bytes());
+        tracing::error!("Assertion failed");
         return Ok(());
     }
     let account_v2 = account_v2_opt.unwrap();
@@ -121,19 +120,18 @@ async fn test_account_data_caching_and_invalidation() -> Result<(), Box<dyn std:
     // 5. Fetch the account again using AccountRepository::get_by_id
     let account_v3_opt = context.account_repository.get_by_id(account_id).await?;
     if !(account_v3_opt.is_some()) {
-        let _ = std::io::stderr().write_all("Assertion failed\\n".as_bytes());
+        tracing::error!("Assertion failed");
         return Ok(());
     }
     let account_v3 = account_v3_opt.unwrap();
 
     if account_v3.id != account_id {
-        let _ = std::io::stderr()
-            .write_all("Assertion failed: account_v3.id != account_id\\n".as_bytes());
+        tracing::error!("Assertion failed: account_v3.id != account_id");
         return Ok(());
     }
 
     if account_v3.balance != initial_balance + deposit_amount {
-        let _ = std::io::stderr().write_all("Assertion failed: balance mismatch\\n".as_bytes());
+        tracing::error!("Assertion failed: balance mismatch");
         return Ok(());
     }
 
@@ -161,7 +159,7 @@ async fn test_command_deduplication_integration() -> Result<(), Box<dyn std::err
         .deposit_money(account_id, deposit_amount)
         .await;
     if !(res1.is_ok()) {
-        let _ = std::io::stderr().write_all("Assertion failed\\n".as_bytes());
+        tracing::error!("Assertion failed");
         return Ok(());
     }
 
@@ -172,16 +170,16 @@ async fn test_command_deduplication_integration() -> Result<(), Box<dyn std::err
         .await;
 
     if !(res2.is_err()) {
-        let _ = std::io::stderr().write_all("Assertion failed\\n".as_bytes());
+        tracing::error!("Assertion failed");
         return Ok(());
     }
     if let Err(AccountError::InfrastructureError(msg)) = res2 {
         if !(msg.contains("Duplicate deposit command")) {
-            let _ = std::io::stderr().write_all("Assertion failed\\n".as_bytes());
+            tracing::error!("Assertion failed");
             return Ok(());
         }
     } else {
-        let _ = std::io::stderr().write_all("Assertion failed\\n".as_bytes());
+        tracing::error!("Assertion failed");
         return Ok(());
     }
 
@@ -195,7 +193,7 @@ async fn test_command_deduplication_integration() -> Result<(), Box<dyn std::err
         .await;
 
     if !(res3.is_ok()) {
-        let _ = std::io::stderr().write_all("Assertion failed\\n".as_bytes());
+        tracing::error!("Assertion failed");
         return Ok(());
     }
 

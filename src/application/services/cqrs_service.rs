@@ -64,25 +64,39 @@ impl CQRSAccountService {
         initial_balance: Decimal,
     ) -> Result<Uuid, AccountError> {
         let start_time = std::time::Instant::now();
+        info!(
+            "Creating account for owner: {} with initial balance: {}",
+            owner_name, initial_balance
+        );
+
         self.metrics
             .commands_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let result = self
             .cqrs_handler
-            .create_account(owner_name, initial_balance)
+            .create_account(owner_name.clone(), initial_balance)
             .await;
 
+        let duration = start_time.elapsed();
         match &result {
             Ok(account_id) => {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully created account {} for owner {} in {:?}",
+                    account_id, owner_name, duration
+                );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to create account for owner {}: {} (took {:?})",
+                    owner_name, e, duration
+                );
             }
         }
 
@@ -96,22 +110,33 @@ impl CQRSAccountService {
         amount: Decimal,
     ) -> Result<(), AccountError> {
         let start_time = std::time::Instant::now();
+        info!("Depositing {} into account {}", amount, account_id);
+
         self.metrics
             .commands_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let result = self.cqrs_handler.deposit_money(account_id, amount).await;
 
+        let duration = start_time.elapsed();
         match &result {
             Ok(_) => {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully deposited {} into account {} in {:?}",
+                    amount, account_id, duration
+                );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to deposit {} into account {}: {} (took {:?})",
+                    amount, account_id, e, duration
+                );
             }
         }
 
@@ -125,22 +150,33 @@ impl CQRSAccountService {
         amount: Decimal,
     ) -> Result<(), AccountError> {
         let start_time = std::time::Instant::now();
+        info!("Withdrawing {} from account {}", amount, account_id);
+
         self.metrics
             .commands_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let result = self.cqrs_handler.withdraw_money(account_id, amount).await;
 
+        let duration = start_time.elapsed();
         match &result {
             Ok(_) => {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully withdrew {} from account {} in {:?}",
+                    amount, account_id, duration
+                );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to withdraw {} from account {}: {} (took {:?})",
+                    amount, account_id, e, duration
+                );
             }
         }
 
@@ -154,22 +190,36 @@ impl CQRSAccountService {
         reason: String,
     ) -> Result<(), AccountError> {
         let start_time = std::time::Instant::now();
+        info!("Closing account {} with reason: {}", account_id, reason);
+
         self.metrics
             .commands_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let result = self.cqrs_handler.close_account(account_id, reason).await;
+        let result = self
+            .cqrs_handler
+            .close_account(account_id, reason.clone())
+            .await;
 
+        let duration = start_time.elapsed();
         match &result {
             Ok(_) => {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully closed account {} with reason '{}' in {:?}",
+                    account_id, reason, duration
+                );
             }
             Err(e) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to close account {} with reason '{}': {} (took {:?})",
+                    account_id, reason, e, duration
+                );
             }
         }
 
@@ -182,27 +232,39 @@ impl CQRSAccountService {
         account_id: Uuid,
     ) -> Result<Option<AccountProjection>, AccountError> {
         let start_time = std::time::Instant::now();
+        info!("Querying account {}", account_id);
+
         self.metrics
             .queries_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let result = self.cqrs_handler.get_account(account_id).await;
 
+        let duration = start_time.elapsed();
         match &result {
             Ok(Some(_)) => {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully retrieved account {} in {:?}",
+                    account_id, duration
+                );
             }
             Ok(None) => {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!("Account {} not found in {:?}", account_id, duration);
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to query account {}: {} (took {:?})",
+                    account_id, e, duration
+                );
             }
         }
 
@@ -212,23 +274,31 @@ impl CQRSAccountService {
     /// Get all accounts
     pub async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>, AccountError> {
         let start_time = std::time::Instant::now();
+        info!("Querying all accounts");
+
         self.metrics
             .queries_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let result: Result<Vec<AccountProjection>, AccountError> =
-            self.cqrs_handler.get_all_accounts().await;
+        let result = self.cqrs_handler.get_all_accounts().await;
 
+        let duration = start_time.elapsed();
         match &result {
             Ok(accounts) => {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully retrieved {} accounts in {:?}",
+                    accounts.len(),
+                    duration
+                );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!("Failed to query all accounts: {} (took {:?})", e, duration);
             }
         }
 
@@ -241,23 +311,35 @@ impl CQRSAccountService {
         account_id: Uuid,
     ) -> Result<Vec<TransactionProjection>, AccountError> {
         let start_time = std::time::Instant::now();
+        info!("Querying transactions for account {}", account_id);
+
         self.metrics
             .queries_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let result: Result<Vec<TransactionProjection>, AccountError> =
-            self.cqrs_handler.get_account_transactions(account_id).await;
+        let result = self.cqrs_handler.get_account_transactions(account_id).await;
 
+        let duration = start_time.elapsed();
         match &result {
             Ok(transactions) => {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully retrieved {} transactions for account {} in {:?}",
+                    transactions.len(),
+                    account_id,
+                    duration
+                );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to query transactions for account {}: {} (took {:?})",
+                    account_id, e, duration
+                );
             }
         }
 
@@ -267,22 +349,33 @@ impl CQRSAccountService {
     /// Get account balance
     pub async fn get_account_balance(&self, account_id: Uuid) -> Result<Decimal, AccountError> {
         let start_time = std::time::Instant::now();
+        info!("Querying balance for account {}", account_id);
+
         self.metrics
             .queries_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let result = self.cqrs_handler.get_account_balance(account_id).await;
 
+        let duration = start_time.elapsed();
         match &result {
             Ok(balance) => {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully retrieved balance {} for account {} in {:?}",
+                    balance, account_id, duration
+                );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to query balance for account {}: {} (took {:?})",
+                    account_id, e, duration
+                );
             }
         }
 
@@ -292,22 +385,35 @@ impl CQRSAccountService {
     /// Check if account is active
     pub async fn is_account_active(&self, account_id: Uuid) -> Result<bool, AccountError> {
         let start_time = std::time::Instant::now();
+        info!("Checking if account {} is active", account_id);
+
         self.metrics
             .queries_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let result = self.cqrs_handler.is_account_active(account_id).await;
 
+        let duration = start_time.elapsed();
         match &result {
             Ok(is_active) => {
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Account {} is {} in {:?}",
+                    account_id,
+                    if *is_active { "active" } else { "inactive" },
+                    duration
+                );
             }
             Err(e) => {
                 self.metrics
                     .queries_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to check if account {} is active: {} (took {:?})",
+                    account_id, e, duration
+                );
             }
         }
 
@@ -320,30 +426,34 @@ impl CQRSAccountService {
         transactions: Vec<BatchTransaction>,
     ) -> Result<BatchTransactionResult, AccountError> {
         let start_time = std::time::Instant::now();
+        info!("Processing batch of {} transactions", transactions.len());
 
-        let result = self.batch_handler.process_batch(transactions).await;
+        self.metrics
+            .commands_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        let result = self.batch_handler.process_batch(transactions.clone()).await;
+
+        let duration = start_time.elapsed();
         match &result {
             Ok(batch_result) => {
-                let _ = std::io::stderr().write_all(
-                    ("Batch processing completed: ".to_string()
-                        + &batch_result.successful.to_string()
-                        + &" successful, ".to_string()
-                        + &batch_result.failed.to_string()
-                        + &" failed in ".to_string()
-                        + &start_time.elapsed().as_secs_f64().to_string()
-                        + "\n")
-                        .as_bytes(),
+                self.metrics
+                    .commands_successful
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully processed batch: {} successful, {} failed in {:?}",
+                    batch_result.successful, batch_result.failed, duration
                 );
             }
             Err(e) => {
-                let _ = std::io::stderr().write_all(
-                    ("Batch processing failed: ".to_string()
-                        + &e.to_string()
-                        + &" in ".to_string()
-                        + &start_time.elapsed().as_secs_f64().to_string()
-                        + "\n")
-                        .as_bytes(),
+                self.metrics
+                    .commands_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to process batch of {} transactions: {} (took {:?})",
+                    transactions.len(),
+                    e,
+                    duration
                 );
             }
         }
