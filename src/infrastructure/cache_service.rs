@@ -14,7 +14,6 @@ use redis::{aio::MultiplexedConnection, ConnectionInfo, Value as RedisValue};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
-use std::io::Write;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

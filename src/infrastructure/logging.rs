@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{Level, Subscriber};
+use tracing::{error, info, Level, Subscriber};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
     fmt::{self},
@@ -272,29 +272,16 @@ pub async fn start_log_rotation_task(
         interval.tick().await;
 
         if let Err(e) = cleanup_old_logs(&log_dir, max_files) {
-            // eprintln!("Failed to cleanup old logs: {}", e);
-            let _ = std::io::stderr().write_all(
-                ("Failed to cleanup old logs: ".to_string() + &e.to_string() + "\n").as_bytes(),
-            );
+            error!("Failed to cleanup old logs: {}", e);
         }
 
         // Log statistics
         if let Ok(stats) = get_log_stats(&log_dir) {
-            // eprintln!(
-            //     "Log statistics: {} files, {:.2} MB total, {} files in last 24h",
-            //     stats.total_files,
-            //     stats.total_size_mb(),
-            //     stats.files_last_24h
-            // );
-            let _ = std::io::stderr().write_all(
-                ("Log statistics: ".to_string()
-                    + &stats.total_files.to_string()
-                    + " files, "
-                    + &stats.total_size_mb().to_string()
-                    + " MB total, "
-                    + &stats.files_last_24h.to_string()
-                    + " files in last 24h\n")
-                    .as_bytes(),
+            info!(
+                "Log statistics: {} files, {:.2} MB total, {} files in last 24h",
+                stats.total_files,
+                stats.total_size_mb(),
+                stats.files_last_24h
             );
         }
     }

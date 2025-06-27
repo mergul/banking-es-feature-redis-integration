@@ -1,6 +1,6 @@
 use crate::domain::events::AccountEvent;
 use crate::infrastructure::event_store::DB_POOL;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -12,7 +12,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, OnceCell, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Level};
 use uuid::Uuid;
 
 // Enhanced error types for projections
@@ -727,17 +727,9 @@ impl ProjectionStore {
                 0.0
             };
 
-            let _ = std::io::stderr().write_all(
-                ("Projection Metrics - Cache Hit Rate: ".to_string()
-                    + &hit_rate.to_string()
-                    + "%, Batch Updates: "
-                    + &batches.to_string()
-                    + ", Errors: "
-                    + &errors.to_string()
-                    + ", Avg Query Time: "
-                    + &avg_query_time.to_string()
-                    + "ms\n")
-                    .as_bytes(),
+            info!(
+                "Projection Metrics - Cache Hit Rate: {:.2}%, Batch Updates: {}, Errors: {}, Avg Query Time: {:.2}ms",
+                hit_rate, batches, errors, avg_query_time
             );
         }
     }

@@ -21,12 +21,11 @@ use chrono::Utc;
 use dotenv;
 use redis;
 use sqlx::PgPool;
-use std::io::Write;
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::signal;
 use tower_http::cors::CorsLayer;
-use tracing::Level;
+use tracing::{error, info, Level};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
@@ -118,8 +117,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // Log application startup
-    let _ = std::io::stderr().write_all(b"Starting high-performance banking service with CQRS\n");
-    let _ = std::io::stderr().write_all(b"Advanced logging initialized with file rotation\n");
+    info!("Starting high-performance banking service with CQRS");
+    info!("Advanced logging initialized with file rotation");
 
     // Load environment variables
     dotenv::dotenv().ok();
@@ -200,23 +199,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(addr).await?;
     configure_tcp_listener(&listener)?;
 
-    let _ = std::io::stderr()
-        .write_all(("Server running on ".to_string() + &addr.to_string() + "\n").as_bytes());
-    let _ = std::io::stderr().write_all(b"CQRS endpoints available at /api/cqrs/*\n");
+    info!("Server running on {}", addr);
+    info!("CQRS endpoints available at /api/cqrs/*");
 
     // Start the server with graceful shutdown
     let server = axum::serve(listener, app);
     let graceful = server.with_graceful_shutdown(shutdown_signal());
 
     if let Err(e) = graceful.await {
-        let _ = std::io::stderr()
-            .write_all(("Server error: ".to_string() + &e.to_string() + "\n").as_bytes());
+        error!("Server error: {}", e);
         return Err(e.into());
     }
 
     // Graceful shutdown of services
     service_context.shutdown().await;
-    let _ = std::io::stderr().write_all(b"Server shutdown complete\n");
+    info!("Server shutdown complete");
 
     Ok(())
 }
@@ -248,7 +245,7 @@ async fn shutdown_signal() {
 
     select(ctrl_c, terminate).await;
 
-    let _ = std::io::stderr().write_all(b"Shutting down gracefully...\n");
+    info!("Shutting down gracefully...");
 }
 
 fn configure_tcp_listener(listener: &TcpListener) -> Result<(), Box<dyn std::error::Error>> {

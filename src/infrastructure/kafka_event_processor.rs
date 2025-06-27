@@ -119,9 +119,7 @@ impl KafkaEventProcessor {
         let dlq = self.dlq.clone();
         tokio::spawn(async move {
             if let Err(e) = dlq.process_dlq().await {
-                let _ = std::io::stderr().write_all(
-                    ("DLQ processing failed: ".to_string() + &e.to_string() + "\n").as_bytes(),
-                );
+                error!("DLQ processing failed: {}", e);
             }
         });
 
@@ -163,12 +161,7 @@ impl KafkaEventProcessor {
                             );
                         }
                         Err(e) => {
-                            let _ = std::io::stderr().write_all(
-                                ("Failed to process event batch: ".to_string()
-                                    + &e.to_string()
-                                    + "\n")
-                                    .as_bytes(),
-                            );
+                            error!("Failed to process event batch: {}", e);
                             self.metrics
                                 .processing_errors
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -194,9 +187,7 @@ impl KafkaEventProcessor {
                     continue;
                 }
                 Err(e) => {
-                    let _ = std::io::stderr().write_all(
-                        ("Error polling Kafka: ".to_string() + &e.to_string() + "\n").as_bytes(),
-                    );
+                    error!("Error polling Kafka: {}", e);
                     self.metrics
                         .consume_errors
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -206,10 +197,7 @@ impl KafkaEventProcessor {
                     // If we encounter persistent errors, trigger recovery
                     if self.should_trigger_recovery().await {
                         if let Err(e) = self.recovery.start_recovery().await {
-                            let _ = std::io::stderr().write_all(
-                                ("Recovery failed: ".to_string() + &e.to_string() + "\n")
-                                    .as_bytes(),
-                            );
+                            error!("Recovery failed: {}", e);
                             self.tracing
                                 .trace_error(&anyhow::Error::msg(e.to_string()), "recovery");
                         }
