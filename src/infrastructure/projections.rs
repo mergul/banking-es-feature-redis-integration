@@ -64,7 +64,7 @@ pub struct AccountProjection {
     pub owner_name: String,
     pub balance: Decimal,
     pub is_active: bool,
-    pub version: i64, // Added version field
+    pub version: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -312,7 +312,7 @@ impl ProjectionStore {
         let account: Option<AccountProjection> = sqlx::query_as!(
             AccountProjection,
             r#"
-            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            SELECT id, owner_name, balance, is_active, COALESCE(version, 0) as "version!: i64", created_at, updated_at
             FROM account_projections
             WHERE id = $1
             "#,
@@ -415,7 +415,7 @@ impl ProjectionStore {
         let accounts = sqlx::query_as!(
             AccountProjection,
             r#"
-            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            SELECT id, owner_name, balance, is_active, COALESCE(version, 0) as "version!: i64", created_at, updated_at
             FROM account_projections
             WHERE is_active = true
             ORDER BY updated_at DESC
@@ -444,7 +444,7 @@ impl ProjectionStore {
         let accounts = sqlx::query_as!(
             AccountProjection,
             r#"
-            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            SELECT id, owner_name, balance, is_active, COALESCE(version, 0) as "version!: i64", created_at, updated_at
             FROM account_projections
             WHERE is_active = true 
             AND balance BETWEEN $1 AND $2
@@ -472,7 +472,7 @@ impl ProjectionStore {
         let accounts = sqlx::query_as!(
             AccountProjection,
             r#"
-            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            SELECT id, owner_name, balance, is_active, COALESCE(version, 0) as "version!: i64", created_at, updated_at
             FROM account_projections
             WHERE is_active = true
             ORDER BY balance DESC
@@ -615,13 +615,13 @@ impl ProjectionStore {
         let owner_names: Vec<String> = accounts.iter().map(|a| a.owner_name.clone()).collect();
         let balances: Vec<Decimal> = accounts.iter().map(|a| a.balance).collect();
         let is_actives: Vec<bool> = accounts.iter().map(|a| a.is_active).collect();
-        let versions: Vec<i64> = accounts.iter().map(|a| a.version).collect(); // Added
+        let versions: Vec<i64> = accounts.iter().map(|a| a.version).collect();
         let created_ats: Vec<DateTime<Utc>> = accounts.iter().map(|a| a.created_at).collect();
         let updated_ats: Vec<DateTime<Utc>> = accounts.iter().map(|a| a.updated_at).collect();
 
         sqlx::query!(
             r#"
-            INSERT INTO account_projections (id, owner_name, balance, is_active, version, created_at, updated_at)
+            INSERT INTO public.account_projections (id, owner_name, balance, is_active, version, created_at, updated_at)
             SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::decimal[], $4::boolean[], $5::bigint[], $6::timestamptz[], $7::timestamptz[])
             ON CONFLICT (id) DO UPDATE SET
                 owner_name = EXCLUDED.owner_name,
@@ -629,13 +629,13 @@ impl ProjectionStore {
                 is_active = EXCLUDED.is_active,
                 version = EXCLUDED.version,
                 updated_at = EXCLUDED.updated_at
-            WHERE EXCLUDED.version > account_projections.version
-            "#,  // Conditional update based on version
+            WHERE EXCLUDED.version > public.account_projections.version
+            "#,
             &ids,
             &owner_names,
             &balances,
             &is_actives,
-            &versions, // Added
+            &versions,
             &created_ats,
             &updated_ats
         )

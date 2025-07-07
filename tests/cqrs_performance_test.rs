@@ -1,9 +1,10 @@
 use banking_es::{
-    application::services::{AccountService, CQRSAccountService},
+    application::services::CQRSAccountService,
     domain::AccountError,
     infrastructure::{
         cache_service::{CacheConfig, CacheService, CacheServiceTrait, EvictionPolicy},
         event_store::{EventStore, EventStoreTrait},
+        outbox::PostgresOutboxRepository,
         projections::{
             AccountProjection, ProjectionConfig, ProjectionStore, ProjectionStoreTrait,
             TransactionProjection,
@@ -41,7 +42,6 @@ use uuid::Uuid;
 
 struct CQRSTestContext {
     cqrs_service: Arc<CQRSAccountService>,
-    standard_service: Arc<AccountService>,
     db_pool: PgPool,
     _shutdown_tx: mpsc::Sender<()>,
     _background_tasks: Vec<JoinHandle<()>>,
@@ -108,24 +108,15 @@ async fn setup_cqrs_test_environment(
 
     let cache_service = Arc::new(CacheService::new(redis_client_trait.clone(), cache_config))
         as Arc<dyn CacheServiceTrait + 'static>;
-    let repository: Arc<AccountRepository> = Arc::new(AccountRepository::new(event_store.clone()));
-    let repository_clone = repository.clone();
-
-    // Initialize both services for comparison
-    let standard_service = Arc::new(AccountService::new(
-        repository,
-        projection_store.clone(),
-        cache_service.clone(),
-        Arc::new(Default::default()),
-        5000,
-    ));
-
-    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default(); // Add KafkaConfig
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let outbox_repository = Arc::new(PostgresOutboxRepository::new(pool.clone()));
     let cqrs_service = Arc::new(CQRSAccountService::new(
         event_store,
         projection_store,
         cache_service,
-        kafka_config, // Pass KafkaConfig
+        outbox_repository,
+        Arc::new(pool.clone()),
+        Arc::new(kafka_config),
         2000,                      // max_concurrent_operations - increased for higher throughput
         500,                       // batch_size - increased for better batching efficiency
         Duration::from_millis(50), // batch_timeout - reduced for faster processing
@@ -161,7 +152,6 @@ async fn setup_cqrs_test_environment(
 
     Ok(CQRSTestContext {
         cqrs_service,
-        standard_service: standard_service,
         db_pool: pool,
         _shutdown_tx: shutdown_tx,
         _background_tasks: background_tasks,

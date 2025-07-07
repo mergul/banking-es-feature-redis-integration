@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,22 +32,20 @@ impl CQRSAccountService {
         event_store: Arc<dyn EventStoreTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
         cache_service: Arc<dyn CacheServiceTrait>,
-        kafka_config: crate::infrastructure::kafka_abstraction::KafkaConfig, // Changed: pass config
+        outbox_repository: Arc<dyn crate::infrastructure::OutboxRepositoryTrait>,
+        db_pool: Arc<sqlx::PgPool>,
+        kafka_config: Arc<crate::infrastructure::kafka_abstraction::KafkaConfig>,
         max_concurrent_operations: usize,
         batch_size: usize,
         batch_timeout: Duration,
     ) -> Self {
-        // Create KafkaProducer instance here
-        let kafka_producer = Arc::new(
-            crate::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config)
-                .expect("Failed to create KafkaProducer for CQRSAccountService"),
-        );
-
         let cqrs_handler = Arc::new(CQRSHandler::new(
             event_store,
             projection_store,
             cache_service,
-            kafka_producer, // Pass created producer
+            outbox_repository,
+            db_pool,
+            kafka_config,
             max_concurrent_operations,
         ));
 

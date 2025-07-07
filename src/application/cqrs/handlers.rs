@@ -1,13 +1,14 @@
 use crate::application::cqrs::{commands::*, queries::*};
 use crate::domain::{AccountCommand, AccountError};
 use crate::infrastructure::{
-    cache_service::CacheServiceTrait, event_store::EventStoreTrait,
-    projections::ProjectionStoreTrait,
+    cache_service::CacheServiceTrait, event_store::EventStoreTrait, kafka_abstraction::KafkaConfig,
+    projections::ProjectionStoreTrait, OutboxRepositoryTrait,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,14 +29,16 @@ impl CQRSHandler {
         event_store: Arc<dyn EventStoreTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
         cache_service: Arc<dyn CacheServiceTrait>,
-        kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>,
+        outbox_repository: Arc<dyn OutboxRepositoryTrait>,
+        db_pool: Arc<PgPool>,
+        kafka_config: Arc<KafkaConfig>,
         max_concurrent_operations: usize,
     ) -> Self {
         let command_bus = CommandBus::new(
             event_store.clone(),
-            projection_store.clone(),
-            cache_service.clone(),
-            kafka_producer,
+            outbox_repository.clone(),
+            db_pool.clone(),
+            kafka_config.clone(),
         );
         let query_bus = QueryBus::new(projection_store, cache_service);
 
