@@ -285,12 +285,24 @@ impl CacheService {
         // Try Redis cache
         let mut conn = self.redis_client.get_connection().await?;
         use redis::AsyncCommands;
-        let key = "account:{}".to_string() + &(account_id).to_string();
+        let key = format!("account:{}", account_id);
+        info!(
+            "[CacheService] Attempting to GET account from Redis with key: {}",
+            key
+        );
 
         match conn.get(key.as_bytes()).await {
             Ok(redis::Value::Data(data)) => {
+                info!(
+                    "[CacheService] Successfully GOT data from Redis for key: {}",
+                    key
+                );
                 match bincode::deserialize::<Account>(&data) {
                     Ok(account) => {
+                        info!(
+                            "[CacheService] Successfully deserialized account for key: {}",
+                            key
+                        );
                         self.metrics
                             .hits
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -302,14 +314,25 @@ impl CacheService {
                         self.metrics
                             .errors
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        error!("Failed to deserialize account from cache: {}", e);
+                        error!("[CacheService] Failed to deserialize account from Redis for key {}: {}", key, e);
                         Ok(None)
                     }
                 }
             }
-            Ok(_) => {
+            Ok(redis::Value::Nil) => {
+                info!(
+                    "[CacheService] GET from Redis for key {} returned Nil (cache miss)",
+                    key
+                );
                 self.metrics
                     .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(None)
+            }
+            Ok(v) => {
+                warn!("[CacheService] GET from Redis for key {} returned unexpected Redis value: {:?}", key, v);
+                self.metrics
+                    .misses // Or errors, depending on interpretation
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(None)
             }
@@ -317,27 +340,60 @@ impl CacheService {
                 self.metrics
                     .errors
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!("Redis error while getting account: {}", e);
+                error!(
+                    "[CacheService] Redis GET operation error for key {}: {}",
+                    key, e
+                );
                 Err(e.into())
             }
         }
     }
 
     pub async fn set_account(&self, account: &Account, ttl: Option<Duration>) -> Result<()> {
-        let ttl = ttl.unwrap_or(self.config.default_ttl);
+        let ttl_duration = ttl.unwrap_or(self.config.default_ttl);
+        let key = format!("account:{}", account.id);
+        info!(
+            "[CacheService] Attempting to SET account in Redis for key: {} with TTL: {:?}",
+            key, ttl_duration
+        );
+
+        let serialized_account = match bincode::serialize(account) {
+            Ok(value) => {
+                info!(
+                    "[CacheService] Successfully serialized account for key: {}",
+                    key
+                );
+                value
+            }
+            Err(e) => {
+                error!(
+                    "[CacheService] Failed to serialize account for key {}: {}",
+                    key, e
+                );
+                return Err(e.into());
+            }
+        };
 
         // Write-through caching: Update both Redis and in-memory cache atomically
-        let mut conn = self.redis_client.get_connection().await?;
+        let mut conn = self.redis_client.get_connection().await.map_err(|e| {
+            error!(
+                "[CacheService] Failed to get Redis connection for SET: {}",
+                e
+            );
+            e
+        })?;
         use redis::AsyncCommands;
-        let key = "account:{}".to_string() + &(account.id).to_string();
-        let value = bincode::serialize(account)?;
 
         // Use Redis pipeline for atomic operations
         let mut pipeline = redis::pipe();
-        pipeline.set_ex(key.as_bytes(), &value, ttl.as_secs() as u64);
+        pipeline.set_ex(
+            key.as_bytes(),
+            &serialized_account,
+            ttl_duration.as_secs() as u64,
+        );
 
         // Also set a metadata key for cache warming
-        let metadata_key = "account_meta:{}".to_string() + &(account.id).to_string();
+        let metadata_key = format!("account_meta:{}", account.id);
         let metadata = serde_json::json!({
             "last_updated": chrono::Utc::now().timestamp(),
             "version": account.version,
@@ -346,14 +402,26 @@ impl CacheService {
         pipeline.set_ex(
             metadata_key.as_bytes(),
             metadata.to_string().as_bytes(),
-            ttl.as_secs() as u64,
+            ttl_duration.as_secs() as u64,
         );
 
         // Execute pipeline atomically
-        pipeline.query_async(&mut conn).await?;
+        match pipeline.query_async(&mut conn).await {
+            Ok(()) => {
+                info!("[CacheService] Successfully SET (pipelined) data in Redis for key: {} and metadata key: {}", key, metadata_key);
+            }
+            Err(e) => {
+                error!("[CacheService] Redis SET (pipelined) operation error for key {} and metadata key {}: {}", key, metadata_key, e);
+                return Err(e.into());
+            }
+        }
 
         // Update in-memory cache immediately (write-through)
         self.update_in_memory_cache(account.id, account.clone());
+        info!(
+            "[CacheService] Updated in-memory cache for account: {}",
+            account.id
+        );
 
         Ok(())
     }
@@ -372,39 +440,80 @@ impl CacheService {
 
     pub async fn get_account_events(&self, account_id: Uuid) -> Result<Option<Vec<AccountEvent>>> {
         // Try in-memory event cache first
-        if let Some(events) = self.event_cache.get(&account_id) {
+        if let Some(events_entry) = self.event_cache.get(&account_id) {
+            info!(
+                "[CacheService] In-memory cache HIT for account events: {}",
+                account_id
+            );
             return Ok(Some(
-                events.iter().map(|(_, event)| event.clone()).collect(),
+                events_entry
+                    .iter()
+                    .map(|(_, event)| event.clone())
+                    .collect(),
             ));
         }
+        info!(
+            "[CacheService] In-memory cache MISS for account events: {}",
+            account_id
+        );
 
-        let mut conn = self.redis_client.get_connection().await?;
+        let mut conn = self.redis_client.get_connection().await.map_err(|e| {
+            error!(
+                "[CacheService] Failed to get Redis connection for GET account events: {}",
+                e
+            );
+            e
+        })?;
         use redis::AsyncCommands;
-        let key = "events:{}".to_string() + &(account_id).to_string();
+        let key = format!("events:{}", account_id);
+        info!(
+            "[CacheService] Attempting to GET account events from Redis with key: {}",
+            key
+        );
 
         match conn.get(key.as_bytes()).await {
             Ok(redis::Value::Data(data)) => {
+                info!(
+                    "[CacheService] Successfully GOT data from Redis for account events key: {}",
+                    key
+                );
                 match bincode::deserialize::<Vec<(i64, AccountEvent)>>(&data) {
                     Ok(events) => {
+                        info!(
+                            "[CacheService] Successfully deserialized account events for key: {}",
+                            key
+                        );
                         self.metrics
                             .hits
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // Update in-memory cache
                         self.event_cache.insert(account_id, events.clone());
+                        info!(
+                            "[CacheService] Updated in-memory event cache for account: {}",
+                            account_id
+                        );
                         Ok(Some(events.into_iter().map(|(_, event)| event).collect()))
                     }
                     Err(e) => {
                         self.metrics
                             .errors
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        error!("Failed to deserialize events from cache: {}", e);
+                        error!("[CacheService] Failed to deserialize account events from Redis for key {}: {}", key, e);
                         Ok(None)
                     }
                 }
             }
-            Ok(_) => {
+            Ok(redis::Value::Nil) => {
+                info!("[CacheService] GET from Redis for account events key {} returned Nil (cache miss)", key);
                 self.metrics
                     .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(None)
+            }
+            Ok(v) => {
+                warn!("[CacheService] GET from Redis for account events key {} returned unexpected Redis value: {:?}", key, v);
+                self.metrics
+                    .misses // Or errors
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(None)
             }
@@ -412,7 +521,10 @@ impl CacheService {
                 self.metrics
                     .errors
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!("Redis error while getting events: {}", e);
+                error!(
+                    "[CacheService] Redis GET operation error for account events key {}: {}",
+                    key, e
+                );
                 Err(e.into())
             }
         }
@@ -424,17 +536,68 @@ impl CacheService {
         events: &[(i64, AccountEvent)],
         ttl: Option<Duration>,
     ) -> Result<()> {
-        let ttl = ttl.unwrap_or(self.config.default_ttl);
-        let mut conn = self.redis_client.get_connection().await?;
-        use redis::AsyncCommands;
-        let key = "events:{}".to_string() + &(account_id).to_string();
-        let value = bincode::serialize(events)?;
+        let ttl_duration = ttl.unwrap_or(self.config.default_ttl);
+        let key = format!("events:{}", account_id);
+        info!(
+            "[CacheService] Attempting to SET account events in Redis for key: {} with TTL: {:?}",
+            key, ttl_duration
+        );
 
-        conn.set_ex::<_, _, ()>(key.as_bytes(), &value, ttl.as_secs() as u64)
-            .await?;
+        let serialized_events = match bincode::serialize(events) {
+            Ok(value) => {
+                info!(
+                    "[CacheService] Successfully serialized account events for key: {}",
+                    key
+                );
+                value
+            }
+            Err(e) => {
+                error!(
+                    "[CacheService] Failed to serialize account events for key {}: {}",
+                    key, e
+                );
+                return Err(e.into());
+            }
+        };
+
+        let mut conn = self.redis_client.get_connection().await.map_err(|e| {
+            error!(
+                "[CacheService] Failed to get Redis connection for SET account events: {}",
+                e
+            );
+            e
+        })?;
+        use redis::AsyncCommands;
+
+        match conn
+            .set_ex::<_, _, ()>(
+                key.as_bytes(),
+                &serialized_events,
+                ttl_duration.as_secs() as u64,
+            )
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    "[CacheService] Successfully SET account events in Redis for key: {}",
+                    key
+                );
+            }
+            Err(e) => {
+                error!(
+                    "[CacheService] Redis SET operation error for account events key {}: {}",
+                    key, e
+                );
+                return Err(e.into());
+            }
+        }
 
         // Update in-memory cache
         self.event_cache.insert(account_id, events.to_vec());
+        info!(
+            "[CacheService] Updated in-memory event cache for account: {}",
+            account_id
+        );
 
         Ok(())
     }
@@ -442,7 +605,11 @@ impl CacheService {
     pub async fn delete_account_events(&self, account_id: Uuid) -> Result<()> {
         let mut conn = self.redis_client.get_connection().await?;
         use redis::AsyncCommands;
-        let key = "events:{}".to_string() + &(account_id).to_string();
+        let key = format!("events:{}", account_id);
+        info!(
+            "[CacheService] Deleting account events from Redis for key: {}",
+            key
+        );
 
         conn.del::<_, ()>(key.as_bytes()).await?;
         self.metrics

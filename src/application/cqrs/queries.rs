@@ -167,18 +167,38 @@ impl AccountQueryHandler {
                 match account {
                     Some(projection) => {
                         // Cache the result
-                        if let Ok(account) = self.convert_projection_to_account(&projection) {
-                            self.cache_service
-                                .set_account(&account, Some(std::time::Duration::from_secs(3600)))
-                                .await
-                                .map_err(|e| {
-                                    error!("Failed to cache account {}: {}", account_id, e);
-                                    AccountError::InfrastructureError(e.to_string())
-                                })?;
+                        match self.convert_projection_to_account(&projection) {
+                            Ok(account_to_cache) => {
+                                info!("[AccountQueryHandler] Attempting to cache account {} after projection store fetch.", account_id);
+                                match self
+                                    .cache_service
+                                    .set_account(
+                                        &account_to_cache,
+                                        Some(std::time::Duration::from_secs(3600)),
+                                    )
+                                    .await
+                                {
+                                    Ok(_) => info!(
+                                        "[AccountQueryHandler] Successfully cached account {}.",
+                                        account_id
+                                    ),
+                                    Err(e) => {
+                                        error!(
+                                            "[AccountQueryHandler] Failed to cache account {}: {}",
+                                            account_id, e
+                                        );
+                                        // Optionally, decide if this should be a hard error for the query
+                                        // For now, just log, as the data was retrieved from projection.
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("[AccountQueryHandler] Failed to convert projection to account for caching for account_id {}: {:?}", account_id, e);
+                            }
                         }
 
                         info!(
-                            "Account retrieved: {} in {:.2}s",
+                            "Account retrieved from projection store: {} in {:.2}s",
                             account_id,
                             start_time.elapsed().as_secs_f64()
                         );
@@ -267,22 +287,35 @@ impl AccountQueryHandler {
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
                 // Cache the result
-                if let Ok(events) = self.convert_transactions_to_events(&transactions) {
-                    self.cache_service
-                        .set_account_events(
-                            account_id,
-                            &events,
-                            Some(std::time::Duration::from_secs(1800)),
-                        )
-                        .await
-                        .map_err(|e| {
-                            error!("Failed to cache account events {}: {}", account_id, e);
-                            AccountError::InfrastructureError(e.to_string())
-                        })?;
+                match self.convert_transactions_to_events(&transactions) {
+                    Ok(events_to_cache) => {
+                        info!("[AccountQueryHandler] Attempting to cache account events for {} after projection store fetch.", account_id);
+                        match self
+                            .cache_service
+                            .set_account_events(
+                                account_id,
+                                &events_to_cache,
+                                Some(std::time::Duration::from_secs(1800)),
+                            )
+                            .await
+                        {
+                            Ok(_) => info!(
+                                "[AccountQueryHandler] Successfully cached account events for {}.",
+                                account_id
+                            ),
+                            Err(e) => {
+                                error!("[AccountQueryHandler] Failed to cache account events for {}: {}", account_id, e);
+                                // Optionally, decide if this should be a hard error.
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("[AccountQueryHandler] Failed to convert transactions to events for caching for account_id {}: {:?}", account_id, e);
+                    }
                 }
 
                 info!(
-                    "Account transactions retrieved: {} transactions in {:.2}s",
+                    "Account transactions retrieved from projection store: {} transactions in {:.2}s",
                     transactions.len(),
                     start_time.elapsed().as_secs_f64()
                 );
