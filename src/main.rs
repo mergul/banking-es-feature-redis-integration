@@ -133,10 +133,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Initialize CQRS service using the services from ServiceContext
+    // Create KafkaConfig instance (can be loaded from env or defaults)
+    let kafka_config = KafkaConfig::default(); // Or load from env
+
     let cqrs_service = Arc::new(CQRSAccountService::new(
         service_context.event_store.clone(),
         service_context.projection_store.clone(),
         service_context.cache_service.clone(),
+        kafka_config, // Pass KafkaConfig
         1000,                       // max_concurrent_operations
         100,                        // batch_size
         Duration::from_millis(100), // batch_timeout

@@ -32,11 +32,13 @@ impl CommandBus {
         event_store: Arc<dyn EventStoreTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
         cache_service: Arc<dyn CacheServiceTrait>,
+        kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>,
     ) -> Self {
         let account_command_handler = Arc::new(AccountCommandHandler::new(
             event_store,
             projection_store,
             cache_service,
+            kafka_producer,
         ));
 
         Self {
@@ -77,20 +79,23 @@ impl From<CommandResult> for () {
 /// Account command handler implementing CQRS write model
 pub struct AccountCommandHandler {
     event_store: Arc<dyn EventStoreTrait>,
-    projection_store: Arc<dyn ProjectionStoreTrait>,
-    cache_service: Arc<dyn CacheServiceTrait>,
+    projection_store: Arc<dyn ProjectionStoreTrait>, // Kept for other handlers, will be removed if they are also refactored
+    cache_service: Arc<dyn CacheServiceTrait>,       // Kept for other handlers, will be removed if they are also refactored
+    kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>,
 }
 
 impl AccountCommandHandler {
     pub fn new(
         event_store: Arc<dyn EventStoreTrait>,
-        projection_store: Arc<dyn ProjectionStoreTrait>,
-        cache_service: Arc<dyn CacheServiceTrait>,
+        projection_store: Arc<dyn ProjectionStoreTrait>, // Kept for now
+        cache_service: Arc<dyn CacheServiceTrait>,       // Kept for now
+        kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>,
     ) -> Self {
         Self {
             event_store,
             projection_store,
             cache_service,
+            kafka_producer,
         }
     }
 
@@ -187,58 +192,33 @@ impl AccountCommandHandler {
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                // Apply events to account
+                // Apply events to account (state is needed for CommandResult, but not for sync updates)
+                // The actual state update for queries will happen via KafkaEventProcessor
                 for event in &events {
                     account.apply_event(event);
                 }
 
-                // Update projections asynchronously
-                let projection = AccountProjection {
-                    id: account.id,
-                    owner_name: account.owner_name.clone(),
-                    balance: account.balance,
-                    is_active: account.is_active,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                };
+                // Synchronous projection and cache updates are removed.
+                // This will now be handled by KafkaEventProcessor consuming events.
 
+                // Note: Event publishing to Kafka will be handled in the next step,
+                // ensuring it happens after successful event store commit.
+
+                // Publish events to Kafka
+                // The `account.version` here is the version *after* the current events have been applied,
+                // which is typically what you'd associate with the batch of events just processed.
                 if let Err(e) = self
-                    .projection_store
-                    .upsert_accounts_batch(vec![projection])
+                    .kafka_producer
+                    .send_event_batch(account_id, events.clone(), account.version)
                     .await
                 {
+                    // Log error, but don't fail the command as event store commit was successful.
+                    // For critical systems, a more robust outbox pattern might be needed.
                     error!(
-                        "Failed to update projection for account {}: {}",
+                        "Failed to publish deposit events to Kafka for account {}: {}",
                         account_id, e
                     );
                 }
-
-                // Update transaction projection
-                for event in &events {
-                    if let AccountEvent::MoneyDeposited { amount, .. } = event {
-                        let transaction = TransactionProjection {
-                            id: Uuid::new_v4(),
-                            account_id,
-                            transaction_type: "MoneyDeposited".to_string(),
-                            amount: *amount,
-                            timestamp: Utc::now(),
-                        };
-
-                        if let Err(e) = self
-                            .projection_store
-                            .insert_transactions_batch(vec![transaction])
-                            .await
-                        {
-                            error!("Failed to insert transaction projection: {}", e);
-                        }
-                    }
-                }
-
-                // Update cache
-                self.cache_service
-                    .set_account(&account, Some(std::time::Duration::from_secs(3600)))
-                    .await
-                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
                 info!(
                     "Deposit successful: {} amount {} in {:.2}s",

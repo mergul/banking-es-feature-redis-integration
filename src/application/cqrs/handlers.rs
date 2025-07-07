@@ -28,12 +28,14 @@ impl CQRSHandler {
         event_store: Arc<dyn EventStoreTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
         cache_service: Arc<dyn CacheServiceTrait>,
+        kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>,
         max_concurrent_operations: usize,
     ) -> Self {
         let command_bus = CommandBus::new(
             event_store.clone(),
             projection_store.clone(),
             cache_service.clone(),
+            kafka_producer,
         );
         let query_bus = QueryBus::new(projection_store, cache_service);
 
