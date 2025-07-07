@@ -267,29 +267,28 @@ impl KafkaEventProcessor {
             .events
             .iter()
             .enumerate()
-            .map(|(i, event)| (batch.version - batch.events.len() as i64 + 1 + i as i64, event.clone()))
+            .map(|(i, event)| {
+                (
+                    batch.version - batch.events.len() as i64 + 1 + i as i64,
+                    event.clone(),
+                )
+            })
             .collect();
 
-        self.execute_with_retry("set_account_events_cache", || {
-            self.cache_service
-                .set_account_events(batch.account_id, &versioned_events, None)
-        })
-        .await?;
-
-        let existing_projection_opt = self
-            .execute_with_retry("get_account_projection", || {
-                self.projections.get_account(batch.account_id)
-            })
+        self.cache_service
+            .set_account_events(batch.account_id, &versioned_events, None)
             .await?;
+
+        let existing_projection_opt = self.projections.get_account(batch.account_id).await?;
 
         let mut account_projection_to_update: AccountProjection;
         let mut process_account_state_related_updates = true;
 
         if let Some(existing_proj) = existing_projection_opt {
-            if existing_proj.version >= batch.version {
+            if existing_proj.version.unwrap_or(0) >= batch.version {
                 info!(
                     "Skipping account projection update for account {} (batch version {}, projection version {}). Events likely already processed.",
-                    batch.account_id, batch.version, existing_proj.version
+                    batch.account_id, batch.version, existing_proj.version.unwrap_or(0)
                 );
                 process_account_state_related_updates = false;
                 // Although we skip DB update, we use the existing projection for any potential (though unlikely needed) downstream cache updates.
@@ -299,7 +298,7 @@ impl KafkaEventProcessor {
                 for event in &batch.events {
                     current_proj = current_proj.apply_event(event)?;
                 }
-                current_proj.version = batch.version;
+                current_proj.version = Some(batch.version);
                 current_proj.updated_at = chrono::Utc::now();
                 account_projection_to_update = current_proj;
             }
@@ -309,57 +308,58 @@ impl KafkaEventProcessor {
                 owner_name: "".to_string(),
                 balance: Decimal::ZERO,
                 is_active: false,
-                version: 0,
+                version: Some(0),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
             for event in &batch.events {
                 account_projection_to_update = account_projection_to_update.apply_event(event)?;
             }
-            account_projection_to_update.version = batch.version;
+            account_projection_to_update.version = Some(batch.version);
             account_projection_to_update.updated_at = chrono::Utc::now();
-             // If it's an AccountCreated event, apply_event should set created_at.
-            if account_projection_to_update.created_at.timestamp_millis() == chrono::Utc::now().timestamp_millis() {
-                 if let Some(AccountEvent::AccountCreated { .. }) = batch.events.first() {
-                     // apply_event should handle this. If not, this is a fallback.
-                     // This assumes the projection's created_at is set by the event.
-                 }
+            // If it's an AccountCreated event, apply_event should set created_at.
+            if account_projection_to_update.created_at.timestamp_millis()
+                == chrono::Utc::now().timestamp_millis()
+            {
+                if let Some(AccountEvent::AccountCreated { .. }) = batch.events.first() {
+                    // apply_event should handle this. If not, this is a fallback.
+                    // This assumes the projection's created_at is set by the event.
+                }
             }
         }
 
         if process_account_state_related_updates {
-            self.execute_with_retry("upsert_account_projection_db", || {
-                self.projections.upsert_accounts_batch(vec![account_projection_to_update.clone()])
-            })
-            .await.map_err(|e| {
+            self.projections.upsert_accounts_batch(vec![account_projection_to_update.clone()]).await.map_err(|e| {
                 error!("CRITICAL: Failed to upsert account projection for {}: {}. Batch will be sent to DLQ.", batch.account_id, e);
-                e
+                anyhow::anyhow!(e)
             })?;
-            info!("Successfully upserted account projection for account {}", batch.account_id);
+            info!(
+                "Successfully upserted account projection for account {}",
+                batch.account_id
+            );
 
             let final_account_domain_state = Account {
                 id: account_projection_to_update.id,
                 owner_name: account_projection_to_update.owner_name.clone(),
                 balance: account_projection_to_update.balance,
                 is_active: account_projection_to_update.is_active,
-                version: account_projection_to_update.version,
+                version: account_projection_to_update.version.unwrap_or(0),
             };
 
-            self.execute_with_retry("set_account_cache_service", || {
-                self.cache_service
-                    .set_account(&final_account_domain_state, Some(Duration::from_secs(3600)))
-            })
-            .await?;
+            self.cache_service
+                .set_account(&final_account_domain_state, Some(Duration::from_secs(3600)))
+                .await?;
 
-            self.execute_with_retry("send_kafka_cache_update", || {
-                self.producer
-                    .send_cache_update(batch.account_id, &final_account_domain_state)
-            })
-            .await
-            .map_err(|e| {
-                warn!("Non-fatal: Failed to send Kafka cache update for account {}: {}", batch.account_id, e);
-                anyhow::Ok(())
-            })?;
+            if let Err(e) = self
+                .producer
+                .send_cache_update(batch.account_id, &final_account_domain_state)
+                .await
+            {
+                warn!(
+                    "Non-fatal: Failed to send Kafka cache update for account {}: {}",
+                    batch.account_id, e
+                );
+            }
 
             self.metrics
                 .cache_updates
@@ -369,7 +369,11 @@ impl KafkaEventProcessor {
         let mut transaction_projections = Vec::new();
         for event in &batch.events {
             match event {
-                AccountEvent::MoneyDeposited { transaction_id, amount, .. } => {
+                AccountEvent::MoneyDeposited {
+                    transaction_id,
+                    amount,
+                    ..
+                } => {
                     transaction_projections.push(
                         crate::infrastructure::projections::TransactionProjection {
                             id: *transaction_id,
@@ -380,7 +384,11 @@ impl KafkaEventProcessor {
                         },
                     );
                 }
-                AccountEvent::MoneyWithdrawn { transaction_id, amount, .. } => {
+                AccountEvent::MoneyWithdrawn {
+                    transaction_id,
+                    amount,
+                    ..
+                } => {
                     transaction_projections.push(
                         crate::infrastructure::projections::TransactionProjection {
                             id: *transaction_id,
@@ -396,14 +404,15 @@ impl KafkaEventProcessor {
         }
 
         if !transaction_projections.is_empty() {
-            self.execute_with_retry("insert_transaction_projections_db", || {
-                self.projections.insert_transactions_batch(transaction_projections.clone())
-            })
-            .await.map_err(|e| {
+            self.projections.insert_transactions_batch(transaction_projections.clone()).await.map_err(|e| {
                 error!("CRITICAL: Failed to insert transaction projections for {}: {}. Batch will be sent to DLQ.", batch.account_id, e);
-                e
+                anyhow::anyhow!(e)
             })?;
-            info!("Successfully processed {} transaction projections for account {}", transaction_projections.len(), batch.account_id);
+            info!(
+                "Successfully processed {} transaction projections for account {}",
+                transaction_projections.len(),
+                batch.account_id
+            );
         }
 
         self.metrics.processing_latency.fetch_add(

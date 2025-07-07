@@ -141,6 +141,7 @@ impl AccountService {
             owner_name: owner_name.clone(),
             balance: initial_balance,
             is_active: true,
+            version: Some(0), // Initial version for new account
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -218,6 +219,7 @@ impl AccountService {
                         owner_name: account.owner_name.clone(),
                         balance: account.balance,
                         is_active: account.is_active,
+                        version: Some(account.version),
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
                     };
@@ -314,6 +316,7 @@ impl AccountService {
                         owner_name: account.owner_name.clone(),
                         balance: account.balance,
                         is_active: account.is_active,
+                        version: Some(account.version),
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
                     };
@@ -382,6 +385,7 @@ impl AccountService {
                 owner_name: account.owner_name,
                 balance: account.balance,
                 is_active: account.is_active,
+                version: Some(account.version),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }));
@@ -414,6 +418,7 @@ impl AccountService {
                 owner_name: account.owner_name,
                 balance: account.balance,
                 is_active: account.is_active,
+                version: Some(account.version),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }));
@@ -500,7 +505,7 @@ impl AccountService {
                             owner_name: account.owner_name.clone(),
                             balance: account.balance,
                             is_active: account.is_active,
-                            version: 0, // Default version
+                            version: account.version.unwrap_or(0), // Use projection version or default
                         };
                         self.cache_service
                             .set_account(&account, Some(Duration::from_secs(3600)))

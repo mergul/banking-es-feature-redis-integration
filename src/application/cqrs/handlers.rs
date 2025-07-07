@@ -28,14 +28,22 @@ impl CQRSHandler {
         event_store: Arc<dyn EventStoreTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
         cache_service: Arc<dyn CacheServiceTrait>,
-        kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>,
+        kafka_config: crate::infrastructure::kafka_abstraction::KafkaConfig,
         max_concurrent_operations: usize,
     ) -> Self {
+        // Create outbox repository for command bus
+        let outbox_repository = Arc::new(
+            crate::infrastructure::outbox::PostgresOutboxRepository::new(
+                event_store.get_pool().clone(),
+            ),
+        )
+            as Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait>;
+
         let command_bus = CommandBus::new(
             event_store.clone(),
-            projection_store.clone(),
-            cache_service.clone(),
-            kafka_producer,
+            outbox_repository,
+            Arc::new(event_store.get_pool().clone()),
+            Arc::new(kafka_config),
         );
         let query_bus = QueryBus::new(projection_store, cache_service);
 

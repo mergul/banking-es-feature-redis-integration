@@ -37,8 +37,8 @@ impl CQRSAccountService {
         batch_timeout: Duration,
     ) -> Self {
         // Create KafkaProducer instance here
-        let kafka_producer = Arc::new(
-            crate::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config)
+        let _kafka_producer = Arc::new(
+            crate::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())
                 .expect("Failed to create KafkaProducer for CQRSAccountService"),
         );
 
@@ -46,7 +46,7 @@ impl CQRSAccountService {
             event_store,
             projection_store,
             cache_service,
-            kafka_producer, // Pass created producer
+            kafka_config, // Pass config instead of producer
             max_concurrent_operations,
         ));
 

@@ -85,3 +85,4 @@ where
 // tests/cqrs_performance_test.rs::test_cqrs_high_throughput_performance covers the CQRS path.
 
 // Enums Operation and OperationResult were only used by the removed test_high_throughput_performance.
+*/
