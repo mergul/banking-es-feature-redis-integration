@@ -26,6 +26,7 @@ pub mod stuck_operation_diagnostic;
 pub mod timeout_manager;
 pub mod troubleshooting;
 pub mod user_repository;
+pub mod outbox; // Added
 
 pub use auth::*;
 pub use cache_service::*;
@@ -51,3 +52,4 @@ pub use scaling::*;
 pub use sharding::*;
 pub use user_repository::*;
 pub use user_repository::{NewUser, User, UserRepository, UserRepositoryError}; // Added re-export
+pub use outbox::{OutboxMessage, PersistedOutboxMessage, OutboxRepositoryTrait, PostgresOutboxRepository}; // Added PostgresOutboxRepository

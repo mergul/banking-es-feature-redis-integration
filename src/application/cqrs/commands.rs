@@ -79,23 +79,45 @@ impl From<CommandResult> for () {
 /// Account command handler implementing CQRS write model
 pub struct AccountCommandHandler {
     event_store: Arc<dyn EventStoreTrait>,
-    projection_store: Arc<dyn ProjectionStoreTrait>, // Kept for other handlers, will be removed if they are also refactored
-    cache_service: Arc<dyn CacheServiceTrait>,       // Kept for other handlers, will be removed if they are also refactored
-    kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>,
+    // projection_store: Arc<dyn ProjectionStoreTrait>, // No longer needed if all handlers are refactored
+    // cache_service: Arc<dyn CacheServiceTrait>,       // No longer needed if all handlers are refactored
+    // kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>, // Removed, replaced by outbox
+    outbox_repository: Arc<crate::infrastructure::OutboxRepositoryTrait>, // ADDED
+    db_pool: Arc<sqlx::PgPool>, // ADDED - to manage transactions for outbox + event store
+    kafka_config: Arc<crate::infrastructure::kafka_abstraction::KafkaConfig>, // ADDED - for topic names
 }
 
 impl AccountCommandHandler {
     pub fn new(
         event_store: Arc<dyn EventStoreTrait>,
-        projection_store: Arc<dyn ProjectionStoreTrait>, // Kept for now
-        cache_service: Arc<dyn CacheServiceTrait>,       // Kept for now
-        kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>,
+        // projection_store: Arc<dyn ProjectionStoreTrait>, // Remove if not needed
+        // cache_service: Arc<dyn CacheServiceTrait>,       // Remove if not needed
+        outbox_repository: Arc<crate::infrastructure::OutboxRepositoryTrait>, // ADDED
+        db_pool: Arc<sqlx::PgPool>, // ADDED
+        kafka_config: Arc<crate::infrastructure::kafka_abstraction::KafkaConfig>, // ADDED
     ) -> Self {
         Self {
             event_store,
-            projection_store,
-            cache_service,
-            kafka_producer,
+            // projection_store,
+            // cache_service,
+            outbox_repository,
+            db_pool,
+            outbox_repository,
+            db_pool,
+            kafka_config,
+        }
+    }
+
+    // Helper to generate event_id for outbox message
+    fn generate_event_id_for_outbox(event: &AccountEvent) -> Uuid {
+        match event {
+            AccountEvent::MoneyDeposited { transaction_id, .. } => *transaction_id,
+            AccountEvent::MoneyWithdrawn { transaction_id, .. } => *transaction_id,
+            // For AccountCreated and AccountClosed, transaction_id might not be present directly in the event struct
+            // or might not be the desired unique ID for the event itself.
+            // Here, we generate a new UUID if no specific ID is available from the event.
+            // Alternatively, domain events could be designed to always carry a unique event_id.
+            _ => Uuid::new_v4(),
         }
     }
 
@@ -112,7 +134,6 @@ impl AccountCommandHandler {
                 ref owner_name,
                 initial_balance,
             } => {
-                // Create new account aggregate
                 let account = Account::new(account_id, owner_name.clone(), initial_balance)?;
                 let command_for_handling = AccountCommand::CreateAccount {
                     account_id,
@@ -121,53 +142,38 @@ impl AccountCommandHandler {
                 };
                 let events = account.handle_command(&command_for_handling)?;
 
-                // Save events to event store
+                let mut tx = self.db_pool.begin().await.map_err(|e| AccountError::InfrastructureError(format!("DB Error: {}", e)))?;
+
+                // CONCEPTUAL: self.event_store.save_events_in_transaction(&mut tx, ...).await
+                // For now, assuming EventStore commits its own transaction before outbox write.
+                // This is the main atomicity challenge with the current EventStore design.
                 self.event_store
                     .save_events(account_id, events.clone(), 0)
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                // Synchronous projection and cache updates are removed.
-                // This will now be handled by KafkaEventProcessor consuming events.
+                let outbox_messages: Vec<crate::infrastructure::OutboxMessage> = events.iter().map(|event| {
+                    crate::infrastructure::OutboxMessage {
+                        aggregate_id: account_id,
+                        event_id: Self::generate_event_id_for_outbox(event),
+                        event_type: event.event_type().to_string(),
+                        payload: bincode::serialize(event).unwrap_or_default(),
+                        topic: self.kafka_config.event_topic.clone(),
+                        metadata: None,
+                    }
+                }).collect();
 
-                // Publish events to Kafka
-                // For AccountCreated, the account object itself might not have an updated version yet (it's 0).
-                // The event store handles versioning, so we pass the events and the initial version (0).
-                // The Kafka message should contain the initial state or enough info for the consumer.
-                // The `account.version` (which is 0 for a new account before first event is applied by store)
-                // or specifically `0` for create. Event store `save_events` uses `expected_version`.
-                // Kafka producer's `send_event_batch` takes `version` which implies the version *of the batch* or *after the batch*.
-                // For create, the version *after* this first batch of events (usually 1 event) is 1.
-                // Let's assume `account.version` after `handle_command` is still 0 (as it's a new aggregate state not yet reflecting store version).
-                // The `events` vector contains one `AccountCreated` event.
-                // The `self.event_store.save_events` call uses `0` as `expected_version`.
-                // We should publish the events with the version they will have in the store, which is 1.
-                // Or, if `send_event_batch` expects the version *of the aggregate before these events*, it would be 0.
-                // Given `AccountRepository` uses `account.version` which *is* updated after apply_event,
-                // let's apply the event to the local `account` instance to get its version updated for publishing.
-                let mut local_account_for_version = account.clone();
-                for event in &events {
-                    local_account_for_version.apply_event(event); // This should set version to 0 for AccountCreated if it's the first event
+                if let Err(e) = self.outbox_repository.add_pending_messages(&mut tx, outbox_messages).await {
+                    error!("Outbox write failed for account {}: {}. Attempting rollback.", account_id, e);
+                    // Note: Rollback here won't affect EventStore if it committed separately.
+                    tx.rollback().await.map_err(|re| AccountError::InfrastructureError(format!("DB Rollback Error: {}", re)))?;
+                    return Err(AccountError::InfrastructureError(format!("Outbox write failed: {}", e)));
                 }
-                // However, `EventStore` handles versioning. The first event gets version 1.
-                // So, we publish with version 1.
-                // A better way for `send_event_batch` might be to take `expected_version` and `events`,
-                // and derive resulting versions internally or expect the final version of the last event.
-                // For now, assuming `send_event_batch` wants the version of the aggregate *after* these events are applied.
-                // The `events` themselves don't have versions yet. The `EventStore` assigns them.
-                // The `EventBatch` struct in Kafka abstraction takes `version` - this should be the aggregate version *after* these events.
-                // After `AccountCreated` event, version becomes 1.
 
-                if let Err(e) = self
-                    .kafka_producer
-                    .send_event_batch(account_id, events.clone(), 1) // Version after AccountCreated is 1
-                    .await
-                {
-                    error!(
-                        "Failed to publish AccountCreated event to Kafka for account {}: {}",
-                        account_id, e
-                    );
-                }
+                tx.commit().await.map_err(|e| AccountError::InfrastructureError(format!("DB Commit Error: {}", e)))?;
+
+                // Removed direct Kafka publishing
+                // Removed direct projection/cache updates
 
                 info!(
                     "Account created successfully: {} in {:.2}s",
@@ -216,23 +222,41 @@ impl AccountCommandHandler {
                 // Synchronous projection and cache updates are removed.
                 // This will now be handled by KafkaEventProcessor consuming events.
 
-                // Note: Event publishing to Kafka will be handled in the next step,
-                // ensuring it happens after successful event store commit.
+                // Start Transaction
+                let mut tx = self.db_pool.begin().await.map_err(|e| AccountError::InfrastructureError(format!("DB Error starting transaction: {}", e)))?;
 
-                // Publish events to Kafka
-                // The `account.version` here is the version *after* the current events have been applied,
-                // which is typically what you'd associate with the batch of events just processed.
-                if let Err(e) = self
-                    .kafka_producer
-                    .send_event_batch(account_id, events.clone(), account.version)
-                    .await
-                {
-                    // Log error, but don't fail the command as event store commit was successful.
-                    // For critical systems, a more robust outbox pattern might be needed.
-                    error!(
-                        "Failed to publish deposit events to Kafka for account {}: {}",
-                        account_id, e
-                    );
+                // CONCEPTUAL: EventStore operation should ideally use `tx`
+                // self.event_store.save_events_in_transaction(&mut tx, account_id, events.clone(), account.version).await...
+                // Current: EventStore manages its own transaction, risk of partial failure.
+                match self.event_store.save_events(account_id, events.clone(), account.version).await {
+                    Ok(_) => {
+                        let outbox_messages: Vec<crate::infrastructure::OutboxMessage> = events.iter().map(|event| {
+                            crate::infrastructure::OutboxMessage {
+                                aggregate_id: account_id,
+                                event_id: Self::generate_event_id_for_outbox(event),
+                                event_type: event.event_type().to_string(),
+                                payload: bincode::serialize(event).unwrap_or_default(), // Handle error
+                                topic: self.kafka_config.event_topic.clone(),
+                                metadata: None,
+                            }
+                        }).collect();
+
+                        if let Err(e) = self.outbox_repository.add_pending_messages(&mut tx, outbox_messages).await {
+                            error!("Outbox write failed for account {}: {}. Attempting rollback.", account_id, e);
+                            // Note: Rollback here won't affect EventStore if it committed separately.
+                            tx.rollback().await.map_err(|re| AccountError::InfrastructureError(format!("DB Rollback Error: {}", re)))?;
+                            return Err(AccountError::InfrastructureError(format!("Outbox write failed: {}", e)));
+                        }
+
+                        tx.commit().await.map_err(|e| AccountError::InfrastructureError(format!("DB Commit Error: {}", e)))?;
+
+                        // Removed direct Kafka publishing. It's now responsibility of Outbox Poller.
+                    }
+                    Err(e) => {
+                        // Event store save failed
+                        tx.rollback().await.map_err(|re| AccountError::InfrastructureError(format!("DB Rollback Error after event store failure: {}", re)))?;
+                        return Err(AccountError::InfrastructureError(e.to_string()));
+                    }
                 }
 
                 info!(
