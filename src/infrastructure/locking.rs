@@ -14,13 +14,13 @@
 
 //     pub async fn acquire_lock(&self, key: &str, ttl: Duration) -> Result<DistributedLock, String> {
 //         let lock_id = Uuid::new_v4().to_string();
-//         let lock_key = format!("lock:{}", key);
+//         let lock_key = "lock:{}".to_string() + &(key).to_string();
 
 //         let acquired = self
 //             .redis_client
 //             .set_nx(&lock_key, &lock_id, ttl)
 //             .await
-//             .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+//             .map_err(|e| "Failed to acquire lock: {}".to_string() + &(e).to_string())?;
 
 //         if acquired {
 //             Ok(DistributedLock {
@@ -53,7 +53,7 @@
 //         self.redis_client
 //             .eval(script, &[&self.lock_key], &[&self.lock_id])
 //             .await
-//             .map_err(|e| format!("Failed to release lock: {}", e))?;
+//             .map_err(|e| "Failed to release lock: {}".to_string() + &(e).to_string())?;
 
 //         Ok(())
 //     }

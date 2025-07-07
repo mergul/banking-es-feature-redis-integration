@@ -5,11 +5,54 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+// Custom module for bincode-compatible DateTime<Utc> serialization
+mod bincode_datetime {
+    use chrono::{DateTime, TimeZone, Utc};
+    use serde::de::Deserialize;
+    use serde::{self, Deserializer, Serializer};
+
+    pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_i64(dt.timestamp())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let ts = i64::deserialize(deserializer)?;
+        Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
+    }
+
+    pub mod option {
+        use super::*;
+        pub fn serialize<S>(dt: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            match dt {
+                Some(dt) => serializer.serialize_some(&dt.timestamp()),
+                None => serializer.serialize_none(),
+            }
+        }
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let opt = Option::<i64>::deserialize(deserializer)?;
+            Ok(opt.map(|ts| Utc.timestamp_opt(ts, 0).single().unwrap()))
+        }
+    }
+}
 
 #[async_trait]
 pub trait DeadLetterQueueTrait: Send + Sync {
@@ -23,14 +66,16 @@ pub trait DeadLetterQueueTrait: Send + Sync {
     async fn process_dlq(&self) -> Result<()>;
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeadLetterMessage {
     pub account_id: Uuid,
     pub events: Vec<AccountEvent>,
     pub version: i64,
+    #[serde(with = "bincode_datetime")]
     pub original_timestamp: DateTime<Utc>,
     pub failure_reason: String,
     pub retry_count: u32,
+    #[serde(with = "bincode_datetime::option")]
     pub last_retry: Option<DateTime<Utc>>,
 }
 
@@ -86,6 +131,9 @@ impl DeadLetterQueue {
     }
 
     pub async fn process_dlq(&self) -> Result<()> {
+        // Subscribe to DLQ topic
+        self.consumer.subscribe_to_dlq().await?;
+
         loop {
             if let Some(message) = self.consumer.poll_dlq_message().await? {
                 if message.retry_count >= self.max_retries {

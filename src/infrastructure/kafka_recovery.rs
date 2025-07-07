@@ -1,11 +1,13 @@
 use crate::domain::{Account, AccountEvent};
-use crate::infrastructure::event_store::EventStoreTrait;
+use crate::infrastructure::event_store::{Event, EventStoreTrait};
 use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaConsumer, KafkaProducer};
 use crate::infrastructure::kafka_dlq::DeadLetterQueue;
 use crate::infrastructure::kafka_metrics::KafkaMetrics;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use bincode;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -64,7 +66,7 @@ impl KafkaRecovery {
     pub async fn start_recovery(&self) -> Result<()> {
         let mut state = self.recovery_state.write().await;
         if state.is_recovering {
-            warn!("Recovery already in progress");
+            info!("Recovery already in progress");
             return Ok(());
         }
 
@@ -94,12 +96,16 @@ impl KafkaRecovery {
             drop(state);
 
             // Get the full account from event store
-            let account = self.event_store.get_events(projection.id, None).await?;
+            let account = self
+                .event_store
+                .get_events(projection.id, None)
+                .await
+                .map_err(|e| anyhow::Error::msg(e.to_string()))?;
             let mut reconstructed_account = Account::default();
             reconstructed_account.id = projection.id;
 
             for event in account {
-                let account_event: AccountEvent = serde_json::from_value(event.event_data)
+                let account_event: AccountEvent = bincode::deserialize(&event.event_data)
                     .context("Failed to deserialize event")?;
                 reconstructed_account.apply_event(&account_event);
             }
@@ -147,29 +153,39 @@ impl KafkaRecovery {
     }
 
     async fn verify_account_events(&self, account: &Account) -> Result<()> {
-        let stored_events = self.event_store.get_events(account.id, None).await?;
+        let stored_events = self
+            .event_store
+            .get_events(account.id, None)
+            .await
+            .map_err(|e| anyhow::Error::msg(e.to_string()))?;
         let mut replayed_account = Account::default();
         replayed_account.id = account.id;
 
         for event in stored_events {
             let account_event: AccountEvent =
-                serde_json::from_value(event.event_data).context("Failed to deserialize event")?;
+                bincode::deserialize(&event.event_data).context("Failed to deserialize event")?;
             replayed_account.apply_event(&account_event);
         }
 
         if replayed_account != *account {
-            return Err(anyhow::anyhow!("Account state mismatch after event replay"));
+            return Err(anyhow::Error::msg(
+                "Account state mismatch after event replay".to_string(),
+            ));
         }
 
         Ok(())
     }
 
     async fn replay_account_events(&self, account: &Account) -> Result<()> {
-        let stored_events = self.event_store.get_events(account.id, None).await?;
+        let stored_events = self
+            .event_store
+            .get_events(account.id, None)
+            .await
+            .map_err(|e| anyhow::Error::msg(e.to_string()))?;
 
         for event in stored_events {
             let account_event: AccountEvent =
-                serde_json::from_value(event.event_data).context("Failed to deserialize event")?;
+                bincode::deserialize(&event.event_data).context("Failed to deserialize event")?;
 
             // Send event to Kafka for reprocessing
             self.producer
@@ -199,7 +215,7 @@ impl KafkaRecovery {
                 account.id,
                 vec![],
                 account.version,
-                format!("Event consistency check failed: {}", error),
+                "Event consistency check failed: ".to_string() + &error.to_string(),
             )
             .await?;
 
@@ -213,7 +229,7 @@ impl KafkaRecovery {
                 account.id,
                 vec![],
                 account.version,
-                format!("Event replay failed: {}", error),
+                "Event replay failed: ".to_string() + &error.to_string(),
             )
             .await?;
 

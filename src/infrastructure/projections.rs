@@ -1,6 +1,6 @@
 use crate::domain::events::AccountEvent;
 use crate::infrastructure::event_store::DB_POOL;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -8,23 +8,43 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, OnceCell, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Level};
 use uuid::Uuid;
 
 // Enhanced error types for projections
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ProjectionError {
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-    #[error("Cache error: {0}")]
+    DatabaseError(sqlx::Error),
     CacheError(String),
-    #[error("Batch processing error: {0}")]
     BatchError(String),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
+}
+
+impl std::fmt::Display for ProjectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectionError::DatabaseError(e) => {
+                f.write_str(&("Database error: ".to_string() + &e.to_string()))
+            }
+            ProjectionError::CacheError(e) => {
+                f.write_str(&("Cache error: ".to_string() + &e.to_string()))
+            }
+            ProjectionError::BatchError(e) => {
+                f.write_str(&("Batch processing error: ".to_string() + &e.to_string()))
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProjectionError {}
+
+impl From<sqlx::Error> for ProjectionError {
+    fn from(err: sqlx::Error) -> Self {
+        ProjectionError::DatabaseError(err)
+    }
 }
 
 // Projection metrics
@@ -44,6 +64,7 @@ pub struct AccountProjection {
     pub owner_name: String,
     pub balance: Decimal,
     pub is_active: bool,
+    pub version: Option<i64>, // Version field can be nullable
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -145,14 +166,28 @@ impl ProjectionStoreTrait for ProjectionStore {
     }
 
     async fn upsert_accounts_batch(&self, accounts: Vec<AccountProjection>) -> Result<()> {
-        self.upsert_accounts_batch(accounts).await
+        self.update_sender
+            .send(ProjectionUpdate::AccountBatch(accounts))
+            .map_err(|e| {
+                anyhow::Error::msg(
+                    "Failed to send account batch update: ".to_string() + &e.to_string(),
+                )
+            })?;
+        Ok(())
     }
 
     async fn insert_transactions_batch(
         &self,
         transactions: Vec<TransactionProjection>,
     ) -> Result<()> {
-        self.insert_transactions_batch(transactions).await
+        self.update_sender
+            .send(ProjectionUpdate::TransactionBatch(transactions))
+            .map_err(|e| {
+                anyhow::Error::msg(
+                    "Failed to send transaction batch update: ".to_string() + &e.to_string(),
+                )
+            })?;
+        Ok(())
     }
 }
 
@@ -186,16 +221,18 @@ impl ProjectionStore {
             config: config.clone(),
         };
 
-        // Only start background processor if not in test mode
-        if std::env::var("RUST_TEST").is_err() {
-            tokio::spawn(Self::update_processor(
-                pool,
-                update_receiver,
-                account_cache,
-                transaction_cache,
-                config,
-            ));
-        }
+        // Start background processor
+        tokio::spawn(Self::update_processor(
+            pool,
+            update_receiver,
+            account_cache,
+            transaction_cache,
+            config,
+        ));
+
+        // Start metrics reporter
+        let metrics = store.metrics.clone();
+        tokio::spawn(Self::metrics_reporter(metrics));
 
         store
     }
@@ -205,7 +242,7 @@ impl ProjectionStore {
         let pool = PROJECTION_POOL
             .get_or_try_init(|| async {
                 let database_url = std::env::var("DATABASE_URL").map_err(|_| {
-                    anyhow::anyhow!("DATABASE_URL environment variable is required")
+                    anyhow::Error::msg("DATABASE_URL environment variable is required")
                 })?;
 
                 let pool = PgPoolOptions::new()
@@ -275,7 +312,7 @@ impl ProjectionStore {
         let account: Option<AccountProjection> = sqlx::query_as!(
             AccountProjection,
             r#"
-            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            SELECT id, owner_name, balance, is_active, version, created_at, updated_at
             FROM account_projections
             WHERE id = $1
             "#,
@@ -373,15 +410,75 @@ impl ProjectionStore {
     pub async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>> {
         let start_time = Instant::now();
 
+        // TODO: Use materialized view account_projections_mv for better performance
+        // Run migration: migrations/20241201000000_create_materialized_views.sql
         let accounts = sqlx::query_as!(
             AccountProjection,
             r#"
-            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            SELECT id, owner_name, balance, is_active, version, created_at, updated_at
             FROM account_projections
             WHERE is_active = true
-            ORDER BY created_at DESC
+            ORDER BY updated_at DESC
             LIMIT 10000
             "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        self.metrics.query_duration.fetch_add(
+            start_time.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(accounts)
+    }
+
+    pub async fn get_accounts_by_balance_range(
+        &self,
+        min_balance: Decimal,
+        max_balance: Decimal,
+    ) -> Result<Vec<AccountProjection>> {
+        let start_time = Instant::now();
+
+        // TODO: Use indexed materialized view for balance range queries
+        let accounts = sqlx::query_as!(
+            AccountProjection,
+            r#"
+            SELECT id, owner_name, balance, is_active, version, created_at, updated_at
+            FROM account_projections
+            WHERE is_active = true 
+            AND balance BETWEEN $1 AND $2
+            ORDER BY balance DESC
+            LIMIT 1000
+            "#,
+            min_balance,
+            max_balance
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        self.metrics.query_duration.fetch_add(
+            start_time.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(accounts)
+    }
+
+    pub async fn get_top_accounts_by_balance(&self, limit: i64) -> Result<Vec<AccountProjection>> {
+        let start_time = Instant::now();
+
+        // TODO: Use materialized view with balance index for top accounts
+        let accounts = sqlx::query_as!(
+            AccountProjection,
+            r#"
+            SELECT id, owner_name, balance, is_active, version, created_at, updated_at
+            FROM account_projections
+            WHERE is_active = true
+            ORDER BY balance DESC
+            LIMIT $1
+            "#,
+            limit
         )
         .fetch_all(&self.pool)
         .await?;
@@ -518,23 +615,27 @@ impl ProjectionStore {
         let owner_names: Vec<String> = accounts.iter().map(|a| a.owner_name.clone()).collect();
         let balances: Vec<Decimal> = accounts.iter().map(|a| a.balance).collect();
         let is_actives: Vec<bool> = accounts.iter().map(|a| a.is_active).collect();
+        let versions: Vec<i64> = accounts.iter().map(|a| a.version.unwrap_or(0)).collect(); // Added
         let created_ats: Vec<DateTime<Utc>> = accounts.iter().map(|a| a.created_at).collect();
         let updated_ats: Vec<DateTime<Utc>> = accounts.iter().map(|a| a.updated_at).collect();
 
         sqlx::query!(
             r#"
-            INSERT INTO account_projections (id, owner_name, balance, is_active, created_at, updated_at)
-            SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::decimal[], $4::boolean[], $5::timestamptz[], $6::timestamptz[])
+            INSERT INTO account_projections (id, owner_name, balance, is_active, version, created_at, updated_at)
+            SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::decimal[], $4::boolean[], $5::bigint[], $6::timestamptz[], $7::timestamptz[])
             ON CONFLICT (id) DO UPDATE SET
                 owner_name = EXCLUDED.owner_name,
                 balance = EXCLUDED.balance,
                 is_active = EXCLUDED.is_active,
+                version = EXCLUDED.version,
                 updated_at = EXCLUDED.updated_at
-            "#,
+            WHERE EXCLUDED.version > account_projections.version
+            "#,  // Conditional update based on version
             &ids,
             &owner_names,
             &balances,
             &is_actives,
+            &versions, // Added
             &created_ats,
             &updated_ats
         )
@@ -566,7 +667,7 @@ impl ProjectionStore {
             INSERT INTO transaction_projections (id, account_id, transaction_type, amount, timestamp)
             SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::decimal[], $5::timestamptz[])
             ON CONFLICT (id) DO NOTHING
-            "#,
+            "#, // Changed ON CONFLICT to just (id)
             &ids,
             &account_ids,
             &types,
@@ -632,7 +733,7 @@ impl ProjectionStore {
             };
 
             info!(
-                "Projection Metrics - Cache Hit Rate: {:.1}%, Batch Updates: {}, Errors: {}, Avg Query Time: {:.2}ms",
+                "Projection Metrics - Cache Hit Rate: {:.2}%, Batch Updates: {}, Errors: {}, Avg Query Time: {:.2}ms",
                 hit_rate, batches, errors, avg_query_time
             );
         }

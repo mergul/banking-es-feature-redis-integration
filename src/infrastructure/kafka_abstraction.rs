@@ -6,6 +6,7 @@ use rdkafka::{
     Message,
 };
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -14,6 +15,8 @@ use uuid::Uuid;
 use crate::domain::{Account, AccountEvent};
 use crate::infrastructure::kafka_dlq::DeadLetterMessage;
 use anyhow::Result;
+use bincode;
+use chrono::DateTime;
 use chrono::Utc;
 use futures::StreamExt;
 use rdkafka::{
@@ -24,55 +27,27 @@ use rdkafka::{
     util::Timeout,
     Offset, TopicPartitionList,
 };
-use serde_json;
-use thiserror::Error;
 use tokio::time::timeout;
-use tracing::{error, info};
 
-#[derive(Debug, thiserror::Error)]
-pub enum BankingKafkaError {
-    #[error("Connection error: {0}")]
-    ConnectionError(String),
-    #[error("Producer error: {0}")]
-    ProducerError(String),
-    #[error("Consumer error: {0}")]
-    ConsumerError(String),
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
-    #[error("Deserialization error: {0}")]
-    DeserializationError(String),
-    #[error("Cache invalidation error: {0}")]
-    CacheInvalidationError(String),
-    #[error("Event processing error: {0}")]
-    EventProcessingError(String),
-    #[error("Configuration error: {0}")]
-    ConfigurationError(String),
-    #[error("Timeout error: {0}")]
-    TimeoutError(String),
-    #[error("Unknown error: {0}")]
-    Unknown(String),
-}
+// Custom module for bincode-compatible DateTime<Utc> serialization
+mod bincode_datetime {
+    use chrono::{DateTime, TimeZone, Utc};
+    use serde::de::Deserialize;
+    use serde::{self, Deserializer, Serializer};
 
-impl From<rdkafka::error::KafkaError> for BankingKafkaError {
-    fn from(error: rdkafka::error::KafkaError) -> Self {
-        match error {
-            rdkafka::error::KafkaError::ClientCreation(e) => {
-                BankingKafkaError::ConnectionError(e.to_string())
-            }
-            rdkafka::error::KafkaError::MessageProduction(e) => {
-                BankingKafkaError::ProducerError(e.to_string())
-            }
-            rdkafka::error::KafkaError::MessageConsumption(e) => {
-                BankingKafkaError::ConsumerError(e.to_string())
-            }
-            _ => BankingKafkaError::Unknown(error.to_string()),
-        }
+    pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_i64(dt.timestamp())
     }
-}
 
-impl From<serde_json::Error> for BankingKafkaError {
-    fn from(error: serde_json::Error) -> Self {
-        BankingKafkaError::SerializationError(error.to_string())
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let ts = i64::deserialize(deserializer)?;
+        Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
     }
 }
 
@@ -117,6 +92,82 @@ impl Default for KafkaConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum BankingKafkaError {
+    ConnectionError(String),
+    ProducerError(String),
+    ConsumerError(String),
+    SerializationError(String),
+    DeserializationError(String),
+    CacheInvalidationError(String),
+    EventProcessingError(String),
+    ConfigurationError(String),
+    TimeoutError(String),
+    Unknown(String),
+}
+
+impl std::fmt::Display for BankingKafkaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BankingKafkaError::ConnectionError(msg) => f
+                .write_str("Connection error: ")
+                .and_then(|_| f.write_str(msg)),
+            BankingKafkaError::ProducerError(msg) => f
+                .write_str("Producer error: ")
+                .and_then(|_| f.write_str(msg)),
+            BankingKafkaError::ConsumerError(msg) => f
+                .write_str("Consumer error: ")
+                .and_then(|_| f.write_str(msg)),
+            BankingKafkaError::SerializationError(msg) => f
+                .write_str("Serialization error: ")
+                .and_then(|_| f.write_str(msg)),
+            BankingKafkaError::DeserializationError(msg) => f
+                .write_str("Deserialization error: ")
+                .and_then(|_| f.write_str(msg)),
+            BankingKafkaError::CacheInvalidationError(msg) => f
+                .write_str("Cache invalidation error: ")
+                .and_then(|_| f.write_str(msg)),
+            BankingKafkaError::EventProcessingError(msg) => f
+                .write_str("Event processing error: ")
+                .and_then(|_| f.write_str(msg)),
+            BankingKafkaError::ConfigurationError(msg) => f
+                .write_str("Configuration error: ")
+                .and_then(|_| f.write_str(msg)),
+            BankingKafkaError::TimeoutError(msg) => f
+                .write_str("Timeout error: ")
+                .and_then(|_| f.write_str(msg)),
+            BankingKafkaError::Unknown(msg) => f
+                .write_str("Unknown error: ")
+                .and_then(|_| f.write_str(msg)),
+        }
+    }
+}
+
+impl std::error::Error for BankingKafkaError {}
+
+impl From<rdkafka::error::KafkaError> for BankingKafkaError {
+    fn from(error: rdkafka::error::KafkaError) -> Self {
+        match error {
+            rdkafka::error::KafkaError::ClientCreation(e) => {
+                BankingKafkaError::ConnectionError(e.to_string())
+            }
+            rdkafka::error::KafkaError::MessageProduction(e) => {
+                BankingKafkaError::ProducerError(e.to_string())
+            }
+            rdkafka::error::KafkaError::MessageConsumption(e) => {
+                BankingKafkaError::ConsumerError(e.to_string())
+            }
+            _ => BankingKafkaError::Unknown(error.to_string()),
+        }
+    }
+}
+
+impl From<bincode::Error> for BankingKafkaError {
+    fn from(error: bincode::Error) -> Self {
+        BankingKafkaError::SerializationError(error.to_string())
+    }
+}
+
 #[derive(Clone)]
 pub struct KafkaProducer {
     producer: Option<FutureProducer>,
@@ -154,7 +205,7 @@ impl KafkaProducer {
             return Ok(());
         }
 
-        let topic = format!("{}-events", self.config.topic_prefix);
+        let topic = "{}-events".to_string() + &(self.config.topic_prefix).to_string();
         let key = account_id.to_string();
 
         let batch = EventBatch {
@@ -164,8 +215,10 @@ impl KafkaProducer {
             timestamp: Utc::now(),
         };
 
-        let payload = serde_json::to_vec(&batch)
-            .map_err(|e| BankingKafkaError::SerializationError(e.to_string()))?;
+        let payload = bincode::serialize(&batch)?;
+
+        // Use modulo to ensure partition is within valid range (32 partitions: 0-31)
+        let partition = (account_id.as_u128() % 32) as i32;
 
         self.producer
             .as_ref()
@@ -174,11 +227,13 @@ impl KafkaProducer {
                 FutureRecord::to(&topic)
                     .key(&key)
                     .payload(&payload)
-                    .partition(account_id.as_u128() as i32),
+                    .partition(partition),
                 Duration::from_secs(5),
             )
             .await
-            .map_err(|(e, _)| BankingKafkaError::ProducerError(format!("{:?}", e)))?;
+            .map_err(|(e, _)| {
+                BankingKafkaError::ProducerError("{:?}".to_string() + &(e).to_string())
+            })?;
 
         Ok(())
     }
@@ -192,11 +247,13 @@ impl KafkaProducer {
             return Ok(());
         }
 
-        let topic = format!("{}-cache", self.config.topic_prefix);
+        let topic = "{}-cache".to_string() + &(self.config.topic_prefix).to_string();
         let key = account_id.to_string();
 
-        let payload = serde_json::to_vec(account)
-            .map_err(|e| BankingKafkaError::SerializationError(e.to_string()))?;
+        let payload = bincode::serialize(account)?;
+
+        // Use modulo to ensure partition is within valid range (32 partitions: 0-31)
+        let partition = (account_id.as_u128() % 32) as i32;
 
         self.producer
             .as_ref()
@@ -205,11 +262,13 @@ impl KafkaProducer {
                 FutureRecord::to(&topic)
                     .key(&key)
                     .payload(&payload)
-                    .partition(account_id.as_u128() as i32),
+                    .partition(partition),
                 Duration::from_secs(5),
             )
             .await
-            .map_err(|(e, _)| BankingKafkaError::ProducerError(format!("{:?}", e)))?;
+            .map_err(|(e, _)| {
+                BankingKafkaError::ProducerError("{:?}".to_string() + &(e).to_string())
+            })?;
 
         Ok(())
     }
@@ -222,11 +281,13 @@ impl KafkaProducer {
             return Ok(());
         }
 
-        let topic = format!("{}-dlq", self.config.topic_prefix);
+        let topic = "{}-dlq".to_string() + &(self.config.topic_prefix).to_string();
         let key = message.account_id.to_string();
 
-        let payload = serde_json::to_vec(message)
-            .map_err(|e| BankingKafkaError::SerializationError(e.to_string()))?;
+        let payload = bincode::serialize(message)?;
+
+        // Use modulo to ensure partition is within valid range (32 partitions: 0-31)
+        let partition = (message.account_id.as_u128() % 32) as i32;
 
         self.producer
             .as_ref()
@@ -235,11 +296,13 @@ impl KafkaProducer {
                 FutureRecord::to(&topic)
                     .key(&key)
                     .payload(&payload)
-                    .partition(message.account_id.as_u128() as i32),
+                    .partition(partition),
                 Duration::from_secs(5),
             )
             .await
-            .map_err(|(e, _)| BankingKafkaError::ProducerError(format!("{:?}", e)))?;
+            .map_err(|(e, _)| {
+                BankingKafkaError::ProducerError("{:?}".to_string() + &(e).to_string())
+            })?;
 
         Ok(())
     }
@@ -261,7 +324,7 @@ impl KafkaProducer {
             reason,
         };
 
-        let payload = serde_json::to_vec(&message)?;
+        let payload = bincode::serialize(&message)?;
         let topic = &self.config.cache_invalidation_topic;
 
         self.producer
@@ -274,7 +337,9 @@ impl KafkaProducer {
                 Timeout::After(Duration::from_secs(5)),
             )
             .await
-            .map_err(|(e, _)| BankingKafkaError::ProducerError(format!("{:?}", e)))?;
+            .map_err(|(e, _)| {
+                BankingKafkaError::ProducerError("{:?}".to_string() + &(e).to_string())
+            })?;
 
         Ok(())
     }
@@ -320,7 +385,7 @@ impl KafkaConsumer {
             return Ok(());
         }
 
-        let topic = format!("{}-events", self.config.topic_prefix);
+        let topic = "{}-events".to_string() + &(self.config.topic_prefix).to_string();
         self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
         Ok(())
     }
@@ -330,7 +395,17 @@ impl KafkaConsumer {
             return Ok(());
         }
 
-        let topic = format!("{}-cache", self.config.topic_prefix);
+        let topic = "{}-cache".to_string() + &(self.config.topic_prefix).to_string();
+        self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
+        Ok(())
+    }
+
+    pub async fn subscribe_to_dlq(&self) -> Result<(), BankingKafkaError> {
+        if !self.config.enabled || self.consumer.is_none() {
+            return Ok(());
+        }
+
+        let topic = "{}-dlq".to_string() + &(self.config.topic_prefix).to_string();
         self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
         Ok(())
     }
@@ -343,7 +418,7 @@ impl KafkaConsumer {
             return Ok(0);
         }
 
-        let topic = format!("{}-events", self.config.topic_prefix);
+        let topic = "{}-events".to_string() + &(self.config.topic_prefix).to_string();
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition(&topic, 0);
         self.consumer.as_ref().unwrap().assign(&tpl)?;
@@ -357,7 +432,7 @@ impl KafkaConsumer {
                     if let Some(key) = msg.key() {
                         if key == account_id.to_string().as_bytes() {
                             if let Some(payload) = msg.payload() {
-                                if let Ok(batch) = serde_json::from_slice::<EventBatch>(payload) {
+                                if let Ok(batch) = bincode::deserialize::<EventBatch>(payload) {
                                     version = batch.version;
                                 }
                             }
@@ -383,7 +458,7 @@ impl KafkaConsumer {
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
 
-                let batch: EventBatch = serde_json::from_slice(payload).map_err(|e| {
+                let batch: EventBatch = bincode::deserialize(payload).map_err(|e| {
                     BankingKafkaError::ConsumerError("Failed to deserialize message".to_string())
                 })?;
 
@@ -407,7 +482,7 @@ impl KafkaConsumer {
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
 
-                let account: Account = serde_json::from_slice(payload).map_err(|e| {
+                let account: Account = bincode::deserialize(payload).map_err(|e| {
                     BankingKafkaError::ConsumerError("Failed to deserialize message".to_string())
                 })?;
 
@@ -433,7 +508,7 @@ impl KafkaConsumer {
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
 
-                let message: CacheInvalidationMessage = serde_json::from_slice(payload)?;
+                let message: CacheInvalidationMessage = bincode::deserialize(payload)?;
                 Ok(Some(message))
             }
             Ok(Some(Err(e))) => Err(BankingKafkaError::ConsumerError(e.to_string())),
@@ -454,7 +529,7 @@ impl KafkaConsumer {
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
 
-                let dlq_message: DeadLetterMessage = serde_json::from_slice(payload)?;
+                let dlq_message: DeadLetterMessage = bincode::deserialize(payload)?;
                 Ok(Some(dlq_message))
             }
             Ok(Some(Err(e))) => Err(BankingKafkaError::ConsumerError(e.to_string())),
@@ -469,6 +544,7 @@ pub struct EventBatch {
     pub account_id: Uuid,
     pub events: Vec<AccountEvent>,
     pub version: i64,
+    #[serde(with = "bincode_datetime")]
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -476,6 +552,7 @@ pub struct EventBatch {
 pub struct CacheInvalidationMessage {
     pub account_id: Uuid,
     pub invalidation_type: CacheInvalidationType,
+    #[serde(with = "bincode_datetime")]
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub reason: String,
 }

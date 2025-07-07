@@ -189,7 +189,7 @@ pub struct RedisPoolConfig {
 impl Default for RedisPoolConfig {
     fn default() -> Self {
         Self {
-            min_connections: 50,
+            min_connections: 20,
             max_connections: 200,
             connection_timeout: Duration::from_secs(5),
             idle_timeout: Duration::from_secs(300),

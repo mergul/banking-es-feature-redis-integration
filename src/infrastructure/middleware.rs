@@ -1,23 +1,23 @@
 use crate::domain::Account;
 use anyhow::Result;
+use axum::{
+    http::{HeaderMap, Request, Response, StatusCode},
+    middleware::Next,
+};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use serde_json;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+use std::{collections::HashMap, io::Write};
 use tokio::sync::Semaphore;
+use tower::Service;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use validator::{Validate, ValidationError};
-use std::collections::HashMap;
-use axum::{
-    http::{Request, Response, HeaderMap, StatusCode},
-    middleware::Next,
-};
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tower::Service;
-use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
@@ -61,13 +61,14 @@ impl RateLimiter {
 
     pub async fn check_rate_limit(&self, client_id: &str) -> Result<bool> {
         let now = Instant::now();
-        let mut limit_info = self.limits.entry(client_id.to_string()).or_insert_with(|| {
-            RateLimitInfo {
-                requests: 0,
-                window_start: now,
-                semaphore: Arc::new(Semaphore::new(self.config.burst_size as usize)),
-            }
-        });
+        let mut limit_info =
+            self.limits
+                .entry(client_id.to_string())
+                .or_insert_with(|| RateLimitInfo {
+                    requests: 0,
+                    window_start: now,
+                    semaphore: Arc::new(Semaphore::new(self.config.burst_size as usize)),
+                });
 
         // Reset window if needed
         if now.duration_since(limit_info.window_start) >= self.config.window_size {
@@ -93,9 +94,8 @@ impl RateLimiter {
 
     pub fn cleanup_expired_limits(&self) {
         let now = Instant::now();
-        self.limits.retain(|_, info| {
-            now.duration_since(info.window_start) < self.config.window_size
-        });
+        self.limits
+            .retain(|_, info| now.duration_since(info.window_start) < self.config.window_size);
     }
 }
 
@@ -113,7 +113,7 @@ pub trait RequestValidationRule: Send + Sync + std::fmt::Debug {
 pub struct RequestContext {
     pub client_id: String,
     pub request_type: String,
-    pub payload: Value,
+    pub payload: String,
     pub headers: HeaderMap,
 }
 
@@ -169,20 +169,32 @@ impl RequestValidationRule for AccountCreationValidator {
             warnings: Vec::new(),
         };
 
+        // Parse JSON payload
+        let payload: serde_json::Value = match serde_json::from_str(&context.payload) {
+            Ok(p) => p,
+            Err(_) => {
+                result.is_valid = false;
+                result.errors.push("Payload must be valid JSON".to_string());
+                return result;
+            }
+        };
+
         // Validate required fields
-        if !context.payload.is_object() {
+        if !payload.is_object() {
             result.is_valid = false;
-            result.errors.push("Payload must be a JSON object".to_string());
+            result
+                .errors
+                .push("Payload must be a JSON object".to_string());
             return result;
         }
 
-        let payload = context.payload.as_object().unwrap();
+        let payload_obj = payload.as_object().unwrap();
 
         // Check owner_name
-        if !payload.contains_key("owner_name") {
+        if !payload_obj.contains_key("owner_name") {
             result.is_valid = false;
             result.errors.push("owner_name is required".to_string());
-        } else if let Some(name) = payload["owner_name"].as_str() {
+        } else if let Some(name) = payload_obj["owner_name"].as_str() {
             if name.is_empty() {
                 result.is_valid = false;
                 result.errors.push("owner_name cannot be empty".to_string());
@@ -190,13 +202,17 @@ impl RequestValidationRule for AccountCreationValidator {
         }
 
         // Check initial_balance
-        if !payload.contains_key("initial_balance") {
+        if !payload_obj.contains_key("initial_balance") {
             result.is_valid = false;
-            result.errors.push("initial_balance is required".to_string());
-        } else if let Some(balance) = payload["initial_balance"].as_f64() {
+            result
+                .errors
+                .push("initial_balance is required".to_string());
+        } else if let Some(balance) = payload_obj["initial_balance"].as_f64() {
             if balance < 0.0 {
                 result.is_valid = false;
-                result.errors.push("initial_balance cannot be negative".to_string());
+                result
+                    .errors
+                    .push("initial_balance cannot be negative".to_string());
             }
         }
 
@@ -216,34 +232,50 @@ impl RequestValidationRule for TransactionValidator {
             warnings: Vec::new(),
         };
 
+        // Parse JSON payload
+        let payload: serde_json::Value = match serde_json::from_str(&context.payload) {
+            Ok(p) => p,
+            Err(_) => {
+                result.is_valid = false;
+                result.errors.push("Payload must be valid JSON".to_string());
+                return result;
+            }
+        };
+
         // Validate required fields
-        if !context.payload.is_object() {
+        if !payload.is_object() {
             result.is_valid = false;
-            result.errors.push("Payload must be a JSON object".to_string());
+            result
+                .errors
+                .push("Payload must be a JSON object".to_string());
             return result;
         }
 
-        let payload = context.payload.as_object().unwrap();
+        let payload_obj = payload.as_object().unwrap();
 
         // Check account_id
-        if !payload.contains_key("account_id") {
+        if !payload_obj.contains_key("account_id") {
             result.is_valid = false;
             result.errors.push("account_id is required".to_string());
-        } else if let Some(id) = payload["account_id"].as_str() {
+        } else if let Some(id) = payload_obj["account_id"].as_str() {
             if let Err(_) = Uuid::parse_str(id) {
                 result.is_valid = false;
-                result.errors.push("account_id must be a valid UUID".to_string());
+                result
+                    .errors
+                    .push("account_id must be a valid UUID".to_string());
             }
         }
 
         // Check amount
-        if !payload.contains_key("amount") {
+        if !payload_obj.contains_key("amount") {
             result.is_valid = false;
             result.errors.push("amount is required".to_string());
-        } else if let Some(amount) = payload["amount"].as_f64() {
+        } else if let Some(amount) = payload_obj["amount"].as_f64() {
             if amount <= 0.0 {
                 result.is_valid = false;
-                result.errors.push("amount must be greater than zero".to_string());
+                result
+                    .errors
+                    .push("amount must be greater than zero".to_string());
             }
         }
 
@@ -267,7 +299,11 @@ impl RequestMiddleware {
 
     pub async fn process_request(&self, context: RequestContext) -> Result<ValidationResult> {
         // Check rate limit
-        if !self.rate_limiter.check_rate_limit(&context.client_id).await? {
+        if !self
+            .rate_limiter
+            .check_rate_limit(&context.client_id)
+            .await?
+        {
             return Ok(ValidationResult {
                 is_valid: false,
                 errors: vec!["Rate limit exceeded".to_string()],
@@ -285,7 +321,8 @@ impl RequestMiddleware {
         request_type: String,
         validator: Box<dyn RequestValidationRule + Send + Sync>,
     ) {
-        self.request_validator.register_validator(request_type, validator);
+        self.request_validator
+            .register_validator(request_type, validator);
     }
 }
 
@@ -293,4 +330,4 @@ impl Default for RequestMiddleware {
     fn default() -> Self {
         Self::new(RateLimitConfig::default())
     }
-} 
+}

@@ -1,22 +1,22 @@
 use crate::infrastructure::user_repository::{NewUser, User, UserRepository, UserRepositoryError};
 use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 use async_trait::async_trait;
 use axum::{
-    Json, RequestPartsExt, Router,
     extract::FromRequestParts,
-    http::{StatusCode, request::Parts},
+    http::{request::Parts, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
+    Json, RequestPartsExt, Router,
 };
 use axum_extra::{
+    headers::{authorization::Bearer, Authorization},
     TypedHeader,
-    headers::{Authorization, authorization::Bearer},
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc}; // use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use redis::{AsyncCommands, RedisError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -34,43 +34,68 @@ static KEYS: LazyLock<Keys> = LazyLock::new(|| {
     Keys::new(secret.as_bytes())
 });
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum AuthError {
-    #[error("Invalid credentials")]
     InvalidCredentials,
-    #[error("Token expired")]
     TokenExpired,
-    #[error("Invalid token")]
     InvalidToken,
-    #[error("Token blacklisted")]
     TokenBlacklisted,
-    #[error("Rate limit exceeded")]
     RateLimitExceeded,
-    #[error("User not found")]
     UserNotFound,
-    #[error("Password hash error: {0}")]
     PasswordHashError(String),
-    #[error("Redis error: {0}")]
-    RedisError(#[from] RedisError),
-    #[error("JWT error: {0}")]
-    JwtError(#[from] jsonwebtoken::errors::Error),
-    #[error("Internal error: {0}")]
+    RedisError(RedisError),
+    JwtError(jsonwebtoken::errors::Error),
     InternalError(String),
-    #[error("Wrong credentials")]
     WrongCredentials,
-    #[error("Missing credentials")]
     MissingCredentials,
-    #[error("Token creation error")]
     TokenCreation,
-    #[error("Username '{0}' already exists")]
     UsernameAlreadyExists(String),
-    #[error("Email '{0}' already exists")]
     EmailAlreadyExists(String),
-    #[error("User repository error: {0}")]
     UserRepositoryError(String),
-    #[error("Account is locked")]
     AccountLocked,
 }
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthError::InvalidCredentials => f.write_str("Invalid credentials"),
+            AuthError::TokenExpired => f.write_str("Token expired"),
+            AuthError::InvalidToken => f.write_str("Invalid token"),
+            AuthError::TokenBlacklisted => f.write_str("Token blacklisted"),
+            AuthError::RateLimitExceeded => f.write_str("Rate limit exceeded"),
+            AuthError::UserNotFound => f.write_str("User not found"),
+            AuthError::PasswordHashError(e) => f
+                .write_str("Password hash error: ")
+                .and_then(|_| f.write_str(e)),
+            AuthError::RedisError(e) => f
+                .write_str("Redis error: ")
+                .and_then(|_| f.write_str(&e.to_string())),
+            AuthError::JwtError(e) => f
+                .write_str("JWT error: ")
+                .and_then(|_| f.write_str(&e.to_string())),
+            AuthError::InternalError(e) => {
+                f.write_str("Internal error: ").and_then(|_| f.write_str(e))
+            }
+            AuthError::WrongCredentials => f.write_str("Wrong credentials"),
+            AuthError::MissingCredentials => f.write_str("Missing credentials"),
+            AuthError::TokenCreation => f.write_str("Token creation error"),
+            AuthError::UsernameAlreadyExists(u) => f
+                .write_str("Username '")
+                .and_then(|_| f.write_str(u))
+                .and_then(|_| f.write_str("' already exists")),
+            AuthError::EmailAlreadyExists(e) => f
+                .write_str("Email '")
+                .and_then(|_| f.write_str(e))
+                .and_then(|_| f.write_str("' already exists")),
+            AuthError::UserRepositoryError(e) => f
+                .write_str("User repository error: ")
+                .and_then(|_| f.write_str(e)),
+            AuthError::AccountLocked => f.write_str("Account is locked"),
+        }
+    }
+}
+
+impl std::error::Error for AuthError {}
 
 impl From<UserRepositoryError> for AuthError {
     fn from(err: UserRepositoryError) -> Self {
@@ -88,6 +113,19 @@ impl From<UserRepositoryError> for AuthError {
         }
     }
 }
+
+impl From<RedisError> for AuthError {
+    fn from(err: RedisError) -> Self {
+        AuthError::RedisError(err)
+    }
+}
+
+impl From<jsonwebtoken::errors::Error> for AuthError {
+    fn from(err: jsonwebtoken::errors::Error) -> Self {
+        AuthError::JwtError(err)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String, // username
@@ -424,7 +462,7 @@ impl AuthService {
     //     // Store reset token in Redis with expiration
     //     let mut conn = self.redis_client.get_async_connection().await?;
     //     conn.set_ex(
-    //         format!("reset_token:{}", user.id),
+    //         "reset_token:{}".to_string() + &(user.id).to_string(),
     //         &reset_token,
     //         self.config.access_token_expiry as u64,
     //     )
@@ -477,9 +515,9 @@ impl AuthService {
         expected_type: TokenType,
     ) -> Result<Claims, AuthError> {
         // Check if token is blacklisted
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
         let is_blacklisted: bool = conn
-            .get(format!("blacklist:{}", token))
+            .get("blacklist:{}".to_string() + &(token).to_string())
             .await
             .unwrap_or(false);
 
@@ -510,28 +548,37 @@ impl AuthService {
 
     pub async fn blacklist_token(&self, token: &str) -> Result<(), AuthError> {
         let claims = self.validate_token(token, TokenType::Access).await?;
-        let mut conn = self.redis_client.get_async_connection().await?;
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
         // Blacklist token until it expires
         let ttl = claims.exp - Utc::now().timestamp();
         if ttl > 0 {
-            conn.set_ex::<_, _, ()>(format!("blacklist:{}", token), "1", ttl as u64)
-                .await?;
+            conn.set_ex::<_, _, ()>(
+                "blacklist:{}".to_string() + &(token).to_string(),
+                "1",
+                ttl as u64,
+            )
+            .await?;
 
-            conn.expire::<_, ()>(format!("blacklist:{}", token), ttl as i64)
-                .await?;
+            conn.expire::<_, ()>(
+                "blacklist:{}".to_string() + &(token).to_string(),
+                ttl as i64,
+            )
+            .await?;
         }
 
         Ok(())
     }
 
     pub async fn check_rate_limit(&self, key: &str) -> Result<(), AuthError> {
-        let mut conn = self.redis_client.get_async_connection().await?;
-        let current: i64 = conn.incr(format!("rate_limit:{}", key), 1).await?;
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+        let current: i64 = conn
+            .incr("rate_limit:{}".to_string() + &(key).to_string(), 1)
+            .await?;
 
         if current == 1 {
             conn.expire::<_, ()>(
-                format!("rate_limit:{}", key),
+                "rate_limit:{}".to_string() + &(key).to_string(),
                 self.config.rate_limit_window as i64,
             )
             .await?;
@@ -579,7 +626,7 @@ where
         parts: &'a mut Parts,
         _state: &'b S,
     ) -> impl futures::Future<Output = Result<Self, <Self as FromRequestParts<S>>::Rejection>>
-    + std::marker::Send {
+           + std::marker::Send {
         async move {
             let TypedHeader(Authorization(bearer)) = parts
                 .extract::<TypedHeader<Authorization<Bearer>>>()
@@ -701,9 +748,36 @@ pub async fn authorize(Json(payload): Json<AuthPayload>) -> Result<Json<AuthBody
 }
 
 pub async fn protected(claims: Claims) -> Result<String, AuthError> {
-    Ok(format!(
-        "Welcome to the protected area :)\nYour data:\n{claims:?}",
-    ))
+    let mut s = String::from(
+        "Welcome to the protected area :)
+Your data:
+",
+    );
+    s.push_str("sub: ");
+    s.push_str(&claims.sub);
+    s.push('\n');
+    s.push_str("exp: ");
+    s.push_str(&claims.exp.to_string());
+    s.push('\n');
+    s.push_str("iat: ");
+    s.push_str(&claims.iat.to_string());
+    s.push('\n');
+    s.push_str("roles: ");
+    for role in &claims.roles {
+        s.push_str(&role.to_string());
+        s.push(' ');
+    }
+    s.push('\n');
+    s.push_str("token_type: ");
+    s.push_str(&claims.token_type.to_string());
+    s.push('\n');
+    s.push_str("jti: ");
+    s.push_str(&claims.jti);
+    s.push('\n');
+    s.push_str("company: ");
+    s.push_str(&claims.company);
+    s.push('\n');
+    Ok(s)
 }
 
 #[derive(Debug, Deserialize)]

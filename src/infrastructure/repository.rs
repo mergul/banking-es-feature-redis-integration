@@ -1,35 +1,37 @@
 use crate::domain::{Account, AccountError, AccountEvent};
 use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
-use crate::infrastructure::event_store::{EventPriority, EventStore, EventStoreTrait};
-use crate::infrastructure::kafka_abstraction::KafkaConfig;
+use crate::infrastructure::event_store::{
+    EventPriority, EventStore, EventStoreExt, EventStoreTrait,
+};
+use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaProducer};
 use crate::infrastructure::kafka_event_processor::KafkaEventProcessor;
 use crate::infrastructure::projections::ProjectionStore;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::Utc;
+use dashmap::DashMap;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::io::Write;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum RepositoryError {
-    #[error("Account not found: {0}")]
     NotFound(Uuid),
-    #[error("Version conflict: expected {expected}, found {actual}")]
     VersionConflict { expected: i64, actual: i64 },
-    #[error("Infrastructure error: {0}")]
-    InfrastructureError(#[from] anyhow::Error),
+    InfrastructureError(anyhow::Error),
 }
 
 #[async_trait]
 pub trait AccountRepositoryTrait: Send + Sync {
-    async fn create_account(&self, owner_name: String, initial_balance: Decimal)
-        -> Result<Account>;
-    async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>>;
+    async fn create_account(&self, owner_name: String) -> Result<Account>;
+    async fn get_account(&self, account_id: Uuid) -> Result<Account>;
     async fn deposit_money(&self, account_id: Uuid, amount: Decimal) -> Result<Account>;
     async fn withdraw_money(&self, account_id: Uuid, amount: Decimal) -> Result<Account>;
     async fn save_immediate(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()>;
@@ -65,9 +67,11 @@ struct RepositoryMetrics {
 #[derive(Clone)]
 pub struct AccountRepository {
     event_store: Arc<dyn EventStoreTrait + 'static>,
-    pending_events: Arc<Mutex<HashMap<Uuid, Vec<AccountEvent>>>>,
+    kafka_producer: Option<KafkaProducer>,
+    pending_events: Arc<DashMap<Uuid, Vec<AccountEvent>>>,
     account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Account>>>>,
     flush_interval: Duration,
+    max_batch_size: usize,
     metrics: Arc<RepositoryMetrics>,
 }
 
@@ -75,9 +79,11 @@ impl AccountRepository {
     pub fn new(event_store: Arc<dyn EventStoreTrait + 'static>) -> Self {
         let repo = Self {
             event_store,
-            pending_events: Arc::new(Mutex::new(HashMap::new())),
+            kafka_producer: None,
+            pending_events: Arc::new(DashMap::new()),
             account_cache: Arc::new(RwLock::new(HashMap::new())),
             flush_interval: Duration::from_millis(50),
+            max_batch_size: 1000,
             metrics: Arc::new(RepositoryMetrics::default()),
         };
 
@@ -87,32 +93,26 @@ impl AccountRepository {
         repo
     }
 
-    pub async fn save(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()> {
-        Ok(self
-            .event_store
-            .save_events(account.id, events, account.version)
-            .await?)
-    }
+    pub fn with_kafka_producer(
+        event_store: Arc<dyn EventStoreTrait + 'static>,
+        kafka_config: KafkaConfig,
+    ) -> Result<Self> {
+        let kafka_producer = KafkaProducer::new(kafka_config)?;
 
-    pub async fn get_by_id(&self, id: Uuid) -> Result<Option<Account>, AccountError> {
-        let stored_events = self.event_store.get_events(id, None).await.map_err(|e| {
-            error!("Failed to get events for account {}: {}", id, e);
-            AccountError::InfrastructureError(format!("Event store error: {}", e))
-        })?;
-        if stored_events.is_empty() {
-            return Ok(None);
-        }
-        let mut account = Account::default();
-        account.id = id;
-        for event in stored_events {
-            let account_event: AccountEvent =
-                serde_json::from_value(event.event_data).map_err(|e| {
-                    AccountError::InfrastructureError(format!("Deserialization error: {}", e))
-                })?;
+        let repo = Self {
+            event_store,
+            kafka_producer: Some(kafka_producer),
+            pending_events: Arc::new(DashMap::new()),
+            account_cache: Arc::new(RwLock::new(HashMap::new())),
+            flush_interval: Duration::from_millis(50),
+            max_batch_size: 1000,
+            metrics: Arc::new(RepositoryMetrics::default()),
+        };
 
-            account.apply_event(&account_event);
-        }
-        Ok(Some(account))
+        repo.start_batch_flush_task();
+        repo.start_metrics_reporter();
+
+        Ok(repo)
     }
 
     fn start_metrics_reporter(&self) {
@@ -152,43 +152,131 @@ impl AccountRepository {
 
 #[async_trait]
 impl AccountRepositoryTrait for AccountRepository {
-    async fn create_account(
-        &self,
-        owner_name: String,
-        initial_balance: Decimal,
-    ) -> Result<Account> {
-        // Implementation needed
-        unimplemented!()
+    async fn create_account(&self, owner_name: String) -> Result<Account> {
+        let account_id = Uuid::new_v4();
+        let initial_balance = Decimal::ZERO;
+        let account = Account::new(account_id, owner_name.clone(), initial_balance)?;
+        let event = AccountEvent::AccountCreated {
+            account_id,
+            owner_name,
+            initial_balance,
+        };
+        self.save_immediate(&account, vec![event]).await?;
+        Ok(account)
     }
 
-    async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>> {
-        // Implementation needed
-        unimplemented!()
+    async fn get_account(&self, account_id: Uuid) -> Result<Account> {
+        self.get_by_id(account_id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
+            .ok_or_else(|| anyhow::anyhow!(AccountError::NotFound))
     }
 
     async fn deposit_money(&self, account_id: Uuid, amount: Decimal) -> Result<Account> {
-        // Implementation needed
-        unimplemented!()
+        let mut account = self
+            .get_by_id(account_id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
+            .ok_or_else(|| anyhow::anyhow!(AccountError::NotFound))?;
+
+        let event = AccountEvent::MoneyDeposited {
+            account_id,
+            amount,
+            transaction_id: Uuid::new_v4(),
+        };
+
+        self.save_immediate(&account, vec![event.clone()]).await?;
+
+        account.apply_event(&event);
+
+        Ok(account)
     }
 
     async fn withdraw_money(&self, account_id: Uuid, amount: Decimal) -> Result<Account> {
-        // Implementation needed
-        unimplemented!()
+        let mut account = self
+            .get_by_id(account_id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
+            .ok_or_else(|| anyhow::anyhow!(AccountError::NotFound))?;
+
+        let event = AccountEvent::MoneyWithdrawn {
+            account_id,
+            amount,
+            transaction_id: Uuid::new_v4(),
+        };
+
+        self.save_immediate(&account, vec![event.clone()]).await?;
+
+        account.apply_event(&event);
+
+        Ok(account)
     }
 
     async fn save_immediate(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()> {
-        Ok(self
-            .event_store
-            .save_events(account.id, events, account.version)
-            .await?)
+        // First save events to event store
+        self.event_store
+            .save_events(account.id, events.clone(), account.version)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        // Then publish events to Kafka if producer is available
+        if let Some(producer) = &self.kafka_producer {
+            if let Err(e) = producer
+                .send_event_batch(account.id, events.clone(), account.version)
+                .await
+            {
+                error!(
+                    "Failed to publish events to Kafka for account {}",
+                    account.id
+                );
+                // Don't fail the operation if Kafka publishing fails, just log the error
+            } else {
+                info!(
+                    "Successfully published {} events to Kafka for account {}",
+                    events.len(),
+                    account.id
+                );
+            }
+        }
+
+        Ok(())
     }
 
     async fn save(&self, account: &Account, events: Vec<AccountEvent>) -> Result<()> {
-        self.save(account, events).await
+        self.pending_events
+            .entry(account.id)
+            .or_insert_with(Vec::new)
+            .extend(events);
+        Ok(())
     }
 
     async fn get_by_id(&self, id: Uuid) -> Result<Option<Account>, AccountError> {
-        self.get_by_id(id).await
+        let stored_events = self.event_store.get_events(id, None).await.map_err(|e| {
+            error!("Failed to get events for account {}: {}", id, e);
+            AccountError::InfrastructureError("Event store error: ".to_string() + &e.to_string())
+        })?;
+        if stored_events.is_empty() {
+            return Ok(None);
+        }
+        let mut account = Account {
+            id,
+            owner_name: String::new(),
+            balance: Decimal::ZERO,
+            is_active: true,
+            version: 0,
+        };
+        for event in stored_events {
+            let account_event: AccountEvent =
+                bincode::deserialize(&event.event_data).map_err(|e| {
+                    AccountError::InfrastructureError(
+                        "Deserialization error: ".to_string() + &e.to_string(),
+                    )
+                })?;
+
+            account.apply_event(&account_event);
+            account.version = event.version;
+        }
+        Ok(Some(account))
     }
 
     async fn save_batched(
@@ -200,16 +288,68 @@ impl AccountRepositoryTrait for AccountRepository {
         Ok(self
             .event_store
             .save_events(account_id, events, expected_version)
-            .await?)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?)
     }
 
     async fn flush_all(&self) -> Result<()> {
-        // If you have a flush method in KafkaEventProcessor, call it here. Otherwise, this can be a no-op.
+        let mut all_events = Vec::new();
+        for entry in self.pending_events.iter() {
+            all_events.push((entry.key().clone(), entry.value().clone()));
+        }
+        self.pending_events.clear();
+        for (account_id, events) in all_events {
+            if let Err(e) = self.event_store.save_events(account_id, events, 0).await {
+                error!("Failed to flush events for account {}: {}", account_id, e);
+            }
+        }
         Ok(())
     }
 
     fn start_batch_flush_task(&self) {
-        // If you want to periodically flush Kafka, implement it here. Otherwise, this can be a no-op.
+        let pending_events = Arc::clone(&self.pending_events);
+        let event_store = Arc::clone(&self.event_store);
+        let flush_interval = self.flush_interval;
+        let max_batch_size = self.max_batch_size;
+        let metrics = Arc::clone(&self.metrics);
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(flush_interval);
+            loop {
+                interval.tick().await;
+                let mut batch = Vec::new();
+                for entry in pending_events.iter() {
+                    for event in entry.value().iter() {
+                        batch.push((*entry.key(), event.clone()));
+                    }
+                }
+                pending_events.clear();
+                if !batch.is_empty() {
+                    for chunk in batch.chunks(max_batch_size) {
+                        let mut grouped: HashMap<Uuid, Vec<AccountEvent>> = HashMap::new();
+                        for (account_id, event) in chunk.iter() {
+                            grouped.entry(*account_id).or_default().push(event.clone());
+                        }
+                        for (account_id, events) in grouped {
+                            if let Err(e) = event_store.save_events(account_id, events, 0).await {
+                                error!("Failed to flush events for account {}: {}", account_id, e);
+                                metrics
+                                    .errors
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            } else {
+                                metrics
+                                    .batch_flushes
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                metrics.events_processed.fetch_add(
+                                    chunk.len() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 

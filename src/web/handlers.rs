@@ -29,13 +29,11 @@ use uuid::Uuid;
 
 use crate::domain::{AccountCommand, AccountError};
 use crate::infrastructure::{
-    auth::{
-        AuthConfig, AuthService, Claims, LoginRequest, LoginResponse, LogoutRequest,
-        PasswordResetResponse, UserRole,
-    },
+    auth::{AuthConfig, AuthService, Claims, LoginRequest, LoginResponse, LogoutRequest, UserRole},
     cache_service::{CacheConfig, CacheService, EvictionPolicy},
     event_store::{EventStore, EventStoreConfig, DB_POOL},
     kafka_abstraction::KafkaConfig,
+    logging::get_log_stats,
     middleware::{
         AccountCreationValidator, RequestContext, RequestMiddleware, TransactionValidator,
     },
@@ -104,15 +102,28 @@ pub struct RegisterRequest {
     pub roles: Vec<UserRole>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TransactionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccountsResponse {
+    pub accounts: Vec<AccountProjection>,
+}
+
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn create_account(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<CreateAccountRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let headers = HeaderMap::new();
     let ctx = create_request_context(
-        get_client_id(&HeaderMap::new()),
+        get_client_id(&headers),
         "create_account".to_string(),
-        serde_json::to_value(&payload).unwrap(),
-        HeaderMap::new(),
+        serde_json::to_string(&payload).unwrap(),
+        headers,
     );
     let validation = service.middleware.process_request(ctx).await;
     if let Ok(result) = validation {
@@ -132,6 +143,7 @@ pub async fn create_account(
     }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn get_account(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Path(id): Path<Uuid>,
@@ -149,6 +161,7 @@ pub async fn get_account(
     }
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn deposit_money(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Path(id): Path<Uuid>,
@@ -158,9 +171,13 @@ pub async fn deposit_money(
         .deposit_money(id, payload.amount)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(StatusCode::OK)
+    Ok(Json(TransactionResponse {
+        success: true,
+        message: "Deposit successful".to_string(),
+    }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn withdraw_money(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Path(id): Path<Uuid>,
@@ -170,14 +187,18 @@ pub async fn withdraw_money(
         .withdraw_money(id, payload.amount)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(StatusCode::OK)
+    Ok(Json(TransactionResponse {
+        success: true,
+        message: "Withdrawal successful".to_string(),
+    }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn get_all_accounts(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
-) -> Result<Json<Vec<AccountProjection>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<AccountsResponse>, (StatusCode, Json<ErrorResponse>)> {
     match service.get_all_accounts().await {
-        Ok(accounts) => Ok(Json(accounts)),
+        Ok(accounts) => Ok(Json(AccountsResponse { accounts })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -187,6 +208,7 @@ pub async fn get_all_accounts(
     }
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn get_account_transactions(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Path(account_id): Path<Uuid>,
@@ -202,50 +224,56 @@ pub async fn get_account_transactions(
     }
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn health_check() -> impl IntoResponse {
-    StatusCode::OK
+    Json(serde_json::json!({ "status": "healthy" }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn metrics(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let metrics = serde_json::json!({
-        "available_request_permits": service.semaphore.available_permits(),
-        "max_requests_per_second": service.max_requests_per_second,
-    });
-
-    Ok(Json(metrics))
+    let metrics = service.get_metrics();
+    Ok(Json(serde_json::json!({
+        "commands_processed": metrics.commands_processed.load(std::sync::atomic::Ordering::Relaxed),
+        "commands_failed": metrics.commands_failed.load(std::sync::atomic::Ordering::Relaxed),
+        "projection_updates": metrics.projection_updates.load(std::sync::atomic::Ordering::Relaxed),
+        "cache_hits": metrics.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+        "cache_misses": metrics.cache_misses.load(std::sync::atomic::Ordering::Relaxed),
+    })))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead. Auth logic might be centralized or use CQRS patterns too.")]
 pub async fn login(
     State((_, auth_service)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    match auth_service
+    let response = auth_service
         .login(&payload.username, &payload.password)
         .await
-    {
-        Ok(token) => Ok(Json(token)),
-        Err(e) => Err((StatusCode::UNAUTHORIZED, e.to_string())),
-    }
+        .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+    Ok(Json(response))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead. Auth logic might be centralized or use CQRS patterns too.")]
 pub async fn logout(
     State((_, auth_service)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<LogoutRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    match auth_service.blacklist_token(&payload.token).await {
-        Ok(_) => Ok(StatusCode::OK),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-    }
+    auth_service
+        .blacklist_token(&payload.token)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "message": "Successfully logged out"
+    })))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn batch_transactions(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(request): Json<BatchTransactionRequest>,
 ) -> Result<Json<BatchTransactionResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let _permit = service.semaphore.acquire().await.unwrap();
-
     let mut successful = 0;
     let mut failed = 0;
     let mut errors = Vec::new();
@@ -262,18 +290,24 @@ pub async fn batch_transactions(
                     .withdraw_money(transaction.account_id, transaction.amount)
                     .await
             }
-            _ => Err(AccountError::InvalidAmount(transaction.amount)),
+            _ => {
+                errors
+                    .push("Invalid transaction type: ".to_string() + &transaction.transaction_type);
+                failed += 1;
+                continue;
+            }
         };
 
         match result {
-            Ok(()) => successful += 1,
+            Ok(_) => successful += 1,
             Err(e) => {
+                errors.push(
+                    "Transaction failed for account ".to_string()
+                        + &transaction.account_id.to_string()
+                        + ": "
+                        + &e.to_string(),
+                );
                 failed += 1;
-                errors.push(format!(
-                    "Account {}: {}",
-                    transaction.account_id,
-                    e.to_string()
-                ));
             }
         }
     }
@@ -285,11 +319,12 @@ pub async fn batch_transactions(
     }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead. Auth logic might be centralized or use CQRS patterns too.")]
 pub async fn register(
     State((_, auth_service)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    match auth_service
+    auth_service
         .register_user(
             &payload.username,
             &payload.email,
@@ -297,15 +332,15 @@ pub async fn register(
             payload.roles,
         )
         .await
-    {
-        Ok(user) => Ok(Json(user)),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
-    }
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "message": "User registered successfully"
+    })))
 }
 
 fn get_client_id(headers: &HeaderMap) -> String {
     headers
-        .get("X-Client-ID")
+        .get("x-client-id")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
         .to_string()
@@ -314,7 +349,7 @@ fn get_client_id(headers: &HeaderMap) -> String {
 fn create_request_context(
     client_id: String,
     request_type: String,
-    payload: serde_json::Value,
+    payload: String,
     headers: HeaderMap,
 ) -> RequestContext {
     RequestContext {
@@ -322,5 +357,34 @@ fn create_request_context(
         request_type,
         payload,
         headers,
+    }
+}
+
+/// Get log statistics
+#[deprecated(note = "Consider moving to a dedicated operational/admin endpoint if needed, or use centralized logging platform.")]
+pub async fn get_log_statistics() -> Result<Json<serde_json::Value>, StatusCode> {
+    match get_log_stats("logs") {
+        Ok(stats) => {
+            let response = serde_json::json!({
+                "total_files": stats.total_files,
+                "total_size_bytes": stats.total_size,
+                "total_size_mb": stats.total_size_mb(),
+                "total_size_gb": stats.total_size_gb(),
+                "files_last_24h": stats.files_last_24h,
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            });
+
+            // info!(
+            //     "Log statistics requested: {} files, {:.2} MB",
+            //     stats.total_files,
+            //     stats.total_size_mb()
+            // );
+
+            Ok(Json(response))
+        }
+        Err(e) => {
+            // error!("Failed to get log statistics: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }

@@ -19,4 +19,4 @@ impl Default for AppConfig {
             port: 3000,
         }
     }
-} 
+}

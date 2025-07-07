@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod cache_service;
 pub mod config;
+pub mod connection_pool_monitor;
+pub mod deadlock_detector;
 pub mod event_store;
 pub mod init;
 pub mod kafka_abstraction;
@@ -12,6 +14,7 @@ pub mod kafka_recovery;
 pub mod kafka_recovery_strategies;
 pub mod kafka_tracing;
 pub mod l1_cache_updater;
+pub mod logging;
 pub mod middleware;
 pub mod projections;
 pub mod rate_limiter;
@@ -19,7 +22,11 @@ pub mod redis_abstraction;
 pub mod repository;
 pub mod scaling;
 pub mod sharding;
+pub mod stuck_operation_diagnostic;
+pub mod timeout_manager;
+pub mod troubleshooting;
 pub mod user_repository;
+pub mod outbox; // Added
 
 pub use auth::*;
 pub use cache_service::*;
@@ -45,3 +52,4 @@ pub use scaling::*;
 pub use sharding::*;
 pub use user_repository::*;
 pub use user_repository::{NewUser, User, UserRepository, UserRepositoryError}; // Added re-export
+pub use outbox::{OutboxMessage, PersistedOutboxMessage, OutboxRepositoryTrait, PostgresOutboxRepository}; // Added PostgresOutboxRepository

@@ -10,10 +10,15 @@ use crate::infrastructure::kafka_monitoring::{MonitoringDashboard, MonitoringDas
 use crate::infrastructure::kafka_recovery::{KafkaRecovery, KafkaRecoveryTrait};
 use crate::infrastructure::kafka_recovery_strategies::{RecoveryStrategies, RecoveryStrategy};
 use crate::infrastructure::kafka_tracing::{KafkaTracing, KafkaTracingTrait};
-use crate::infrastructure::projections::{ProjectionStore, ProjectionStoreTrait};
+use crate::infrastructure::projections::{
+    AccountProjection, ProjectionStore, ProjectionStoreTrait,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use chrono;
 use rdkafka::error::KafkaError;
+use rust_decimal::Decimal;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -34,30 +39,89 @@ pub struct KafkaEventProcessor {
     consumer: KafkaConsumer,
     event_store: Arc<dyn EventStoreTrait + Send + Sync>,
     projections: Arc<dyn ProjectionStoreTrait + Send + Sync>,
-    dlq: Arc<dyn DeadLetterQueueTrait + Send + Sync>,
-    recovery: Arc<dyn KafkaRecoveryTrait + Send + Sync>,
+    dlq: Arc<DeadLetterQueue>,
+    recovery: Arc<KafkaRecovery>,
     recovery_strategies: Arc<RecoveryStrategies>,
     metrics: Arc<KafkaMetrics>,
     monitoring: Arc<dyn MonitoringDashboardTrait + Send + Sync>,
     tracing: Arc<dyn KafkaTracingTrait + Send + Sync>,
     cache_service: Arc<dyn CacheServiceTrait + Send + Sync>,
     processing_state: Arc<RwLock<ProcessingState>>,
+    retry_config: RetryConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct RetryConfig {
+    pub max_attempts: u32,
+    pub delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            delay_ms: 100,
+        }
+    }
 }
 
 impl KafkaEventProcessor {
+    async fn execute_with_retry<F, Fut, T, E>(
+        &self,
+        operation_name: &str,
+        operation: F,
+    ) -> Result<T, anyhow::Error>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display + std::error::Error + Send + Sync + 'static,
+    {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match operation().await {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    if attempts >= self.retry_config.max_attempts {
+                        error!(
+                            "Operation '{}' failed after {} attempts: {}",
+                            operation_name, attempts, e
+                        );
+                        return Err(anyhow::anyhow!(e).context(format!(
+                            "Operation '{}' ultimately failed after {} attempts",
+                            operation_name, attempts
+                        )));
+                    }
+                    warn!(
+                        "Operation '{}' failed (attempt {}/{}): {}. Retrying in {}ms...",
+                        operation_name,
+                        attempts,
+                        self.retry_config.max_attempts,
+                        e,
+                        self.retry_config.delay_ms
+                    );
+                    sleep(Duration::from_millis(self.retry_config.delay_ms)).await;
+                }
+            }
+        }
+    }
+
     pub fn new(
         config: KafkaConfig,
         event_store: &Arc<dyn EventStoreTrait + Send + Sync>,
         projections: &Arc<dyn ProjectionStoreTrait + Send + Sync>,
         cache_service: &Arc<dyn CacheServiceTrait + Send + Sync>,
+        retry_config: RetryConfig,
     ) -> Result<Self> {
         let metrics = Arc::new(KafkaMetrics::default());
         let producer = KafkaProducer::new(config.clone())?;
         let consumer = KafkaConsumer::new(config.clone())?;
 
+        let dlq_consumer = KafkaConsumer::new(config.clone())?;
+
         let dlq = Arc::new(DeadLetterQueue::new(
             producer.clone(),
-            consumer.clone(),
+            dlq_consumer,
             metrics.clone(),
             3,
             Duration::from_secs(1),
@@ -96,18 +160,17 @@ impl KafkaEventProcessor {
             tracing,
             cache_service: cache_service.clone(),
             processing_state: Arc::new(RwLock::new(ProcessingState::default())),
+            retry_config,
         })
     }
 
     pub async fn start_processing(&self) -> Result<()> {
-        // Initialize tracing
-        self.tracing
-            .init_tracing()
-            .map_err(|e| anyhow::anyhow!("Failed to initialize tracing: {}", e))?;
+        self.tracing.init_tracing().map_err(|e| {
+            anyhow::Error::msg("Failed to initialize tracing: ".to_string() + &e.to_string())
+        })?;
 
         self.consumer.subscribe_to_events().await?;
 
-        // Start DLQ processing in background
         let dlq = self.dlq.clone();
         tokio::spawn(async move {
             if let Err(e) = dlq.process_dlq().await {
@@ -115,7 +178,6 @@ impl KafkaEventProcessor {
             }
         });
 
-        // Start monitoring in background
         let mut monitoring = self.monitoring.clone();
         tokio::spawn(async move {
             loop {
@@ -157,23 +219,23 @@ impl KafkaEventProcessor {
                             self.metrics
                                 .processing_errors
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            self.tracing
-                                .trace_error(&anyhow::anyhow!("{}", e), "batch_processing");
+                            self.tracing.trace_error(
+                                &anyhow::Error::msg(e.to_string()),
+                                "batch_processing",
+                            );
 
-                            // Send to DLQ
                             self.dlq
                                 .send_to_dlq(
                                     batch.account_id,
                                     batch.events,
                                     batch.version,
-                                    format!("Batch processing failed: {}", e),
+                                    "Batch processing failed: ".to_string() + &e.to_string(),
                                 )
                                 .await?;
                         }
                     }
                 }
                 Ok(None) => {
-                    // No messages available, continue polling
                     continue;
                 }
                 Err(e) => {
@@ -182,20 +244,17 @@ impl KafkaEventProcessor {
                         .consume_errors
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.tracing
-                        .trace_error(&anyhow::anyhow!("{}", e), "kafka_polling");
+                        .trace_error(&anyhow::Error::msg(e.to_string()), "kafka_polling");
 
-                    // If we encounter persistent errors, trigger recovery
                     if self.should_trigger_recovery().await {
                         if let Err(e) = self.recovery.start_recovery().await {
                             error!("Recovery failed: {}", e);
                             self.tracing
-                                .trace_error(&anyhow::anyhow!("{}", e), "recovery");
+                                .trace_error(&anyhow::Error::msg(e.to_string()), "recovery");
                         }
                     }
                 }
             }
-
-            // Record metrics periodically
             self.tracing.trace_metrics();
             self.tracing.trace_performance_metrics();
         }
@@ -204,53 +263,156 @@ impl KafkaEventProcessor {
     async fn process_batch(&self, batch: EventBatch) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        // Save events to event store
-        self.event_store
-            .save_events(batch.account_id, batch.events.clone(), batch.version)
-            .await?;
-
-        // Convert events to versioned format
         let versioned_events: Vec<(i64, AccountEvent)> = batch
             .events
             .iter()
             .enumerate()
-            .map(|(i, event)| (batch.version + i as i64, event.clone()))
+            .map(|(i, event)| {
+                (
+                    batch.version - batch.events.len() as i64 + 1 + i as i64,
+                    event.clone(),
+                )
+            })
             .collect();
 
-        // Cache the events
         self.cache_service
             .set_account_events(batch.account_id, &versioned_events, None)
             .await?;
 
-        // Get account from projections and apply latest events
-        let account = self.projections.get_account(batch.account_id).await?;
-        if let Some(mut account_proj) = account {
-            // Apply latest events to get final state
-            for event in &batch.events {
-                account_proj = account_proj.apply_event(event)?;
-            }
+        let existing_projection_opt = self.projections.get_account(batch.account_id).await?;
 
-            // Convert projection to account with updated state
-            let account = Account {
-                id: account_proj.id,
-                owner_name: account_proj.owner_name,
-                balance: account_proj.balance,
-                is_active: account_proj.is_active,
-                version: batch.version + batch.events.len() as i64,
+        let mut account_projection_to_update: AccountProjection;
+        let mut process_account_state_related_updates = true;
+
+        if let Some(existing_proj) = existing_projection_opt {
+            if existing_proj.version.unwrap_or(0) >= batch.version {
+                info!(
+                    "Skipping account projection update for account {} (batch version {}, projection version {}). Events likely already processed.",
+                    batch.account_id, batch.version, existing_proj.version.unwrap_or(0)
+                );
+                process_account_state_related_updates = false;
+                // Although we skip DB update, we use the existing projection for any potential (though unlikely needed) downstream cache updates.
+                account_projection_to_update = existing_proj;
+            } else {
+                let mut current_proj = existing_proj.clone();
+                for event in &batch.events {
+                    current_proj = current_proj.apply_event(event)?;
+                }
+                current_proj.version = Some(batch.version);
+                current_proj.updated_at = chrono::Utc::now();
+                account_projection_to_update = current_proj;
+            }
+        } else {
+            account_projection_to_update = AccountProjection {
+                id: batch.account_id,
+                owner_name: "".to_string(),
+                balance: Decimal::ZERO,
+                is_active: false,
+                version: Some(0),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            for event in &batch.events {
+                account_projection_to_update = account_projection_to_update.apply_event(event)?;
+            }
+            account_projection_to_update.version = Some(batch.version);
+            account_projection_to_update.updated_at = chrono::Utc::now();
+            // If it's an AccountCreated event, apply_event should set created_at.
+            if account_projection_to_update.created_at.timestamp_millis()
+                == chrono::Utc::now().timestamp_millis()
+            {
+                if let Some(AccountEvent::AccountCreated { .. }) = batch.events.first() {
+                    // apply_event should handle this. If not, this is a fallback.
+                    // This assumes the projection's created_at is set by the event.
+                }
+            }
+        }
+
+        if process_account_state_related_updates {
+            self.projections.upsert_accounts_batch(vec![account_projection_to_update.clone()]).await.map_err(|e| {
+                error!("CRITICAL: Failed to upsert account projection for {}: {}. Batch will be sent to DLQ.", batch.account_id, e);
+                anyhow::anyhow!(e)
+            })?;
+            info!(
+                "Successfully upserted account projection for account {}",
+                batch.account_id
+            );
+
+            let final_account_domain_state = Account {
+                id: account_projection_to_update.id,
+                owner_name: account_projection_to_update.owner_name.clone(),
+                balance: account_projection_to_update.balance,
+                is_active: account_projection_to_update.is_active,
+                version: account_projection_to_update.version.unwrap_or(0),
             };
 
-            // Cache the updated account
             self.cache_service
-                .set_account(&account, Some(Duration::from_secs(3600)))
+                .set_account(&final_account_domain_state, Some(Duration::from_secs(3600)))
                 .await?;
 
-            // Send cache update with final state
-            self.producer
-                .send_cache_update(batch.account_id, &account)
-                .await?;
+            if let Err(e) = self
+                .producer
+                .send_cache_update(batch.account_id, &final_account_domain_state)
+                .await
+            {
+                warn!(
+                    "Non-fatal: Failed to send Kafka cache update for account {}: {}",
+                    batch.account_id, e
+                );
+            }
+
             self.metrics
                 .cache_updates
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        let mut transaction_projections = Vec::new();
+        for event in &batch.events {
+            match event {
+                AccountEvent::MoneyDeposited {
+                    transaction_id,
+                    amount,
+                    ..
+                } => {
+                    transaction_projections.push(
+                        crate::infrastructure::projections::TransactionProjection {
+                            id: *transaction_id,
+                            account_id: batch.account_id,
+                            transaction_type: "MoneyDeposited".to_string(),
+                            amount: *amount,
+                            timestamp: chrono::Utc::now(),
+                        },
+                    );
+                }
+                AccountEvent::MoneyWithdrawn {
+                    transaction_id,
+                    amount,
+                    ..
+                } => {
+                    transaction_projections.push(
+                        crate::infrastructure::projections::TransactionProjection {
+                            id: *transaction_id,
+                            account_id: batch.account_id,
+                            transaction_type: "MoneyWithdrawn".to_string(),
+                            amount: *amount,
+                            timestamp: chrono::Utc::now(),
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        if !transaction_projections.is_empty() {
+            self.projections.insert_transactions_batch(transaction_projections.clone()).await.map_err(|e| {
+                error!("CRITICAL: Failed to insert transaction projections for {}: {}. Batch will be sent to DLQ.", batch.account_id, e);
+                anyhow::anyhow!(e)
+            })?;
+            info!(
+                "Successfully processed {} transaction projections for account {}",
+                transaction_projections.len(),
+                batch.account_id
+            );
         }
 
         self.metrics.processing_latency.fetch_add(
@@ -267,8 +429,6 @@ impl KafkaEventProcessor {
             .metrics
             .consumer_lag
             .load(std::sync::atomic::Ordering::Relaxed);
-
-        // Trigger recovery if error rate is high or consumer lag is significant
         error_rate > 0.1 || consumer_lag > 1000
     }
 
@@ -298,7 +458,7 @@ impl KafkaEventProcessor {
         strategy: RecoveryStrategy,
         account_id: Option<Uuid>,
     ) -> Result<()> {
-        let strategy_str = format!("{:?}", strategy);
+        let strategy_str = "{:?}".to_string() + &(strategy).to_string();
         self.tracing
             .trace_recovery_operation(&strategy_str, account_id, "started");
 
@@ -314,8 +474,8 @@ impl KafkaEventProcessor {
             }
             Err(e) => {
                 self.tracing.trace_error(
-                    &anyhow::anyhow!("{}", e),
-                    &format!("recovery_strategy_{}", strategy_str),
+                    &anyhow::Error::msg(e.to_string()),
+                    &("recovery_strategy_".to_string() + &strategy_str),
                 );
                 Err(e)
             }

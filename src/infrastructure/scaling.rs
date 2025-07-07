@@ -1,11 +1,13 @@
 use super::config::AppConfig;
 use crate::infrastructure::redis_abstraction::{RedisClient, RedisClientTrait};
 use anyhow::Result;
+use bincode;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use redis;
 use redis::Client;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -15,6 +17,28 @@ use uuid::Uuid;
 
 pub type ShardId = u32;
 
+// Custom module for bincode-compatible DateTime<Utc> serialization
+mod bincode_datetime {
+    use chrono::{DateTime, TimeZone, Utc};
+    use serde::de::Deserialize;
+    use serde::{self, Deserializer, Serializer};
+
+    pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_i64(dt.timestamp())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let ts = i64::deserialize(deserializer)?;
+        Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInstance {
     pub id: String,
@@ -23,6 +47,7 @@ pub struct ServiceInstance {
     pub status: InstanceStatus,
     pub metrics: InstanceMetrics,
     pub shard_assignments: Vec<ShardId>,
+    #[serde(with = "bincode_datetime")]
     pub last_heartbeat: DateTime<Utc>,
 }
 
@@ -95,8 +120,8 @@ impl ScalingManager {
 
     pub async fn register_instance(&self, instance: ServiceInstance) -> Result<()> {
         let instance_id = instance.id.clone();
-        let key = format!("instance:{}", instance_id);
-        let value = serde_json::to_string(&instance)?;
+        let key = "instance:{}".to_string() + &(instance_id).to_string();
+        let value = bincode::serialize(&instance)?;
 
         let mut conn = self.redis_client.get_connection().await?;
         redis::cmd("SETEX")
@@ -120,8 +145,8 @@ impl ScalingManager {
             instance.metrics = metrics;
             instance.last_heartbeat = Utc::now();
 
-            let key = format!("instance:{}", instance_id);
-            let value = serde_json::to_string(&*instance)?;
+            let key = "instance:{}".to_string() + &(instance_id).to_string();
+            let value = bincode::serialize(&*instance)?;
 
             let mut conn = self.redis_client.get_connection().await?;
             redis::cmd("SETEX")
@@ -221,7 +246,9 @@ impl ScalingManager {
             info!("Scaling down: Removing instance {}", instance.id);
             Ok(())
         } else {
-            Err(anyhow::anyhow!("No active instance found to scale down"))
+            Err(anyhow::Error::msg(
+                "No active instance found to scale down".to_string(),
+            ))
         }
     }
 
@@ -241,7 +268,7 @@ impl ScalingManager {
 
         for instance_id in failed_instances {
             if let Some(instance) = self.instances.remove(&instance_id) {
-                warn!("Removing failed instance: {}", instance_id);
+                info!("Removing failed instance: {}", instance_id);
 
                 // In a real implementation, this would trigger cleanup in your container orchestration system
             }
@@ -342,12 +369,10 @@ mod tests {
             latency_ms: 60,
         };
 
-        assert!(
-            manager
-                .update_instance_metrics("test-instance", new_metrics)
-                .await
-                .is_ok()
-        );
+        assert!(manager
+            .update_instance_metrics("test-instance", new_metrics)
+            .await
+            .is_ok());
 
         let instance = manager.instances.get("test-instance").unwrap();
         assert_eq!(instance.metrics.cpu_usage, 0.7);

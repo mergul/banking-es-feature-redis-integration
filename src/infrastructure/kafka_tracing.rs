@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::trace::{self, IdGenerator, RandomIdGenerator, Sampler};
 use opentelemetry_sdk::Resource;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, warn};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -119,9 +120,12 @@ impl KafkaTracing {
         );
 
         let _guard = span.enter();
+        let account_str = account_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "None".to_string());
         info!(
-            "Recovery operation '{}' for account {:?}: {}",
-            strategy, account_id, status
+            "Recovery operation '{}' for account {}: {}",
+            strategy, account_str, status
         );
     }
 
@@ -137,14 +141,14 @@ impl KafkaTracing {
             .load(std::sync::atomic::Ordering::Relaxed);
 
         info!(
-            "Metrics snapshot: error_rate={:.2}%, processing_latency={:.2}ms, consumer_lag={}",
+            "Metrics snapshot: error_rate={:.1}%, processing_latency={}ms, consumer_lag={}",
             error_rate * 100.0,
             processing_latency,
             consumer_lag
         );
 
         if error_rate > 0.1 {
-            warn!("High error rate detected: {:.2}%", error_rate * 100.0);
+            warn!("High error rate detected: {:.1}%", error_rate * 100.0);
         }
 
         if consumer_lag > 1000 {
@@ -170,14 +174,14 @@ impl KafkaTracing {
             .load(std::sync::atomic::Ordering::Relaxed);
 
         info!(
-            "Performance metrics: memory={:.2}MB, cpu={:.1}%, threads={}",
+            "Performance metrics: memory={:.1}MB, cpu={:.1}%, threads={}",
             memory_usage as f64 / 1_000_000.0,
             cpu_usage as f64 / 100.0,
             thread_count
         );
 
         if memory_usage > 1_000_000_000 {
-            warn!("High memory usage: {:.2}GB", memory_usage as f64 / 1e9);
+            warn!("High memory usage: {:.1}GB", memory_usage as f64 / 1e9);
         }
 
         if cpu_usage > 80 {

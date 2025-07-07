@@ -2,6 +2,7 @@ use crate::domain::Account;
 use crate::infrastructure::cache_service::CacheServiceTrait;
 use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaConsumer};
 use anyhow::Result;
+use std::io::Write;
 use std::sync::Arc;
 use tracing::{error, info};
 use uuid::Uuid;

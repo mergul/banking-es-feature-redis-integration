@@ -8,6 +8,24 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
+// Custom module for bincode-compatible DateTime<Utc> serialization
+mod bincode_datetime {
+    use chrono::{DateTime, Utc, TimeZone};
+    use serde::{self, Serializer, Deserializer};
+    use serde::de::Deserialize;
+
+    pub fn serialize<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_i64(dt.timestamp())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where D: Deserializer<'de> {
+        let ts = i64::deserialize(deserializer)?;
+        Ok(Utc.timestamp_opt(ts, 0).single().unwrap())
+    }
+}
+
 #[async_trait]
 pub trait MonitoringDashboardTrait: Send + Sync {
     fn record_metrics(&self);
@@ -23,13 +41,14 @@ pub struct MonitoringDashboard {
     pub health_status: HealthStatus,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeSeriesPoint {
+    #[serde(with = "bincode_datetime")]
     pub timestamp: DateTime<Utc>,
     pub metrics: MetricsSnapshot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     pub error_rate: f64,
     pub processing_latency: f64,
@@ -40,38 +59,40 @@ pub struct MetricsSnapshot {
     pub dlq_size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alert {
     pub severity: AlertSeverity,
     pub message: String,
+    #[serde(with = "bincode_datetime")]
     pub timestamp: DateTime<Utc>,
     pub metric_name: String,
     pub threshold: f64,
     pub current_value: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertSeverity {
     Info,
     Warning,
     Critical,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthStatus {
     pub status: ServiceStatus,
+    #[serde(with = "bincode_datetime")]
     pub last_check: DateTime<Utc>,
     pub components: Vec<ComponentHealth>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceStatus {
     Healthy,
     Degraded,
     Unhealthy,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentHealth {
     pub name: String,
     pub status: ServiceStatus,
@@ -134,7 +155,7 @@ impl MonitoringDashboard {
         if error_rate > 0.1 {
             self.alerts.push(Alert {
                 severity: AlertSeverity::Critical,
-                message: format!("High error rate: {:.2}%", error_rate * 100.0),
+                message: "High error rate: {:.2}%".to_string() + &(error_rate * 100.0).to_string(),
                 timestamp: Utc::now(),
                 metric_name: "error_rate".to_string(),
                 threshold: 0.1,
@@ -149,7 +170,7 @@ impl MonitoringDashboard {
         if consumer_lag > 1000 {
             self.alerts.push(Alert {
                 severity: AlertSeverity::Warning,
-                message: format!("High consumer lag: {}", consumer_lag),
+                message: "High consumer lag: {}".to_string() + &(consumer_lag).to_string(),
                 timestamp: Utc::now(),
                 metric_name: "consumer_lag".to_string(),
                 threshold: 1000.0,
@@ -165,7 +186,7 @@ impl MonitoringDashboard {
             // 1GB
             self.alerts.push(Alert {
                 severity: AlertSeverity::Warning,
-                message: format!("High memory usage: {:.2}GB", memory_usage as f64 / 1e9),
+                message: "High memory usage: {:.2}GB".to_string() + &(memory_usage as f64 / 1e9).to_string(),
                 timestamp: Utc::now(),
                 metric_name: "memory_usage".to_string(),
                 threshold: 1_000_000_000.0,
@@ -192,7 +213,7 @@ impl MonitoringDashboard {
         components.push(ComponentHealth {
             name: "Kafka Producer".to_string(),
             status: producer_status,
-            details: format!("Send errors: {}", producer_errors),
+            details: "Send errors: {}".to_string() + &(producer_errors).to_string(),
         });
 
         // Check Kafka consumer
@@ -209,7 +230,7 @@ impl MonitoringDashboard {
         components.push(ComponentHealth {
             name: "Kafka Consumer".to_string(),
             status: consumer_status,
-            details: format!("Consume errors: {}", consumer_errors),
+            details: "Consume errors: {}".to_string() + &(consumer_errors).to_string(),
         });
 
         // Check DLQ
@@ -226,7 +247,7 @@ impl MonitoringDashboard {
         components.push(ComponentHealth {
             name: "Dead Letter Queue".to_string(),
             status: dlq_status,
-            details: format!("DLQ size: {}", dlq_size),
+            details: "DLQ size: {}".to_string() + &(dlq_size).to_string(),
         });
 
         self.health_status = HealthStatus {
