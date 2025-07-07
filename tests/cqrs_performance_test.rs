@@ -120,10 +120,12 @@ async fn setup_cqrs_test_environment(
         5000,
     ));
 
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default(); // Add KafkaConfig
     let cqrs_service = Arc::new(CQRSAccountService::new(
         event_store,
         projection_store,
         cache_service,
+        kafka_config, // Pass KafkaConfig
         2000,                      // max_concurrent_operations - increased for higher throughput
         500,                       // batch_size - increased for better batching efficiency
         Duration::from_millis(50), // batch_timeout - reduced for faster processing
@@ -561,79 +563,5 @@ async fn test_cqrs_high_throughput_performance() {
     }
 }
 
-#[tokio::test]
-async fn test_cqrs_vs_standard_performance_comparison() {
-    tracing::info!("🔄 Starting CQRS vs Standard performance comparison...");
-
-    let test_future = async {
-        let context = setup_cqrs_test_environment()
-            .await
-            .expect("Failed to setup test environment");
-
-        // Create test accounts
-        let mut account_ids = Vec::new();
-        for i in 0..100 {
-            let owner_name = "CompareTest_".to_string() + &i.to_string();
-            let account_id = context
-                .cqrs_service
-                .create_account(owner_name, Decimal::new(1000, 0))
-                .await?;
-            account_ids.push(account_id);
-        }
-
-        // Test CQRS performance
-        let cqrs_start = Instant::now();
-        let mut cqrs_operations = 0;
-        for _ in 0..1000 {
-            let account_id = account_ids[cqrs_operations % account_ids.len()];
-            if let Ok(_) = context.cqrs_service.get_account(account_id).await {
-                cqrs_operations += 1;
-            }
-        }
-        let cqrs_duration = cqrs_start.elapsed();
-        let cqrs_ops = cqrs_operations as f64 / cqrs_duration.as_secs_f64();
-
-        // Test Standard service performance
-        let standard_start = Instant::now();
-        let mut standard_operations = 0;
-        for _ in 0..1000 {
-            let account_id = account_ids[standard_operations % account_ids.len()];
-            if let Ok(_) = context.standard_service.get_account(account_id).await {
-                standard_operations += 1;
-            }
-        }
-        let standard_duration = standard_start.elapsed();
-        let standard_ops = standard_operations as f64 / standard_duration.as_secs_f64();
-
-        tracing::info!("📊 Performance Comparison Results:");
-        tracing::info!(
-            "CQRS Service: {:.2} OPS ({:.3}s for {} operations)",
-            cqrs_ops,
-            cqrs_duration.as_secs_f64(),
-            cqrs_operations
-        );
-        tracing::info!(
-            "Standard Service: {:.2} OPS ({:.3}s for {} operations)",
-            standard_ops,
-            standard_duration.as_secs_f64(),
-            standard_operations
-        );
-
-        let performance_ratio = cqrs_ops / standard_ops;
-        tracing::info!(
-            "Performance Ratio (CQRS/Standard): {:.2}x",
-            performance_ratio
-        );
-
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-    };
-
-    match tokio::time::timeout(Duration::from_secs(60), test_future).await {
-        Ok(_) => {
-            tracing::info!("✅ Performance comparison completed successfully");
-        }
-        Err(_) => {
-            tracing::error!("❌ Performance comparison timed out");
-        }
-    }
-}
+// Removed test_cqrs_vs_standard_performance_comparison as the "standard" AccountService
+// has been deprecated and removed from the primary application path and test setups.

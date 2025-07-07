@@ -46,10 +46,12 @@ async fn setup_cqrs_test_environment() -> Result<CQRSAccountService, Box<dyn std
     let cache_service = Arc::new(CacheService::new(redis_client_trait, cache_config));
 
     // Create CQRS service
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default(); // Add KafkaConfig
     let cqrs_service = CQRSAccountService::new(
         event_store,
         projection_store,
         cache_service,
+        kafka_config, // Pass KafkaConfig
         100,                        // max_concurrent_operations
         50,                         // batch_size
         Duration::from_millis(100), // batch_timeout
@@ -112,6 +114,66 @@ async fn test_cqrs_create_account() {
         tracing::error!("Account should be active");
         return;
     }
+}
+
+#[tokio::test]
+async fn test_cqrs_cache_behavior() {
+    let service = setup_cqrs_test_environment()
+        .await
+        .expect("Failed to setup test environment for cache behavior test");
+
+    let owner_name = "CQRS Cache Test User".to_string();
+    let initial_balance = Decimal::new(2000, 0);
+
+    let account_id = service
+        .create_account(owner_name, initial_balance)
+        .await
+        .expect("Failed to create account for cache test");
+
+    // Ensure previous operations complete and projections/cache might settle
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // First read (potential cache miss, populates cache)
+    let start_miss = std::time::Instant::now();
+    let _account_miss = service
+        .get_account(account_id)
+        .await
+        .expect("Failed to get account (first read)")
+        .expect("Account should exist (first read)");
+    let first_read_duration = start_miss.elapsed();
+    tracing::info!("First read (potential miss) duration: {:?}", first_read_duration);
+
+    // Second read (should hit cache)
+    let start_hit = std::time::Instant::now();
+    let _account_hit = service
+        .get_account(account_id)
+        .await
+        .expect("Failed to get account (second read)")
+        .expect("Account should exist (second read)");
+    let second_read_duration = start_hit.elapsed();
+    tracing::info!("Second read (potential hit) duration: {:?}", second_read_duration);
+
+    // Assert that the cache hit is generally faster.
+    // This can be flaky in some CI environments or if system load is unusual.
+    // A small tolerance or multiple reads might make it more robust.
+    // For now, a direct comparison.
+    // Allow for some OS scheduling jitter, cache hit should be significantly faster.
+    // If first_read_duration is very small (e.g. < 100 micros), the comparison might not be meaningful.
+    if first_read_duration > Duration::from_micros(100) { // Only assert if first read took some time
+        assert!(
+            second_read_duration < first_read_duration,
+            "Cache hit ({:?}) was not faster than cache miss ({:?})",
+            second_read_duration,
+            first_read_duration
+        );
+    } else {
+        tracing::warn!("First read was too fast ({:?}) to reliably compare cache hit speed.", first_read_duration);
+    }
+
+    // Verify cache metrics (optional, but good for confirming cache interaction)
+    let cache_metrics = service.get_cache_metrics();
+    assert!(cache_metrics.hits.load(std::sync::atomic::Ordering::Relaxed) > 0, "Expected cache hits to be greater than 0");
+    // Note: cache_misses might also be > 0 from other test interactions or initial loads.
 }
 
 #[tokio::test]
@@ -198,10 +260,7 @@ async fn test_cqrs_get_transactions() {
         .await
         .expect("Failed to get account transactions");
 
-    if transactions.len() != 3 {
-        tracing::error!("Assertion failed: transactions.len() != 3");
-        return;
-    } // Create + Deposit + Withdraw
+    assert_eq!(transactions.len(), 3, "Expected 3 transactions (Create + Deposit + Withdraw)");
 
     let transaction_types: Vec<&str> = transactions
         .iter()
@@ -394,23 +453,41 @@ async fn test_cqrs_metrics() {
 
     // Test get metrics
     let metrics = service.get_metrics();
+    let cache_metrics = service.get_cache_metrics();
 
-    if !(metrics
-        .commands_processed
-        .load(std::sync::atomic::Ordering::Relaxed)
-        > 0)
-    {
-        tracing::error!("Assertion failed");
-        return;
-    }
-    if !(metrics
-        .queries_processed
-        .load(std::sync::atomic::Ordering::Relaxed)
-        > 0)
-    {
-        tracing::error!("Assertion failed");
-        return;
-    }
+    assert!(
+        metrics.commands_processed.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "Expected commands_processed > 0"
+    );
+    assert!(
+        metrics.queries_processed.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "Expected queries_processed > 0"
+    );
+
+    // After creating, depositing (commands), and getting an account (query which involves cache interaction):
+    // We expect at least one cache miss (for the first get_account)
+    // and potentially hits if get_account is called multiple times or if other operations prime the cache.
+    // The create_account and deposit_money in CQRS path now also update cache via EventStore -> Kafka -> KafkaEventProcessor -> CacheService.
+    // So, by the time get_account is called, the cache might already be populated by the event processor.
+
+    // Let's ensure there was some cache activity.
+    // A more precise test for cache hits/misses is in test_cqrs_cache_behavior.
+    // Here, we just check that the counters are being accessed.
+    let initial_hits = cache_metrics.hits.load(std::sync::atomic::Ordering::Relaxed);
+    let initial_misses = cache_metrics.misses.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Another get to ensure a hit if the first one populated it
+    service.get_account(account_id).await.expect("Failed to get account again");
+
+    assert!(
+        cache_metrics.hits.load(std::sync::atomic::Ordering::Relaxed) > initial_hits,
+        "Expected cache hits to increase after repeated get"
+    );
+     // Misses might or might not increase depending on exact timing and previous state, so less strict here.
+    assert!(
+        cache_metrics.misses.load(std::sync::atomic::Ordering::Relaxed) >= initial_misses,
+        "Cache misses should not decrease"
+    );
 }
 
 #[tokio::test]
@@ -422,10 +499,7 @@ async fn test_cqrs_error_handling() {
     // Test non-existent account
     let non_existent_id = Uuid::new_v4();
     let result = service.get_account(non_existent_id).await;
-    if !(matches!(result, Ok(None))) {
-        tracing::error!("Assertion failed");
-        return;
-    }
+    assert!(matches!(result, Ok(None)), "Expected Ok(None) for non-existent account, got {:?}", result);
 
     // Test withdrawal with insufficient funds
     let account_id = service
@@ -437,12 +511,21 @@ async fn test_cqrs_error_handling() {
         .withdraw_money(account_id, Decimal::new(200, 0))
         .await;
 
-    if !(result.is_err()) {
-        tracing::error!("Assertion failed");
-        return;
-    }
-    if !(result.unwrap_err().to_string().contains("Insufficient")) {
-        tracing::error!("Assertion failed");
-        return;
+    assert!(result.is_err(), "Expected error for insufficient funds, got Ok");
+    if let Err(e) = result {
+        // CQRSAccountService.withdraw_money eventually calls AccountCommandHandler.handle_withdraw_money
+        // which returns Result<CommandResult, AccountError>.
+        // The error from CQRSAccountService should be AccountError.
+        // Assuming AccountError::InsufficientFunds is the specific error type.
+        // The actual error type might be wrapped by anyhow or another layer in CQRSAccountService,
+        // so checking string containment is a fallback if direct match fails.
+        let error_string = e.to_string();
+        assert!(
+            error_string.contains("Insufficient funds") || error_string.contains("AccountError::InsufficientFunds"),
+            "Expected InsufficientFunds error, got: {}", error_string
+        );
+        // TODO: Ideally, match the specific AccountError::InsufficientFunds variant if possible,
+        // depending on how errors are propagated through CQRSAccountService.
+        // For now, string check is a robust first step if error types are wrapped.
     }
 }
