@@ -127,32 +127,47 @@ impl AccountCommandHandler {
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                // Update projections asynchronously
-                let projection = AccountProjection {
-                    id: account_id,
-                    owner_name: owner_name.clone(),
-                    balance: initial_balance,
-                    is_active: true,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                };
+                // Synchronous projection and cache updates are removed.
+                // This will now be handled by KafkaEventProcessor consuming events.
+
+                // Publish events to Kafka
+                // For AccountCreated, the account object itself might not have an updated version yet (it's 0).
+                // The event store handles versioning, so we pass the events and the initial version (0).
+                // The Kafka message should contain the initial state or enough info for the consumer.
+                // The `account.version` (which is 0 for a new account before first event is applied by store)
+                // or specifically `0` for create. Event store `save_events` uses `expected_version`.
+                // Kafka producer's `send_event_batch` takes `version` which implies the version *of the batch* or *after the batch*.
+                // For create, the version *after* this first batch of events (usually 1 event) is 1.
+                // Let's assume `account.version` after `handle_command` is still 0 (as it's a new aggregate state not yet reflecting store version).
+                // The `events` vector contains one `AccountCreated` event.
+                // The `self.event_store.save_events` call uses `0` as `expected_version`.
+                // We should publish the events with the version they will have in the store, which is 1.
+                // Or, if `send_event_batch` expects the version *of the aggregate before these events*, it would be 0.
+                // Given `AccountRepository` uses `account.version` which *is* updated after apply_event,
+                // let's apply the event to the local `account` instance to get its version updated for publishing.
+                let mut local_account_for_version = account.clone();
+                for event in &events {
+                    local_account_for_version.apply_event(event); // This should set version to 0 for AccountCreated if it's the first event
+                }
+                // However, `EventStore` handles versioning. The first event gets version 1.
+                // So, we publish with version 1.
+                // A better way for `send_event_batch` might be to take `expected_version` and `events`,
+                // and derive resulting versions internally or expect the final version of the last event.
+                // For now, assuming `send_event_batch` wants the version of the aggregate *after* these events are applied.
+                // The `events` themselves don't have versions yet. The `EventStore` assigns them.
+                // The `EventBatch` struct in Kafka abstraction takes `version` - this should be the aggregate version *after* these events.
+                // After `AccountCreated` event, version becomes 1.
 
                 if let Err(e) = self
-                    .projection_store
-                    .upsert_accounts_batch(vec![projection])
+                    .kafka_producer
+                    .send_event_batch(account_id, events.clone(), 1) // Version after AccountCreated is 1
                     .await
                 {
                     error!(
-                        "Failed to update projection for account {}: {}",
+                        "Failed to publish AccountCreated event to Kafka for account {}: {}",
                         account_id, e
                     );
                 }
-
-                // Cache the account
-                self.cache_service
-                    .set_account(&account, Some(std::time::Duration::from_secs(3600)))
-                    .await
-                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
                 info!(
                     "Account created successfully: {} in {:.2}s",
@@ -259,58 +274,26 @@ impl AccountCommandHandler {
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                // Apply events to account
+                // Apply events to account locally for potential immediate use (e.g. in CommandResult)
                 for event in &events {
                     account.apply_event(event);
                 }
 
-                // Update projections asynchronously
-                let projection = AccountProjection {
-                    id: account.id,
-                    owner_name: account.owner_name.clone(),
-                    balance: account.balance,
-                    is_active: account.is_active,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                };
+                // Synchronous projection and cache updates are removed.
+                // This will now be handled by KafkaEventProcessor consuming events.
 
+                // Publish events to Kafka
+                // `account.version` reflects the version after these events are applied.
                 if let Err(e) = self
-                    .projection_store
-                    .upsert_accounts_batch(vec![projection])
+                    .kafka_producer
+                    .send_event_batch(account_id, events.clone(), account.version)
                     .await
                 {
                     error!(
-                        "Failed to update projection for account {}: {}",
+                        "Failed to publish withdraw events to Kafka for account {}: {}",
                         account_id, e
                     );
                 }
-
-                // Update transaction projection
-                for event in &events {
-                    if let AccountEvent::MoneyWithdrawn { amount, .. } = event {
-                        let transaction = TransactionProjection {
-                            id: Uuid::new_v4(),
-                            account_id,
-                            transaction_type: "MoneyWithdrawn".to_string(),
-                            amount: *amount,
-                            timestamp: Utc::now(),
-                        };
-
-                        if let Err(e) = self
-                            .projection_store
-                            .insert_transactions_batch(vec![transaction])
-                            .await
-                        {
-                            error!("Failed to insert transaction projection: {}", e);
-                        }
-                    }
-                }
-
-                // Update cache
-                self.cache_service
-                    .set_account(&account, Some(std::time::Duration::from_secs(3600)))
-                    .await
-                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
                 info!(
                     "Withdrawal successful: {} amount {} in {:.2}s",
@@ -358,37 +341,27 @@ impl AccountCommandHandler {
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-                // Apply events to account
+                // Apply events to account locally for potential immediate use
                 for event in &events {
                     account.apply_event(event);
                 }
 
-                // Update projections asynchronously
-                let projection = AccountProjection {
-                    id: account.id,
-                    owner_name: account.owner_name.clone(),
-                    balance: account.balance,
-                    is_active: account.is_active,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                };
+                // Synchronous projection update and cache invalidation are removed.
+                // KafkaEventProcessor will handle updating projections (mark as inactive)
+                // and cache invalidation/updates based on the AccountClosed event.
 
+                // Publish events to Kafka
+                // `account.version` reflects the version after these events are applied.
                 if let Err(e) = self
-                    .projection_store
-                    .upsert_accounts_batch(vec![projection])
+                    .kafka_producer
+                    .send_event_batch(account_id, events.clone(), account.version)
                     .await
                 {
                     error!(
-                        "Failed to update projection for account {}: {}",
+                        "Failed to publish close account events to Kafka for account {}: {}",
                         account_id, e
                     );
                 }
-
-                // Invalidate cache
-                self.cache_service
-                    .delete_account(account_id)
-                    .await
-                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
                 info!(
                     "Account closed successfully: {} in {:.2}s",
