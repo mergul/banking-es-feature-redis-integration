@@ -67,9 +67,10 @@ impl Drop for TestContext {
 #[derive(Clone)]
 struct TestProjectionStore {
     pool: PgPool,
-    account_cache: Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, AccountProjection>>>,
+    // AccountProjection here needs to match the main definition
+    account_cache: Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, banking_es::infrastructure::projections::AccountProjection>>>,
     transaction_cache:
-        Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, Vec<TransactionProjection>>>>,
+        Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, TransactionProjection>>>,
 }
 
 impl TestProjectionStore {
@@ -84,7 +85,7 @@ impl TestProjectionStore {
     async fn get_account(
         &self,
         account_id: Uuid,
-    ) -> Result<Option<AccountProjection>, anyhow::Error> {
+    ) -> Result<Option<banking_es::infrastructure::projections::AccountProjection>, anyhow::Error> { // Adjusted return type
         // Try cache first
         {
             let cache = self.account_cache.read().await;
@@ -94,10 +95,11 @@ impl TestProjectionStore {
         }
 
         // Cache miss - fetch from database
-        let account: Option<AccountProjection> = sqlx::query_as!(
-            AccountProjection,
+        // Ensure the SQL query includes the version field
+        let account: Option<banking_es::infrastructure::projections::AccountProjection> = sqlx::query_as!(
+            banking_es::infrastructure::projections::AccountProjection, // Use qualified path
             r#"
-            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            SELECT id, owner_name, balance, is_active, version, created_at, updated_at
             FROM account_projections
             WHERE id = $1
             "#,

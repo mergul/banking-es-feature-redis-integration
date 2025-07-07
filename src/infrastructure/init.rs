@@ -641,11 +641,13 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     )?);
 
     // Initialize KafkaEventProcessor
+    let retry_config = crate::infrastructure::kafka_event_processor::RetryConfig::default(); // Or load from env
     let kafka_processor = Arc::new(KafkaEventProcessor::new(
         kafka_config,
         &event_store,
         &projection_store,
         &cache_service,
+        retry_config,
     )?);
 
     // Start L1 cache updater in background

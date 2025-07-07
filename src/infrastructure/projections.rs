@@ -64,6 +64,7 @@ pub struct AccountProjection {
     pub owner_name: String,
     pub balance: Decimal,
     pub is_active: bool,
+    pub version: i64, // Added version field
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -614,23 +615,27 @@ impl ProjectionStore {
         let owner_names: Vec<String> = accounts.iter().map(|a| a.owner_name.clone()).collect();
         let balances: Vec<Decimal> = accounts.iter().map(|a| a.balance).collect();
         let is_actives: Vec<bool> = accounts.iter().map(|a| a.is_active).collect();
+        let versions: Vec<i64> = accounts.iter().map(|a| a.version).collect(); // Added
         let created_ats: Vec<DateTime<Utc>> = accounts.iter().map(|a| a.created_at).collect();
         let updated_ats: Vec<DateTime<Utc>> = accounts.iter().map(|a| a.updated_at).collect();
 
         sqlx::query!(
             r#"
-            INSERT INTO account_projections (id, owner_name, balance, is_active, created_at, updated_at)
-            SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::decimal[], $4::boolean[], $5::timestamptz[], $6::timestamptz[])
+            INSERT INTO account_projections (id, owner_name, balance, is_active, version, created_at, updated_at)
+            SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::decimal[], $4::boolean[], $5::bigint[], $6::timestamptz[], $7::timestamptz[])
             ON CONFLICT (id) DO UPDATE SET
                 owner_name = EXCLUDED.owner_name,
                 balance = EXCLUDED.balance,
                 is_active = EXCLUDED.is_active,
+                version = EXCLUDED.version,
                 updated_at = EXCLUDED.updated_at
-            "#,
+            WHERE EXCLUDED.version > account_projections.version
+            "#,  // Conditional update based on version
             &ids,
             &owner_names,
             &balances,
             &is_actives,
+            &versions, // Added
             &created_ats,
             &updated_ats
         )
@@ -661,8 +666,8 @@ impl ProjectionStore {
             r#"
             INSERT INTO transaction_projections (id, account_id, transaction_type, amount, timestamp)
             SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::decimal[], $5::timestamptz[])
-            ON CONFLICT (id, timestamp) DO NOTHING
-            "#,
+            ON CONFLICT (id) DO NOTHING
+            "#, // Changed ON CONFLICT to just (id)
             &ids,
             &account_ids,
             &types,
