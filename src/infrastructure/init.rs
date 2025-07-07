@@ -1,4 +1,4 @@
-use crate::application::services::AccountService;
+// use crate::application::services::AccountService; // Commented out
 use crate::infrastructure::auth::{AuthConfig, AuthService};
 use crate::infrastructure::cache_service::{
     CacheConfig, CacheService, CacheServiceTrait, EvictionPolicy,
@@ -27,7 +27,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 pub struct ServiceContext {
-    pub account_service: Arc<AccountService>,
+    // pub account_service: Arc<AccountService>, // Commented out
     pub auth_service: Arc<AuthService>,
     pub scaling_manager: Arc<ScalingManager>,
     pub kafka_processor: Arc<KafkaEventProcessor>,
@@ -568,14 +568,14 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         scaling_config,
     ));
 
-    // Initialize AccountService
-    let account_service = Arc::new(AccountService::new(
-        account_repository,
-        projection_store.clone(),
-        cache_service.clone(),
-        middleware,
-        100,
-    ));
+    // Initialize AccountService - REMOVED
+    // let account_service = Arc::new(AccountService::new(
+    //     account_repository,
+    //     projection_store.clone(),
+    //     cache_service.clone(),
+    //     middleware,
+    //     100,
+    // ));
 
     // Use the same kafka_config for all Kafka-related services
     let kafka_config = KafkaConfig {
@@ -670,7 +670,7 @@ pub async fn init_all_services() -> Result<ServiceContext> {
 
     // Create ServiceContext
     let service_context = ServiceContext {
-        account_service,
+        // account_service, // Removed
         auth_service,
         scaling_manager,
         kafka_processor,

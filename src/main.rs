@@ -8,7 +8,7 @@ use crate::infrastructure::redis_abstraction::RealRedisClient;
 use crate::infrastructure::redis_abstraction::RedisClient;
 use crate::infrastructure::scaling::{ScalingConfig, ScalingManager, ServiceInstance};
 use crate::web::cqrs_routes::create_cqrs_router;
-use crate::web::routes::create_router;
+// use crate::web::routes::create_router; // Commented out: deprecated router
 use anyhow::Result;
 use axum::{
     http::Method,
@@ -42,9 +42,9 @@ mod infrastructure;
 mod web;
 
 use crate::application::services::CQRSAccountService;
-use crate::application::AccountService;
-use crate::infrastructure::middleware::RequestMiddleware;
-use crate::infrastructure::{AccountRepository, EventStoreConfig, UserRepository};
+// use crate::application::AccountService; // Commented out: deprecated service
+use crate::infrastructure::middleware::RequestMiddleware; // Keep if CQRS handlers use similar middleware logic
+use crate::infrastructure::{AccountRepository, EventStoreConfig, UserRepository}; // AccountRepository might be unused if not by AccountService
 
 use opentelemetry::sdk::export::trace::SpanExporter;
 use opentelemetry::trace::TracerProvider;
@@ -126,11 +126,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize all services with background tasks
     let service_context = init_all_services().await?;
 
-    // Clone services once for router state
-    let router_state = (
-        service_context.account_service.clone(),
-        service_context.auth_service.clone(),
-    );
+    // Clone services once for router state - NO LONGER NEEDED FOR DEPRECATED ROUTER
+    // let router_state = (
+    //     service_context.account_service.clone(), // account_service is removed from ServiceContext
+    //     service_context.auth_service.clone(),
+    // );
 
     // Initialize CQRS service using the services from ServiceContext
     // Create KafkaConfig instance (can be loaded from env or defaults)
@@ -146,52 +146,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_millis(100), // batch_timeout
     ));
 
-    // Build the router with optimized middleware stack
+    // Create CQRS router
+    // The auth_service is cloned for potential future use in CQRS auth middleware/handlers
+    let cqrs_router = create_cqrs_router(cqrs_service.clone(), service_context.auth_service.clone());
+
+    // The main app is now just the CQRS router, potentially with some global/static routes.
+    // For now, the root HTML page lists both old and new endpoints. This should be updated later.
     let app = Router::new()
-        // Auth operations
-        .route("/api/auth/register", post(web::handlers::register))
-        .route("/api/auth/login", post(web::handlers::login))
-        .route("/api/auth/logout", post(web::handlers::logout))
-        // Account operations
-        .route("/api/accounts", get(web::handlers::get_all_accounts))
-        .route("/api/accounts", post(web::handlers::create_account))
-        .route("/api/accounts/{id}", get(web::handlers::get_account))
-        .route(
-            "/api/accounts/{id}/deposit",
-            post(web::handlers::deposit_money),
-        )
-        .route(
-            "/api/accounts/{id}/withdraw",
-            post(web::handlers::withdraw_money),
-        )
-        .route(
-            "/api/accounts/{id}/transactions",
-            get(web::handlers::get_account_transactions),
-        )
-        // Batch operations for high throughput
-        .route(
-            "/api/transactions/batch",
-            post(web::handlers::batch_transactions),
-        )
-        // Health and metrics
-        .route("/api/health", get(web::handlers::health_check))
-        .route("/api/metrics", get(web::handlers::metrics))
-        .route("/api/logs/stats", get(web::handlers::get_log_statistics))
-        // Add optimized middleware stack
+        .route("/", get(root)) // Keep the root informational page for now
+        .merge(cqrs_router)
+        // Global middleware can still be applied here if needed, outside of create_cqrs_router
         .layer(
             ServiceBuilder::new()
-                .layer(TraceLayer::new_for_http())
-                .layer(CompressionLayer::new())
-                .layer(CorsLayer::permissive())
+                .layer(TraceLayer::new_for_http()) // This was already in create_router, ensure it's not duplicated if also in create_cqrs_router
+                .layer(CompressionLayer::new())    // Same as above
+                .layer(CorsLayer::permissive())    // Same as above
                 .into_inner(),
         )
-        .with_state(router_state)
-        // Serve static files as fallback
+        // Fallback for static files
         .fallback_service(ServeDir::new("static"));
 
-    // Create CQRS router and merge with main app
-    let cqrs_router = create_cqrs_router(cqrs_service, service_context.auth_service.clone());
-    let app = app.merge(cqrs_router);
+    // The old router and its state are no longer used.
+    // The /api/auth routes were part of the old router. They need to be re-evaluated.
+    // For now, they are removed. A new auth strategy for CQRS would be needed.
+    // The /api/health, /api/metrics, /api/logs/stats from the old router are also removed.
+    // The CQRS router has its own /api/cqrs/health and /api/cqrs/metrics.
+    // A new /api/logs/stats might be added to the main app if still desired globally.
 
     // Setup TCP listener with optimized settings
     let port = std::env::var("PORT")
