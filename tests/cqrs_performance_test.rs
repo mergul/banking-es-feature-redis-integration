@@ -98,13 +98,14 @@ async fn setup_cqrs_test_environment(
     let projection_store = Arc::new(ProjectionStore::new_test(pool.clone()))
         as Arc<dyn ProjectionStoreTrait + 'static>;
 
-    // Highly optimized cache configuration for maximum throughput
+    // Optimized cache configuration for better performance
     let mut cache_config = CacheConfig::default();
-    cache_config.default_ttl = Duration::from_secs(7200); // Increased TTL for longer cache retention
-    cache_config.max_size = 500000; // Increased cache size for more data
-    cache_config.shard_count = 128; // Increased shard count for better concurrency
-    cache_config.warmup_batch_size = 2000; // Increased warmup batch size
-    cache_config.warmup_interval = Duration::from_secs(2); // Reduced warmup interval
+    cache_config.default_ttl = Duration::from_secs(1800); // 30 minutes - shorter for better test performance
+    cache_config.max_size = 100000; // Reduced for better memory management
+    cache_config.shard_count = 64; // Reduced for better cache locality
+    cache_config.warmup_batch_size = 100; // Smaller batches for better control
+    cache_config.warmup_interval = Duration::from_secs(5); // More frequent warmup
+    cache_config.eviction_policy = EvictionPolicy::LRU; // Keep LRU for predictable behavior
 
     let cache_service = Arc::new(CacheService::new(redis_client_trait.clone(), cache_config))
         as Arc<dyn CacheServiceTrait + 'static>;
@@ -214,39 +215,84 @@ async fn test_cqrs_high_throughput_performance() {
             }
         }
 
-        // Enhanced cache warmup phase adopting integration test strategy
-        tracing::info!("🔥 Warming up cache with integration test strategy...");
-        let warmup_start = Instant::now();
-        let mut warmup_handles = Vec::new();
+        // Wait for Kafka event processor to populate cache
+        tracing::info!("⏳ Waiting for Kafka event processor to populate cache...");
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
-        // Use smaller chunks like integration tests for better parallelization
-        for chunk in account_ids.chunks(50) {
-            // Reduced from 250 to 50 like integration tests
+        // Enhanced cache warmup strategy
+        tracing::info!("🔥 Starting enhanced cache warmup strategy...");
+        let warmup_start = Instant::now();
+
+        // Phase 1: Force cache population by reading accounts multiple times
+        tracing::info!("📊 Phase 1: Populating cache with account data...");
+        let populate_start = Instant::now();
+        let mut populate_handles = Vec::new();
+
+        // Read all accounts to populate cache - do this multiple times to ensure cache hits
+        for chunk in account_ids.chunks(100) {
             let service = context.cqrs_service.clone();
             let chunk_accounts = chunk.to_vec();
-            warmup_handles.push(tokio::spawn(async move {
+            populate_handles.push(tokio::spawn(async move {
                 for account_id in chunk_accounts {
-                    // Use 5 rounds like integration tests for better cache saturation
-                    for _ in 0..5 {
-                        // Increased from 3 to 5 rounds
+                    // Multiple reads to ensure cache population
+                    for _ in 0..3 {
                         let _ = service.get_account(account_id).await;
-                        // Focus on get_account only for better cache locality
                     }
                 }
             }));
         }
-        for handle in warmup_handles {
-            handle.await.expect("Warmup task failed");
+
+        for handle in populate_handles {
+            handle.await.expect("Cache population task failed");
         }
-        let warmup_duration = warmup_start.elapsed();
+
+        let populate_duration = populate_start.elapsed();
         tracing::info!(
-            "✅ Cache warmup completed in {:.2}s for {} accounts",
-            warmup_duration.as_secs_f64(),
+            "✅ Cache population completed in {:.2}s for {} accounts",
+            populate_duration.as_secs_f64(),
             account_count
         );
 
-        // Shorter stabilization period like integration tests
-        tokio::time::sleep(Duration::from_millis(1000)).await; // Reduced from 2000ms to 1000ms
+        // Phase 2: Cache hit verification and stabilization
+        tracing::info!("🔄 Phase 2: Verifying cache hits and stabilizing...");
+        let verify_start = Instant::now();
+        let mut verify_handles = Vec::new();
+
+        // Sample a subset of accounts to verify cache hits
+        let sample_size = std::cmp::min(1000, account_count);
+        let sample_accounts: Vec<Uuid> = account_ids.iter().take(sample_size).cloned().collect();
+
+        for chunk in sample_accounts.chunks(50) {
+            let service = context.cqrs_service.clone();
+            let chunk_accounts = chunk.to_vec();
+            verify_handles.push(tokio::spawn(async move {
+                for account_id in chunk_accounts {
+                    // These should be cache hits now
+                    let _ = service.get_account(account_id).await;
+                }
+            }));
+        }
+
+        for handle in verify_handles {
+            handle.await.expect("Cache verification task failed");
+        }
+
+        let verify_duration = verify_start.elapsed();
+        tracing::info!(
+            "✅ Phase 2 completed in {:.2}s for {} sample accounts",
+            verify_duration.as_secs_f64(),
+            sample_size
+        );
+
+        let total_warmup_duration = warmup_start.elapsed();
+        tracing::info!(
+            "🎉 Total cache warmup completed in {:.2}s for {} accounts",
+            total_warmup_duration.as_secs_f64(),
+            account_count
+        );
+
+        // Shorter stabilization period
+        tokio::time::sleep(Duration::from_millis(500)).await; // Reduced from 1000ms to 500ms
 
         // Start CQRS performance test
         tracing::info!("🚀 Starting CQRS high throughput performance test...");
@@ -505,13 +551,63 @@ async fn test_cqrs_high_throughput_performance() {
         let total_cache_ops = cache_hits + cache_misses;
         tracing::info!("Total Cache Operations: {}", total_cache_ops);
 
+        // Enhanced cache performance metrics
+        let cache_metrics = context.cqrs_service.get_cache_metrics();
+        let overall_hits = cache_metrics.hits.load(Ordering::Relaxed)
+            + cache_metrics.shard_hits.load(Ordering::Relaxed);
+        let overall_misses = cache_metrics.misses.load(Ordering::Relaxed)
+            + cache_metrics.shard_misses.load(Ordering::Relaxed);
+        let overall_hit_rate = if overall_hits + overall_misses > 0 {
+            (overall_hits as f64 / (overall_hits + overall_misses) as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let l1_hit_rate = if cache_metrics.shard_hits.load(Ordering::Relaxed)
+            + cache_metrics.shard_misses.load(Ordering::Relaxed)
+            > 0
+        {
+            (cache_metrics.shard_hits.load(Ordering::Relaxed) as f64
+                / (cache_metrics.shard_hits.load(Ordering::Relaxed)
+                    + cache_metrics.shard_misses.load(Ordering::Relaxed)) as f64)
+                * 100.0
+        } else {
+            0.0
+        };
+
+        let l2_hit_rate = if cache_metrics.hits.load(Ordering::Relaxed)
+            + cache_metrics.misses.load(Ordering::Relaxed)
+            > 0
+        {
+            (cache_metrics.hits.load(Ordering::Relaxed) as f64
+                / (cache_metrics.hits.load(Ordering::Relaxed)
+                    + cache_metrics.misses.load(Ordering::Relaxed)) as f64)
+                * 100.0
+        } else {
+            0.0
+        };
+
+        tracing::info!("🎯 Enhanced Cache Performance:");
+        tracing::info!("Overall Cache Hit Rate: {:.2}%", overall_hit_rate);
+        tracing::info!("L1 Cache Hit Rate: {:.2}%", l1_hit_rate);
+        tracing::info!("L2 Cache Hit Rate: {:.2}%", l2_hit_rate);
+
+        let shard_hits = cache_metrics.shard_hits.load(Ordering::Relaxed);
+        let shard_misses = cache_metrics.shard_misses.load(Ordering::Relaxed);
+        tracing::info!("L1 Cache Hits: {}", shard_hits);
+        tracing::info!("L1 Cache Misses: {}", shard_misses);
+        tracing::info!("L2 Cache Hits: {}", cache_hits);
+        tracing::info!("L2 Cache Misses: {}", cache_misses);
+
         // Print a summary table
         println!("\n{}", "=".repeat(80));
         println!("🚀 CQRS PERFORMANCE SUMMARY");
         println!("{}", "=".repeat(80));
         println!("📊 Operations/Second: {:.2} OPS", ops);
         println!("✅ Success Rate: {:.2}%", success_rate);
-        println!("💾 Cache Hit Rate: {:.2}%", cache_hit_rate);
+        println!("💾 Overall Cache Hit Rate: {:.2}%", overall_hit_rate);
+        println!("💾 L1 Cache Hit Rate: {:.2}%", l1_hit_rate);
+        println!("💾 L2 Cache Hit Rate: {:.2}%", l2_hit_rate);
         println!("⚡ Conflict Rate: {:.2}%", conflict_rate);
         println!("📈 Total Operations: {}", total_ops);
         println!(
@@ -522,8 +618,10 @@ async fn test_cqrs_high_throughput_performance() {
             "🔍 Queries Processed: {}",
             cqrs_metrics.queries_processed.load(Ordering::Relaxed)
         );
-        println!("💾 Cache Hits: {}", cache_hits);
-        println!("💾 Cache Misses: {}", cache_misses);
+        println!("💾 L1 Cache Hits: {}", shard_hits);
+        println!("💾 L1 Cache Misses: {}", shard_misses);
+        println!("💾 L2 Cache Hits: {}", cache_hits);
+        println!("💾 L2 Cache Misses: {}", cache_misses);
         println!("{}", "=".repeat(80));
 
         // Assertions for performance targets
