@@ -1551,6 +1551,81 @@ impl EventStore {
         Ok(())
     }
 
+    // New private method for direct transactional event storage
+    async fn store_events_direct_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        aggregate_id: Uuid,
+        domain_events: Vec<AccountEvent>, // Renamed from 'events' to avoid conflict with 'Event' struct
+        expected_version: i64,
+        metrics: &EventStoreMetrics, // Passed in
+        version_cache: &DashMap<Uuid, i64>, // Passed in
+    ) -> Result<(), EventStoreError> {
+        if domain_events.is_empty() {
+            return Ok(());
+        }
+
+        // 1. Prepare events (adapted from prepare_events_for_insert_optimized)
+        // This part needs to determine the correct starting version for the events in this batch.
+        // If expected_version is the version *before* these events, then the first event is expected_version + 1.
+        let mut current_event_version = expected_version;
+        let prepared_events: Vec<Event> = domain_events
+            .into_iter()
+            .map(|domain_event| {
+                current_event_version += 1;
+                Event {
+                    id: Uuid::new_v4(), // Event ID for the 'events' table row
+                    aggregate_id,
+                    event_type: domain_event.event_type().to_string(),
+                    event_data: bincode::serialize(&domain_event)
+                        .map_err(EventStoreError::SerializationErrorBincode)?,
+                    version: current_event_version,
+                    timestamp: Utc::now(),
+                    metadata: EventMetadata::default(), // Default metadata for now
+                }
+            })
+            .collect::<Result<Vec<Event>, EventStoreError>>()?;
+            // The above .collect will propagate the first error from bincode::serialize.
+
+        if prepared_events.is_empty() { // Should not happen if domain_events was not empty, but good check
+            return Ok(());
+        }
+
+        // 2. Validate Events (simplified from flush_batch, can be enhanced)
+        // In a full implementation, one might want to run validators here if they don't require DB access
+        // or if they can also operate on the provided transaction.
+        // For this sketch, basic validation or skipping detailed validation.
+        for event_to_validate in &prepared_events {
+            let validation = Self::validate_event(event_to_validate).await; // validate_event is async
+            if !validation.is_valid {
+                metrics
+                    .events_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(EventStoreError::ValidationError(validation.errors));
+            }
+        }
+        // Event Handlers are typically for after-commit effects, so not called here within the transaction.
+
+        // 3. Bulk Insert Events (adapted from bulk_insert_events_optimized)
+        // This existing method already takes a transaction.
+        // We pass the externally provided `tx`.
+        Self::bulk_insert_events_optimized(
+            tx, // The crucial part: use the passed-in transaction
+            prepared_events.clone(), // Clone if needed later for metrics/return, or pass ownership
+            metrics,
+            version_cache,
+        )
+        .await?;
+
+        // Metrics update for processed events (if successful)
+        metrics.events_processed.fetch_add(
+            prepared_events.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(())
+    }
+
+
     pub async fn get_current_version(&self, aggregate_id: Uuid) -> Result<i64, EventStoreError> {
         let version = sqlx::query!(
             r#"
@@ -1744,6 +1819,14 @@ pub trait EventStoreTrait: Send + Sync + 'static {
     async fn get_all_accounts(&self) -> Result<Vec<Account>, EventStoreError>;
     fn get_pool(&self) -> PgPool;
     fn as_any(&self) -> &dyn std::any::Any;
+
+    async fn save_events_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        aggregate_id: Uuid,
+        events: Vec<AccountEvent>,
+        expected_version: i64,
+    ) -> Result<(), EventStoreError>;
 }
 
 #[async_trait]
@@ -1800,6 +1883,30 @@ impl EventStoreTrait for EventStore {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn save_events_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        aggregate_id: Uuid,
+        events: Vec<AccountEvent>,
+        expected_version: i64,
+    ) -> Result<(), EventStoreError> {
+        // This will call a new private method that contains the core logic
+        // of event preparation and bulk insertion, but using the provided transaction.
+        // It bypasses the MPSC queue.
+        Self::store_events_direct_in_tx(
+            tx,
+            aggregate_id,
+            events,
+            expected_version,
+            &self.metrics,
+            &self.version_cache,
+            // event_handlers and event_validators are not directly used in the core saving logic previously,
+            // but passed to flush_batch. If direct saving needs them, they should be passed.
+            // For now, focusing on the DB persistence part.
+        )
+        .await
     }
 }
 

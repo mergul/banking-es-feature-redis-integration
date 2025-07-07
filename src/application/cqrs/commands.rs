@@ -1,20 +1,24 @@
 use crate::domain::{Account, AccountCommand, AccountError, AccountEvent};
 use crate::infrastructure::{
-    cache_service::CacheServiceTrait,
+    // cache_service::CacheServiceTrait, // No longer directly used by command handlers
     event_store::EventStoreTrait,
-    projections::{AccountProjection, ProjectionStoreTrait, TransactionProjection},
-    repository::AccountRepositoryTrait,
+    // projections::{AccountProjection, ProjectionStoreTrait, TransactionProjection}, // No longer directly used
+    // repository::AccountRepositoryTrait, // Not used by this specific handler
+    OutboxRepositoryTrait, // Added for outbox pattern
+    OutboxMessage, // Added for outbox pattern
+    kafka_abstraction::KafkaConfig, // For topic names
 };
-use anyhow::Result;
+use anyhow::Result; // Result from anyhow
 use async_trait::async_trait;
 use bincode;
 use chrono::Utc;
 use rust_decimal::Decimal;
-use std::io::Write;
+use sqlx::PgPool; // For transaction management
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tracing::{error, info}; // Removed warn as it wasn't used after refactor
 use uuid::Uuid;
+
 
 /// Command handler trait for CQRS pattern
 #[async_trait]
@@ -30,15 +34,17 @@ pub struct CommandBus {
 impl CommandBus {
     pub fn new(
         event_store: Arc<dyn EventStoreTrait>,
-        projection_store: Arc<dyn ProjectionStoreTrait>,
-        cache_service: Arc<dyn CacheServiceTrait>,
-        kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>,
+        // projection_store: Arc<dyn ProjectionStoreTrait>, // Removed
+        // cache_service: Arc<dyn CacheServiceTrait>,       // Removed
+        outbox_repository: Arc<dyn OutboxRepositoryTrait>,
+        db_pool: Arc<PgPool>,
+        kafka_config: Arc<KafkaConfig>,
     ) -> Self {
         let account_command_handler = Arc::new(AccountCommandHandler::new(
             event_store,
-            projection_store,
-            cache_service,
-            kafka_producer,
+            outbox_repository,
+            db_pool,
+            kafka_config,
         ));
 
         Self {
@@ -62,7 +68,7 @@ impl CommandBus {
 pub struct CommandResult {
     pub success: bool,
     pub account_id: Option<Uuid>,
-    pub events: Vec<AccountEvent>,
+    pub events: Vec<AccountEvent>, // Return events for client/caller context if needed
     pub message: String,
 }
 
@@ -79,29 +85,20 @@ impl From<CommandResult> for () {
 /// Account command handler implementing CQRS write model
 pub struct AccountCommandHandler {
     event_store: Arc<dyn EventStoreTrait>,
-    // projection_store: Arc<dyn ProjectionStoreTrait>, // No longer needed if all handlers are refactored
-    // cache_service: Arc<dyn CacheServiceTrait>,       // No longer needed if all handlers are refactored
-    // kafka_producer: Arc<crate::infrastructure::kafka_abstraction::KafkaProducer>, // Removed, replaced by outbox
-    outbox_repository: Arc<crate::infrastructure::OutboxRepositoryTrait>, // ADDED
-    db_pool: Arc<sqlx::PgPool>, // ADDED - to manage transactions for outbox + event store
-    kafka_config: Arc<crate::infrastructure::kafka_abstraction::KafkaConfig>, // ADDED - for topic names
+    outbox_repository: Arc<dyn OutboxRepositoryTrait>,
+    db_pool: Arc<PgPool>,
+    kafka_config: Arc<KafkaConfig>,
 }
 
 impl AccountCommandHandler {
     pub fn new(
         event_store: Arc<dyn EventStoreTrait>,
-        // projection_store: Arc<dyn ProjectionStoreTrait>, // Remove if not needed
-        // cache_service: Arc<dyn CacheServiceTrait>,       // Remove if not needed
-        outbox_repository: Arc<crate::infrastructure::OutboxRepositoryTrait>, // ADDED
-        db_pool: Arc<sqlx::PgPool>, // ADDED
-        kafka_config: Arc<crate::infrastructure::kafka_abstraction::KafkaConfig>, // ADDED
+        outbox_repository: Arc<dyn OutboxRepositoryTrait>,
+        db_pool: Arc<PgPool>,
+        kafka_config: Arc<KafkaConfig>,
     ) -> Self {
         Self {
             event_store,
-            // projection_store,
-            // cache_service,
-            outbox_repository,
-            db_pool,
             outbox_repository,
             db_pool,
             kafka_config,
@@ -113,326 +110,187 @@ impl AccountCommandHandler {
         match event {
             AccountEvent::MoneyDeposited { transaction_id, .. } => *transaction_id,
             AccountEvent::MoneyWithdrawn { transaction_id, .. } => *transaction_id,
-            // For AccountCreated and AccountClosed, transaction_id might not be present directly in the event struct
-            // or might not be the desired unique ID for the event itself.
-            // Here, we generate a new UUID if no specific ID is available from the event.
-            // Alternatively, domain events could be designed to always carry a unique event_id.
             _ => Uuid::new_v4(),
         }
     }
 
-    /// Handle create account command
-    pub async fn handle_create_account(
+    // Helper to create outbox messages from domain events
+    fn create_outbox_messages(&self, account_id: Uuid, events: &[AccountEvent]) -> Vec<OutboxMessage> {
+        events.iter().filter_map(|event| {
+            match bincode::serialize(event) {
+                Ok(payload) => Some(OutboxMessage {
+                    aggregate_id: account_id,
+                    event_id: Self::generate_event_id_for_outbox(event),
+                    event_type: event.event_type().to_string(),
+                    payload,
+                    topic: self.kafka_config.event_topic.clone(),
+                    metadata: None,
+                }),
+                Err(e) => {
+                    error!("Failed to serialize event {:?} for outbox: {}", event, e);
+                    None // Skip events that fail to serialize
+                }
+            }
+        }).collect()
+    }
+
+
+    async fn handle_command_with_outbox(
         &self,
-        command: AccountCommand,
+        account_id: Uuid,
+        initial_account_version: i64, // For CreateAccount this is 0, for others it's account.version
+        original_command: &AccountCommand, // To regenerate events if needed, or pass events directly
+        mut account_for_state: Account, // Account state for validation and event generation
+        success_message_prefix: &str,
     ) -> Result<CommandResult, AccountError> {
-        let start_time = Instant::now();
 
-        match command {
-            AccountCommand::CreateAccount {
-                account_id,
-                ref owner_name,
-                initial_balance,
-            } => {
-                let account = Account::new(account_id, owner_name.clone(), initial_balance)?;
-                let command_for_handling = AccountCommand::CreateAccount {
-                    account_id,
-                    owner_name: owner_name.clone(),
-                    initial_balance,
-                };
-                let events = account.handle_command(&command_for_handling)?;
+        let events = account_for_state.handle_command(original_command)
+            .map_err(|e| {
+                // If handle_command itself fails (e.g. validation error), no DB transaction needed yet.
+                error!("Domain command handling failed for account {}: {:?}", account_id, e);
+                e
+            })?;
 
-                let mut tx = self.db_pool.begin().await.map_err(|e| AccountError::InfrastructureError(format!("DB Error: {}", e)))?;
+        if events.is_empty() {
+            // No events produced, possibly a NOP command or already handled by domain logic.
+            // Consider what to return. For now, assuming success if no domain error.
+            info!("No events produced by command for account {}", account_id);
+            return Ok(CommandResult {
+                success: true,
+                account_id: Some(account_id),
+                events: Vec::new(),
+                message: format!("{} (no state change)", success_message_prefix),
+            });
+        }
 
-                // CONCEPTUAL: self.event_store.save_events_in_transaction(&mut tx, ...).await
-                // For now, assuming EventStore commits its own transaction before outbox write.
-                // This is the main atomicity challenge with the current EventStore design.
-                self.event_store
-                    .save_events(account_id, events.clone(), 0)
-                    .await
-                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+        let mut tx = self.db_pool.begin().await.map_err(|e| AccountError::InfrastructureError(format!("DB Error starting transaction: {}", e)))?;
 
-                let outbox_messages: Vec<crate::infrastructure::OutboxMessage> = events.iter().map(|event| {
-                    crate::infrastructure::OutboxMessage {
-                        aggregate_id: account_id,
-                        event_id: Self::generate_event_id_for_outbox(event),
-                        event_type: event.event_type().to_string(),
-                        payload: bincode::serialize(event).unwrap_or_default(),
-                        topic: self.kafka_config.event_topic.clone(),
-                        metadata: None,
+        match self.event_store.save_events_in_transaction(&mut tx, account_id, events.clone(), initial_account_version).await {
+            Ok(_) => {
+                // Apply events to local account state for CommandResult
+                for event in &events {
+                    account_for_state.apply_event(event);
+                }
+
+                let outbox_messages = self.create_outbox_messages(account_id, &events);
+
+                if !outbox_messages.is_empty() {
+                    if let Err(e) = self.outbox_repository.add_pending_messages(&mut tx, outbox_messages).await {
+                        error!("Outbox write failed for account {}: {}. Attempting rollback.", account_id, e);
+                        tx.rollback().await.map_err(|re| AccountError::InfrastructureError(format!("DB Rollback Error: {}", re)))?;
+                        return Err(AccountError::InfrastructureError(format!("Outbox write failed: {}", e)));
                     }
-                }).collect();
-
-                if let Err(e) = self.outbox_repository.add_pending_messages(&mut tx, outbox_messages).await {
-                    error!("Outbox write failed for account {}: {}. Attempting rollback.", account_id, e);
-                    // Note: Rollback here won't affect EventStore if it committed separately.
+                } else if events.iter().any(|event| bincode::serialize(event).is_err()) {
+                    // This case means all events failed serialization
+                    error!("All events failed to serialize for outbox for account {}. Attempting rollback.", account_id);
                     tx.rollback().await.map_err(|re| AccountError::InfrastructureError(format!("DB Rollback Error: {}", re)))?;
-                    return Err(AccountError::InfrastructureError(format!("Outbox write failed: {}", e)));
+                    return Err(AccountError::InfrastructureError("Critical: Event serialization failed for outbox.".to_string()));
                 }
 
                 tx.commit().await.map_err(|e| AccountError::InfrastructureError(format!("DB Commit Error: {}", e)))?;
 
-                // Removed direct Kafka publishing
-                // Removed direct projection/cache updates
-
                 info!(
-                    "Account created successfully: {} in {:.2}s",
-                    account_id,
-                    start_time.elapsed().as_secs_f64()
+                    "{} (events saved to store & outbox) for account {}",
+                    success_message_prefix, account_id
                 );
 
                 Ok(CommandResult {
                     success: true,
                     account_id: Some(account_id),
                     events,
-                    message: "Account created successfully".to_string(),
+                    message: format!("{}, pending publish", success_message_prefix),
                 })
             }
-            _ => Err(AccountError::InfrastructureError(
-                "Invalid command for create account handler".to_string(),
-            )),
+            Err(e) => {
+                tx.rollback().await.map_err(|re| AccountError::InfrastructureError(format!("DB Rollback Error after event store failure: {}", re)))?;
+                Err(e) // EventStoreError is compatible with AccountError if From is implemented, or map it
+            }
         }
     }
 
-    /// Handle deposit money command
+
+    pub async fn handle_create_account(
+        &self,
+        command: AccountCommand,
+    ) -> Result<CommandResult, AccountError> {
+        if let AccountCommand::CreateAccount { account_id, ref owner_name, initial_balance } = command {
+            let account = Account::new(account_id, owner_name.clone(), initial_balance)?;
+            self.handle_command_with_outbox(account_id, 0, &command, account, "Account created successfully").await
+        } else {
+            Err(AccountError::InfrastructureError("Invalid command type for handle_create_account".to_string()))
+        }
+    }
+
     pub async fn handle_deposit_money(
         &self,
         command: AccountCommand,
     ) -> Result<CommandResult, AccountError> {
-        let start_time = Instant::now();
-
-        match command {
-            AccountCommand::DepositMoney { account_id, amount } => {
-                // Get current account state
-                let mut account = self.get_account_state(account_id).await?;
-                let events = account.handle_command(&command)?;
-
-                // Save events to event store
-                self.event_store
-                    .save_events(account_id, events.clone(), account.version)
-                    .await
-                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
-
-                // Apply events to account (state is needed for CommandResult, but not for sync updates)
-                // The actual state update for queries will happen via KafkaEventProcessor
-                for event in &events {
-                    account.apply_event(event);
-                }
-
-                // Synchronous projection and cache updates are removed.
-                // This will now be handled by KafkaEventProcessor consuming events.
-
-                // Start Transaction
-                let mut tx = self.db_pool.begin().await.map_err(|e| AccountError::InfrastructureError(format!("DB Error starting transaction: {}", e)))?;
-
-                // CONCEPTUAL: EventStore operation should ideally use `tx`
-                // self.event_store.save_events_in_transaction(&mut tx, account_id, events.clone(), account.version).await...
-                // Current: EventStore manages its own transaction, risk of partial failure.
-                match self.event_store.save_events(account_id, events.clone(), account.version).await {
-                    Ok(_) => {
-                        let outbox_messages: Vec<crate::infrastructure::OutboxMessage> = events.iter().map(|event| {
-                            crate::infrastructure::OutboxMessage {
-                                aggregate_id: account_id,
-                                event_id: Self::generate_event_id_for_outbox(event),
-                                event_type: event.event_type().to_string(),
-                                payload: bincode::serialize(event).unwrap_or_default(), // Handle error
-                                topic: self.kafka_config.event_topic.clone(),
-                                metadata: None,
-                            }
-                        }).collect();
-
-                        if let Err(e) = self.outbox_repository.add_pending_messages(&mut tx, outbox_messages).await {
-                            error!("Outbox write failed for account {}: {}. Attempting rollback.", account_id, e);
-                            // Note: Rollback here won't affect EventStore if it committed separately.
-                            tx.rollback().await.map_err(|re| AccountError::InfrastructureError(format!("DB Rollback Error: {}", re)))?;
-                            return Err(AccountError::InfrastructureError(format!("Outbox write failed: {}", e)));
-                        }
-
-                        tx.commit().await.map_err(|e| AccountError::InfrastructureError(format!("DB Commit Error: {}", e)))?;
-
-                        // Removed direct Kafka publishing. It's now responsibility of Outbox Poller.
-                    }
-                    Err(e) => {
-                        // Event store save failed
-                        tx.rollback().await.map_err(|re| AccountError::InfrastructureError(format!("DB Rollback Error after event store failure: {}", re)))?;
-                        return Err(AccountError::InfrastructureError(e.to_string()));
-                    }
-                }
-
-                info!(
-                    "Deposit successful: {} amount {} in {:.2}s",
-                    account_id,
-                    amount,
-                    start_time.elapsed().as_secs_f64()
-                );
-
-                Ok(CommandResult {
-                    success: true,
-                    account_id: Some(account_id),
-                    events,
-                    message: "Deposit successful".to_string(),
-                })
-            }
-            _ => Err(AccountError::InfrastructureError(
-                "Invalid command for deposit handler".to_string(),
-            )),
+        if let AccountCommand::DepositMoney { account_id, .. } = command {
+            let account = self.get_account_state(account_id).await?; // Load aggregate
+            self.handle_command_with_outbox(account_id, account.version, &command, account, "Deposit successful").await
+        } else {
+            Err(AccountError::InfrastructureError("Invalid command type for handle_deposit_money".to_string()))
         }
     }
 
-    /// Handle withdraw money command
     pub async fn handle_withdraw_money(
         &self,
         command: AccountCommand,
     ) -> Result<CommandResult, AccountError> {
-        let start_time = Instant::now();
-
-        match command {
-            AccountCommand::WithdrawMoney { account_id, amount } => {
-                // Get current account state
-                let mut account = self.get_account_state(account_id).await?;
-                let events = account.handle_command(&command)?;
-
-                // Save events to event store
-                self.event_store
-                    .save_events(account_id, events.clone(), account.version)
-                    .await
-                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
-
-                // Apply events to account locally for potential immediate use (e.g. in CommandResult)
-                for event in &events {
-                    account.apply_event(event);
-                }
-
-                // Synchronous projection and cache updates are removed.
-                // This will now be handled by KafkaEventProcessor consuming events.
-
-                // Publish events to Kafka
-                // `account.version` reflects the version after these events are applied.
-                if let Err(e) = self
-                    .kafka_producer
-                    .send_event_batch(account_id, events.clone(), account.version)
-                    .await
-                {
-                    error!(
-                        "Failed to publish withdraw events to Kafka for account {}: {}",
-                        account_id, e
-                    );
-                }
-
-                info!(
-                    "Withdrawal successful: {} amount {} in {:.2}s",
-                    account_id,
-                    amount,
-                    start_time.elapsed().as_secs_f64()
-                );
-
-                Ok(CommandResult {
-                    success: true,
-                    account_id: Some(account_id),
-                    events,
-                    message: "Withdrawal successful".to_string(),
-                })
-            }
-            _ => Err(AccountError::InfrastructureError(
-                "Invalid command for withdraw handler".to_string(),
-            )),
+         if let AccountCommand::WithdrawMoney { account_id, .. } = command {
+            let account = self.get_account_state(account_id).await?; // Load aggregate
+            self.handle_command_with_outbox(account_id, account.version, &command, account, "Withdrawal successful").await
+        } else {
+            Err(AccountError::InfrastructureError("Invalid command type for handle_withdraw_money".to_string()))
         }
     }
 
-    /// Handle close account command
     pub async fn handle_close_account(
         &self,
         command: AccountCommand,
     ) -> Result<CommandResult, AccountError> {
-        let start_time = Instant::now();
-
-        match command {
-            AccountCommand::CloseAccount {
-                account_id,
-                ref reason,
-            } => {
-                // Get current account state
-                let mut account = self.get_account_state(account_id).await?;
-                let command_for_handling = AccountCommand::CloseAccount {
-                    account_id,
-                    reason: reason.clone(),
-                };
-                let events = account.handle_command(&command_for_handling)?;
-
-                // Save events to event store
-                self.event_store
-                    .save_events(account_id, events.clone(), account.version)
-                    .await
-                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
-
-                // Apply events to account locally for potential immediate use
-                for event in &events {
-                    account.apply_event(event);
-                }
-
-                // Synchronous projection update and cache invalidation are removed.
-                // KafkaEventProcessor will handle updating projections (mark as inactive)
-                // and cache invalidation/updates based on the AccountClosed event.
-
-                // Publish events to Kafka
-                // `account.version` reflects the version after these events are applied.
-                if let Err(e) = self
-                    .kafka_producer
-                    .send_event_batch(account_id, events.clone(), account.version)
-                    .await
-                {
-                    error!(
-                        "Failed to publish close account events to Kafka for account {}: {}",
-                        account_id, e
-                    );
-                }
-
-                info!(
-                    "Account closed successfully: {} in {:.2}s",
-                    account_id,
-                    start_time.elapsed().as_secs_f64()
-                );
-
-                Ok(CommandResult {
-                    success: true,
-                    account_id: Some(account_id),
-                    events,
-                    message: "Account closed: {}".to_string() + &(reason).to_string(),
-                })
-            }
-            _ => Err(AccountError::InfrastructureError(
-                "Invalid command for close account handler".to_string(),
-            )),
+        if let AccountCommand::CloseAccount { account_id, ref reason } = command {
+            let account = self.get_account_state(account_id).await?; // Load aggregate
+            let message_prefix = format!("Account closed (reason: {})", reason);
+            self.handle_command_with_outbox(account_id, account.version, &command, account, &message_prefix).await
+        } else {
+            Err(AccountError::InfrastructureError("Invalid command type for handle_close_account".to_string()))
         }
     }
 
-    /// Get current account state by replaying events
+    // get_account_state should ideally also use the transaction if it's part of read-modify-write
+    // For now, it reads before the transaction starts. It also uses CacheService which is no longer a direct dependency.
+    // This method needs to be refactored or its interaction with transactions clarified.
+    // For this sketch, we assume it can fetch the state needed.
+    // A proper solution would involve passing `&mut Transaction` to `get_events` or loading within the transaction.
     async fn get_account_state(&self, account_id: Uuid) -> Result<Account, AccountError> {
-        // Try cache first
-        if let Ok(Some(cached_account)) = self.cache_service.get_account(account_id).await {
-            return Ok(cached_account);
-        }
+        // TODO: Refactor this to not use self.cache_service if it's removed,
+        // and ideally, load aggregate within the same transaction as command processing.
+        // For now, it relies on EventStoreTrait::get_events which doesn't take a tx.
 
-        // Get events from event store and replay them
+        // Placeholder for direct cache access if AccountCommandHandler had it:
+        // if let Ok(Some(cached_account)) = self.cache_service.get_account(account_id).await {
+        //     return Ok(cached_account);
+        // }
+
         let events = self
             .event_store
             .get_events(account_id, None)
             .await
-            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+            .map_err(|e| AccountError::InfrastructureError(format!("EventStore Error: {}",e.to_string())))?;
 
         if events.is_empty() {
             return Err(AccountError::NotFound);
         }
 
-        // Replay events to build current state
-        let mut account = Account::default();
-        for event in events {
-            // Convert Event to AccountEvent
-            let account_event: AccountEvent = bincode::deserialize(&event.event_data)
+        let mut account = Account::default(); // Make sure Account::default initializes id and version correctly for rehydration
+        account.id = account_id; // Explicitly set id
+        for event_wrapper in events {
+            let account_event: AccountEvent = bincode::deserialize(&event_wrapper.event_data)
                 .map_err(|e| AccountError::EventDeserializationError(e.to_string()))?;
             account.apply_event(&account_event);
+            account.version = event_wrapper.version; // Crucial: update version from stored event
         }
-
         Ok(account)
     }
 }
@@ -440,16 +298,60 @@ impl AccountCommandHandler {
 #[async_trait]
 impl CommandHandler<AccountCommand, CommandResult> for AccountCommandHandler {
     async fn handle(&self, command: AccountCommand) -> Result<CommandResult, AccountError> {
-        match command {
-            AccountCommand::CreateAccount { .. } => self.handle_create_account(command).await,
-            AccountCommand::DepositMoney { .. } => self.handle_deposit_money(command).await,
-            AccountCommand::WithdrawMoney { .. } => self.handle_withdraw_money(command).await,
-            AccountCommand::CloseAccount { .. } => self.handle_close_account(command).await,
+        let start_time = Instant::now(); // Keep overall timing if desired
+        let result = match command {
+            AccountCommand::CreateAccount { .. } => self.handle_create_account(command.clone()).await,
+            AccountCommand::DepositMoney { .. } => self.handle_deposit_money(command.clone()).await,
+            AccountCommand::WithdrawMoney { .. } => self.handle_withdraw_money(command.clone()).await,
+            AccountCommand::CloseAccount { .. } => self.handle_close_account(command.clone()).await,
+        };
+        // Log timing or other general aspects here if needed, using original `command` for context
+        if let Ok(ref cmd_res) = result {
+             info!(
+                "Command {:?} for account {:?} processed in {:.2}s. Success: {}. Message: {}",
+                original_command_type(&command), // Helper to get command type string
+                cmd_res.account_id.unwrap_or_default(),
+                start_time.elapsed().as_secs_f64(),
+                cmd_res.success,
+                cmd_res.message
+            );
+        } else if let Err(ref e) = result {
+             error!(
+                "Command {:?} for account {} failed after {:.2}s: {:?}",
+                original_command_type(&command),
+                get_account_id_from_command(&command).unwrap_or_default(),
+                start_time.elapsed().as_secs_f64(),
+                e
+            );
         }
+        result
     }
 }
 
-// Command DTOs for API layer
+// Helper to get command type for logging
+fn original_command_type(command: &AccountCommand) -> &'static str {
+    match command {
+        AccountCommand::CreateAccount { .. } => "CreateAccount",
+        AccountCommand::DepositMoney { .. } => "DepositMoney",
+        AccountCommand::WithdrawMoney { .. } => "WithdrawMoney",
+        AccountCommand::CloseAccount { .. } => "CloseAccount",
+    }
+}
+// Helper to get account_id from command for logging, if available
+fn get_account_id_from_command(command: &AccountCommand) -> Option<Uuid> {
+    match command {
+        AccountCommand::CreateAccount { account_id, .. } => Some(*account_id),
+        AccountCommand::DepositMoney { account_id, .. } => Some(*account_id),
+        AccountCommand::WithdrawMoney { account_id, .. } => Some(*account_id),
+        AccountCommand::CloseAccount { account_id, .. } => Some(*account_id),
+    }
+}
+
+
+// Command DTOs for API layer (assuming these are defined elsewhere or not needed directly here)
+// ... (CreateAccountCommand, DepositMoneyCommand, etc. DTOs and From traits remain the same) ...
+// Implement From traits for command conversion (assuming these are defined elsewhere or not needed directly here)
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CreateAccountCommand {
     pub owner_name: String,
@@ -474,11 +376,10 @@ pub struct CloseAccountCommand {
     pub reason: String,
 }
 
-// Implement From traits for command conversion
 impl From<CreateAccountCommand> for AccountCommand {
     fn from(cmd: CreateAccountCommand) -> Self {
         AccountCommand::CreateAccount {
-            account_id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(), // ID generated here for Create command
             owner_name: cmd.owner_name,
             initial_balance: cmd.initial_balance,
         }
