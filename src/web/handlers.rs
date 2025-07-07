@@ -113,6 +113,7 @@ pub struct AccountsResponse {
     pub accounts: Vec<AccountProjection>,
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn create_account(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<CreateAccountRequest>,
@@ -142,6 +143,7 @@ pub async fn create_account(
     }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn get_account(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Path(id): Path<Uuid>,
@@ -159,6 +161,7 @@ pub async fn get_account(
     }
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn deposit_money(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Path(id): Path<Uuid>,
@@ -174,6 +177,7 @@ pub async fn deposit_money(
     }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn withdraw_money(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Path(id): Path<Uuid>,
@@ -189,6 +193,7 @@ pub async fn withdraw_money(
     }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn get_all_accounts(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
 ) -> Result<Json<AccountsResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -203,6 +208,7 @@ pub async fn get_all_accounts(
     }
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn get_account_transactions(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Path(account_id): Path<Uuid>,
@@ -218,10 +224,12 @@ pub async fn get_account_transactions(
     }
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "healthy" }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn metrics(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
@@ -235,6 +243,7 @@ pub async fn metrics(
     })))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead. Auth logic might be centralized or use CQRS patterns too.")]
 pub async fn login(
     State((_, auth_service)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<LoginRequest>,
@@ -246,6 +255,7 @@ pub async fn login(
     Ok(Json(response))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead. Auth logic might be centralized or use CQRS patterns too.")]
 pub async fn logout(
     State((_, auth_service)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<LogoutRequest>,
@@ -259,6 +269,7 @@ pub async fn logout(
     })))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead.")]
 pub async fn batch_transactions(
     State((service, _)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(request): Json<BatchTransactionRequest>,
@@ -308,6 +319,7 @@ pub async fn batch_transactions(
     }))
 }
 
+#[deprecated(note = "Use handlers in src/web/cqrs_handlers.rs instead. Auth logic might be centralized or use CQRS patterns too.")]
 pub async fn register(
     State((_, auth_service)): State<(Arc<AccountService>, Arc<AuthService>)>,
     Json(payload): Json<RegisterRequest>,
@@ -349,6 +361,7 @@ fn create_request_context(
 }
 
 /// Get log statistics
+#[deprecated(note = "Consider moving to a dedicated operational/admin endpoint if needed, or use centralized logging platform.")]
 pub async fn get_log_statistics() -> Result<Json<serde_json::Value>, StatusCode> {
     match get_log_stats("logs") {
         Ok(stats) => {

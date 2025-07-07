@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 // Service metrics
+#[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
 #[derive(Debug, Default)]
 pub struct ServiceMetrics {
     pub commands_processed: std::sync::atomic::AtomicU64,
@@ -29,6 +30,7 @@ pub struct ServiceMetrics {
     pub cache_misses: std::sync::atomic::AtomicU64,
 }
 
+#[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
 #[derive(Clone)]
 pub struct AccountService {
     repository: Arc<dyn AccountRepositoryTrait + 'static>,
@@ -51,6 +53,7 @@ impl AccountService {
     /// * `cache_service`: The cache service for caching account data.
     /// * `middleware`: The middleware for handling request-specific logic.
     /// * `max_requests_per_second`: The maximum number of requests per second allowed.
+    #[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
     pub fn new(
         repository: Arc<dyn AccountRepositoryTrait + 'static>,
         projections: Arc<dyn ProjectionStoreTrait + 'static>,
@@ -96,6 +99,7 @@ impl AccountService {
         service
     }
 
+    #[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
     pub async fn create_account(
         &self,
         owner_name: String,
@@ -166,6 +170,7 @@ impl AccountService {
         Ok(account_id)
     }
 
+    #[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
     pub async fn deposit_money(
         &self,
         account_id: Uuid,
@@ -261,6 +266,7 @@ impl AccountService {
         }
     }
 
+    #[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
     pub async fn withdraw_money(
         &self,
         account_id: Uuid,
@@ -356,6 +362,7 @@ impl AccountService {
         }
     }
 
+    #[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
     pub async fn get_account(
         &self,
         account_id: Uuid,
@@ -416,6 +423,7 @@ impl AccountService {
         Ok(None)
     }
 
+    #[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
     pub async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>, AccountError> {
         self.projections
             .get_all_accounts()
@@ -423,6 +431,7 @@ impl AccountService {
             .map_err(|e| AccountError::InfrastructureError(e.to_string()))
     }
 
+    #[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
     pub async fn get_account_transactions(
         &self,
         account_id: Uuid,
@@ -514,6 +523,7 @@ impl AccountService {
         Ok(())
     }
 
+    #[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
     pub async fn is_duplicate_command(&self, command_id: Uuid) -> bool {
         let mut cache = self.command_cache.write().await;
         if cache.contains_key(&command_id) {
@@ -524,6 +534,7 @@ impl AccountService {
         }
     }
 
+    #[deprecated(note = "Use CQRSAccountService and CQRS command/query handlers instead.")]
     pub fn get_metrics(&self) -> &ServiceMetrics {
         &self.metrics
     }

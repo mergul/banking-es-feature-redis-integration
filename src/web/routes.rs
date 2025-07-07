@@ -12,6 +12,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 // New function that only sets up the router with routes, expecting services to be passed in
+#[deprecated(note = "Use create_cqrs_router in src/web/cqrs_routes.rs instead.")]
 pub fn create_router(
     account_service: Arc<AccountService>,
     auth_service: Arc<AuthService>,
