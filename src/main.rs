@@ -3,7 +3,6 @@ use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPo
 use crate::infrastructure::event_store::{EventStore, DB_POOL};
 use crate::infrastructure::kafka_abstraction::KafkaConfig;
 use crate::infrastructure::logging::{init_logging, start_log_rotation_task, LoggingConfig};
-use crate::infrastructure::outbox::PostgresOutboxRepository;
 use crate::infrastructure::projections::ProjectionStore;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
 use crate::infrastructure::redis_abstraction::RedisClient;
@@ -137,14 +136,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create KafkaConfig instance (can be loaded from env or defaults)
     let kafka_config = KafkaConfig::default(); // Or load from env
 
-    let db_pool = service_context.event_store.get_pool();
     let cqrs_service = Arc::new(CQRSAccountService::new(
         service_context.event_store.clone(),
         service_context.projection_store.clone(),
         service_context.cache_service.clone(),
-        Arc::new(PostgresOutboxRepository::new(db_pool.clone())),
-        Arc::new(db_pool),
-        Arc::new(kafka_config),
+        kafka_config, // Pass KafkaConfig
         1000,                       // max_concurrent_operations
         100,                        // batch_size
         Duration::from_millis(100), // batch_timeout
@@ -152,8 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create CQRS router
     // The auth_service is cloned for potential future use in CQRS auth middleware/handlers
-    let cqrs_router =
-        create_cqrs_router(cqrs_service.clone(), service_context.auth_service.clone());
+    let cqrs_router = create_cqrs_router(cqrs_service.clone(), service_context.auth_service.clone());
 
     // The main app is now just the CQRS router, potentially with some global/static routes.
     // For now, the root HTML page lists both old and new endpoints. This should be updated later.
@@ -164,8 +159,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http()) // This was already in create_router, ensure it's not duplicated if also in create_cqrs_router
-                .layer(CompressionLayer::new()) // Same as above
-                .layer(CorsLayer::permissive()) // Same as above
+                .layer(CompressionLayer::new())    // Same as above
+                .layer(CorsLayer::permissive())    // Same as above
                 .into_inner(),
         )
         // Fallback for static files

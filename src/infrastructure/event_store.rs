@@ -1557,7 +1557,7 @@ impl EventStore {
         aggregate_id: Uuid,
         domain_events: Vec<AccountEvent>, // Renamed from 'events' to avoid conflict with 'Event' struct
         expected_version: i64,
-        metrics: &EventStoreMetrics,        // Passed in
+        metrics: &EventStoreMetrics, // Passed in
         version_cache: &DashMap<Uuid, i64>, // Passed in
     ) -> Result<(), EventStoreError> {
         if domain_events.is_empty() {
@@ -1572,23 +1572,21 @@ impl EventStore {
             .into_iter()
             .map(|domain_event| {
                 current_event_version += 1;
-                let event_data = bincode::serialize(&domain_event)
-                    .map_err(EventStoreError::SerializationErrorBincode)?;
-                Ok(Event {
+                Event {
                     id: Uuid::new_v4(), // Event ID for the 'events' table row
                     aggregate_id,
                     event_type: domain_event.event_type().to_string(),
-                    event_data,
+                    event_data: bincode::serialize(&domain_event)
+                        .map_err(EventStoreError::SerializationErrorBincode)?,
                     version: current_event_version,
                     timestamp: Utc::now(),
                     metadata: EventMetadata::default(), // Default metadata for now
-                })
+                }
             })
             .collect::<Result<Vec<Event>, EventStoreError>>()?;
-        // The above .collect will propagate the first error from bincode::serialize.
+            // The above .collect will propagate the first error from bincode::serialize.
 
-        if prepared_events.is_empty() {
-            // Should not happen if domain_events was not empty, but good check
+        if prepared_events.is_empty() { // Should not happen if domain_events was not empty, but good check
             return Ok(());
         }
 
@@ -1611,7 +1609,7 @@ impl EventStore {
         // This existing method already takes a transaction.
         // We pass the externally provided `tx`.
         Self::bulk_insert_events_optimized(
-            tx,                      // The crucial part: use the passed-in transaction
+            tx, // The crucial part: use the passed-in transaction
             prepared_events.clone(), // Clone if needed later for metrics/return, or pass ownership
             metrics,
             version_cache,
@@ -1626,6 +1624,7 @@ impl EventStore {
 
         Ok(())
     }
+
 
     pub async fn get_current_version(&self, aggregate_id: Uuid) -> Result<i64, EventStoreError> {
         let version = sqlx::query!(

@@ -58,6 +58,7 @@ pub trait OutboxRepositoryTrait: Send + Sync {
     /// Deletes a batch of messages by their outbox IDs.
     async fn delete_processed_batch(&self, outbox_message_ids: &[Uuid]) -> Result<usize>;
 
+
     /// Increments the retry count and updates the last attempt timestamp for a message.
     /// Optionally, if retries exceed a max, it could update status to 'FAILED'.
     async fn increment_retry_attempt(
@@ -84,6 +85,7 @@ pub trait OutboxRepositoryTrait: Send + Sync {
 // Need to add to src/infrastructure/mod.rs:
 // pub mod outbox;
 // pub use outbox::{OutboxMessage, PersistedOutboxMessage, OutboxRepositoryTrait, PostgresOutboxRepository};
+
 
 // --- PostgresOutboxRepository Implementation ---
 
@@ -115,21 +117,21 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         // In a production system, consider using `sqlx::QueryBuilder` for batch inserts
         // or PostgreSQL's `COPY` for very high throughput if events per transaction are many.
         for msg in messages {
-            sqlx::query(
+            sqlx::query!(
                 r#"
                 INSERT INTO kafka_outbox
                     (aggregate_id, event_id, event_type, payload, topic, metadata, status, created_at, updated_at, last_attempt_at, retry_count)
                 VALUES
                     ($1, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), NULL, 0)
-                "#
+                "#,
+                msg.aggregate_id,
+                msg.event_id,
+                msg.event_type,
+                msg.payload,
+                msg.topic,
+                msg.metadata // Option<serde_json::Value> is handled by sqlx for JSONB
             )
-            .bind(msg.aggregate_id)
-            .bind(msg.event_id)
-            .bind(msg.event_type)
-            .bind(msg.payload)
-            .bind(msg.topic)
-            .bind(msg.metadata)
-            .execute(&mut **tx)
+            .execute(&mut **tx) // Execute within the passed transaction
             .await
             .map_err(|e| anyhow::anyhow!("Failed to insert message into kafka_outbox: {}", e))?;
         }
@@ -147,9 +149,7 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         // FOR UPDATE SKIP LOCKED;
         // Then update status to 'PROCESSING' for fetched messages.
         // For sketch purposes, returning empty.
-        tracing::warn!(
-            "PostgresOutboxRepository::fetch_pending_messages is not fully implemented (sketch)."
-        );
+        tracing::warn!("PostgresOutboxRepository::fetch_pending_messages is not fully implemented (sketch).");
         Ok(Vec::new())
     }
 
@@ -157,9 +157,7 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         // Poller Service Logic:
         // UPDATE kafka_outbox SET status = 'PROCESSED', updated_at = NOW() WHERE id = $1;
         // Or DELETE FROM kafka_outbox WHERE id = $1;
-        tracing::warn!(
-            "PostgresOutboxRepository::mark_as_processed is not fully implemented (sketch)."
-        );
+        tracing::warn!("PostgresOutboxRepository::mark_as_processed is not fully implemented (sketch).");
         let _ = outbox_message_id; //
         Ok(())
     }
@@ -168,13 +166,16 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         if outbox_message_ids.is_empty() {
             return Ok(0);
         }
-        let result = sqlx::query("DELETE FROM kafka_outbox WHERE id = ANY($1)")
-            .bind(outbox_message_ids)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to delete processed outbox messages: {}", e))?;
+        let result = sqlx::query!(
+            "DELETE FROM kafka_outbox WHERE id = ANY($1)",
+            outbox_message_ids
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to delete processed outbox messages: {}", e))?;
         Ok(result.rows_affected() as usize)
     }
+
 
     async fn increment_retry_attempt(
         &self,
@@ -187,10 +188,8 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         // If retry_count >= max_retries, set status = 'FAILED'.
         // Else, ensure status is 'PENDING' (or remains 'PROCESSING' if poller manages this state for retries).
         let mut tx = self.pool.begin().await?;
-        let current: Option<PersistedOutboxMessage> = sqlx::query_as!(
-            PersistedOutboxMessage,
-            "SELECT * FROM kafka_outbox WHERE id = $1 FOR UPDATE",
-            outbox_message_id
+        let current: Option<PersistedOutboxMessage> = sqlx::query_as!(PersistedOutboxMessage,
+            "SELECT * FROM kafka_outbox WHERE id = $1 FOR UPDATE", outbox_message_id
         )
         .fetch_optional(&mut *tx)
         .await?;
@@ -198,40 +197,36 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         if let Some(msg) = current {
             let new_retry_count = msg.retry_count + 1;
             if new_retry_count >= max_retries {
-                sqlx::query(
-                    "UPDATE kafka_outbox SET status = 'FAILED', retry_count = $1, last_attempt_at = $2, updated_at = NOW() WHERE id = $3"
+                sqlx::query!(
+                    "UPDATE kafka_outbox SET status = 'FAILED', retry_count = $1, last_attempt_at = $2, updated_at = NOW() WHERE id = $3",
+                    new_retry_count, new_last_attempt_at, outbox_message_id
                 )
-                .bind(new_retry_count)
-                .bind(new_last_attempt_at)
-                .bind(outbox_message_id)
                 .execute(&mut *tx).await?;
             } else {
-                sqlx::query(
-                    "UPDATE kafka_outbox SET retry_count = $1, last_attempt_at = $2, updated_at = NOW() WHERE id = $3"
+                sqlx::query!(
+                    // Keep status as PENDING or PROCESSING depending on poller strategy
+                    "UPDATE kafka_outbox SET retry_count = $1, last_attempt_at = $2, updated_at = NOW() WHERE id = $3",
+                    new_retry_count, new_last_attempt_at, outbox_message_id
                 )
-                .bind(new_retry_count)
-                .bind(new_last_attempt_at)
-                .bind(outbox_message_id)
                 .execute(&mut *tx).await?;
             }
             tx.commit().await?;
         } else {
             // Message not found, perhaps already processed and deleted.
             tx.rollback().await?; // Rollback the transaction
-            return Err(anyhow::anyhow!(
-                "Outbox message {} not found for retry increment.",
-                outbox_message_id
-            ));
+            return Err(anyhow::anyhow!("Outbox message {} not found for retry increment.", outbox_message_id));
         }
         tracing::warn!("PostgresOutboxRepository::increment_retry_attempt is a partial sketch.");
         Ok(())
     }
 
     async fn mark_as_failed(&self, outbox_message_id: Uuid) -> Result<()> {
-        sqlx::query("UPDATE kafka_outbox SET status = 'FAILED', updated_at = NOW() WHERE id = $1")
-            .bind(outbox_message_id)
-            .execute(&self.pool) // This should ideally be within a transaction if called by poller
-            .await?;
+        sqlx::query!(
+            "UPDATE kafka_outbox SET status = 'FAILED', updated_at = NOW() WHERE id = $1",
+            outbox_message_id
+        )
+        .execute(&self.pool) // This should ideally be within a transaction if called by poller
+        .await?;
         tracing::warn!("PostgresOutboxRepository::mark_as_failed is a sketch.");
         Ok(())
     }
@@ -245,7 +240,7 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         sqlx::query_as!(PersistedOutboxMessage,
             "SELECT * FROM kafka_outbox WHERE status = 'PROCESSING' AND updated_at < $1 ORDER BY updated_at ASC LIMIT $2",
             threshold_timestamp,
-            limit as i64
+            limit
         )
         .fetch_all(&self.pool)
         .await
@@ -256,8 +251,10 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         if outbox_message_ids.is_empty() {
             return Ok(0);
         }
-        let result = sqlx::query("UPDATE kafka_outbox SET status = 'PENDING', updated_at = NOW(), retry_count = retry_count + 1 WHERE id = ANY($1) AND status = 'PROCESSING'")
-            .bind(outbox_message_ids)
+        let result = sqlx::query!(
+            "UPDATE kafka_outbox SET status = 'PENDING', updated_at = NOW(), retry_count = retry_count + 1 WHERE id = ANY($1) AND status = 'PROCESSING'",
+            outbox_message_ids
+        )
         .execute(&self.pool)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to reset stuck outbox messages: {}", e))?;

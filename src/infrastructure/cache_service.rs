@@ -266,21 +266,12 @@ impl CacheService {
     }
 
     pub async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>> {
-        // Try in-memory cache first (L1 cache)
+        // Try in-memory cache first
         let shard_index = self.get_shard_index(account_id);
         if let Some(entry) = self.shards[shard_index].get(&account_id) {
             if !self.is_expired(&entry) {
-                // Update access time for LRU
-                let mut entry_mut = entry.clone();
-                entry_mut.last_accessed = Instant::now();
-                entry_mut.access_count += 1;
-                self.shards[shard_index].insert(account_id, entry_mut);
-
                 self.metrics
                     .shard_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.metrics
-                    .hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Ok(Some(entry.value.clone()));
             }
@@ -291,7 +282,7 @@ impl CacheService {
             .shard_misses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Try Redis cache (L2 cache)
+        // Try Redis cache
         let mut conn = self.redis_client.get_connection().await?;
         use redis::AsyncCommands;
         let key = "account:{}".to_string() + &(account_id).to_string();
@@ -303,7 +294,7 @@ impl CacheService {
                         self.metrics
                             .hits
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        // Update in-memory cache (promote to L1)
+                        // Update in-memory cache
                         self.update_in_memory_cache(account_id, account.clone());
                         Ok(Some(account))
                     }
@@ -350,9 +341,7 @@ impl CacheService {
         let metadata = serde_json::json!({
             "last_updated": chrono::Utc::now().timestamp(),
             "version": account.version,
-            "is_active": account.is_active,
-            "cache_hits": 0,
-            "last_accessed": chrono::Utc::now().timestamp()
+            "is_active": account.is_active
         });
         pipeline.set_ex(
             metadata_key.as_bytes(),
@@ -361,7 +350,7 @@ impl CacheService {
         );
 
         // Execute pipeline atomically
-        pipeline.query_async::<_, ()>(&mut conn).await?;
+        pipeline.query_async(&mut conn).await?;
 
         // Update in-memory cache immediately (write-through)
         self.update_in_memory_cache(account.id, account.clone());
@@ -463,14 +452,23 @@ impl CacheService {
     }
 
     pub async fn invalidate_account(&self, account_id: Uuid) -> Result<()> {
-        // Only invalidate in-memory cache, keep Redis cache for read-through
+        // Invalidate in-memory cache
         let shard_index = self.get_shard_index(account_id);
         self.shards[shard_index].remove(&account_id);
         self.event_cache.remove(&account_id);
 
-        // Don't invalidate Redis cache immediately - let it expire naturally
-        // This allows for better cache hit rates during high load
+        // Invalidate Redis cache
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
+        let account_key = "account:{}".to_string() + &(account_id).to_string();
+        let events_key = "events:{}".to_string() + &(account_id).to_string();
 
+        conn.del::<_, ()>(account_key.as_bytes()).await?;
+        conn.del::<_, ()>(events_key.as_bytes()).await?;
+
+        self.metrics
+            .evictions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -484,76 +482,89 @@ impl CacheService {
         state.accounts_to_warm = account_ids.clone();
         drop(state);
 
-        info!(
-            "Starting optimized cache warmup for {} accounts",
-            account_ids.len()
-        );
-
-        // For test scenarios, we'll use a simpler approach that doesn't rely on Redis
-        // being pre-populated. Instead, we'll just ensure the cache is ready for the
-        // upcoming operations by pre-allocating space and setting up the warming state.
-
         let batch_size = self.config.warmup_batch_size;
-        let mut warmup_count = 0;
+        let mut conn = self.redis_client.get_connection().await?;
+        use redis::AsyncCommands;
 
-        // Pre-allocate cache space and prepare warming state
+        info!("Starting cache warmup for {} accounts", account_ids.len());
+
         for chunk in account_ids.chunks(batch_size) {
-            for &account_id in chunk {
-                // Pre-allocate cache entry space (this will be populated when data is accessed)
-                let shard_index = self.get_shard_index(account_id);
+            let mut pipeline = redis::pipe();
 
-                // Ensure the shard exists and has capacity
-                if self.shards[shard_index].len() >= self.config.max_size {
-                    self.evict_entries(shard_index);
+            // Prefetch both account data and metadata in parallel
+            for &account_id in chunk {
+                let account_key = "account:{}".to_string() + &(account_id).to_string();
+                let events_key = "events:{}".to_string() + &(account_id).to_string();
+                let metadata_key = "account_meta:{}".to_string() + &(account_id).to_string();
+
+                pipeline.get(account_key);
+                pipeline.get(events_key);
+                pipeline.get(metadata_key);
+            }
+
+            let results: Vec<redis::Value> = pipeline.query_async(&mut conn).await?;
+
+            for (i, &account_id) in chunk.iter().enumerate() {
+                let account_bytes = match &results[i * 3] {
+                    redis::Value::Data(bytes) => bytes.as_slice(),
+                    _ => &[],
+                };
+                let events_bytes = match &results[i * 3 + 1] {
+                    redis::Value::Data(bytes) => bytes.as_slice(),
+                    _ => &[],
+                };
+                let metadata_bytes = match &results[i * 3 + 2] {
+                    redis::Value::Data(bytes) => bytes.as_slice(),
+                    _ => &[],
+                };
+
+                // Process account data
+                if let Ok(account_data) = bincode::deserialize::<Account>(account_bytes) {
+                    self.update_in_memory_cache(account_id, account_data);
+                    self.metrics
+                        .warmups
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
 
-                warmup_count += 1;
-                self.metrics
-                    .warmups
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Process events data
+                if let Ok(events_data) =
+                    bincode::deserialize::<Vec<(i64, AccountEvent)>>(events_bytes)
+                {
+                    self.event_cache.insert(account_id, events_data);
+                }
+
+                // Process metadata for intelligent prefetching
+                if let Ok(metadata_str) = std::str::from_utf8(metadata_bytes) {
+                    if let Ok(metadata) = serde_json::from_str::<serde_json::Value>(metadata_str) {
+                        // Use metadata for intelligent prefetching decisions
+                        if let Some(last_updated) =
+                            metadata.get("last_updated").and_then(|v| v.as_i64())
+                        {
+                            let now = chrono::Utc::now().timestamp();
+                            let age = now - last_updated;
+
+                            // If data is fresh, mark for aggressive caching
+                            if age < 300 {
+                                // 5 minutes
+                                self.metrics
+                                    .warmups
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
             }
 
             // Small delay to prevent overwhelming the system
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-
-        // Phase 2: Verify cache readiness and log statistics
-        let mut verification_hits = 0;
-        let mut verification_total = 0;
-
-        // Sample a subset for verification
-        let sample_size = std::cmp::min(1000, account_ids.len());
-        let sample_accounts: Vec<Uuid> = account_ids.iter().take(sample_size).cloned().collect();
-
-        for &account_id in &sample_accounts {
-            verification_total += 1;
-            // Check if the shard is ready (has capacity)
-            let shard_index = self.get_shard_index(account_id);
-            if self.shards[shard_index].len() < self.config.max_size {
-                verification_hits += 1;
-            }
-        }
-
-        let verification_rate = if verification_total > 0 {
-            (verification_hits as f64 / verification_total as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        info!(
-            "Cache warmup verification: {:.1}% of {} sample accounts ready for caching",
-            verification_rate, sample_size
-        );
 
         let mut state = self.warming_state.write().await;
         state.is_warming = false;
         state.last_warmup = Some(Instant::now());
         state.accounts_to_warm.clear();
 
-        info!(
-            "Cache warmup completed successfully with {:.1}% verification rate, {} accounts prepared",
-            verification_rate, warmup_count
-        );
+        info!("Cache warmup completed successfully");
         Ok(())
     }
 
@@ -614,62 +625,6 @@ impl CacheService {
 
     pub fn get_metrics(&self) -> &CacheMetrics {
         self.metrics.as_ref()
-    }
-
-    pub fn get_cache_hit_rate(&self) -> f64 {
-        let hits = self.metrics.hits.load(std::sync::atomic::Ordering::Relaxed);
-        let misses = self
-            .metrics
-            .misses
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let shard_hits = self
-            .metrics
-            .shard_hits
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let shard_misses = self
-            .metrics
-            .shard_misses
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        let total_requests = hits + misses + shard_hits + shard_misses;
-        if total_requests > 0 {
-            (hits + shard_hits) as f64 / total_requests as f64 * 100.0
-        } else {
-            0.0
-        }
-    }
-
-    pub fn get_l1_cache_hit_rate(&self) -> f64 {
-        let shard_hits = self
-            .metrics
-            .shard_hits
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let shard_misses = self
-            .metrics
-            .shard_misses
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        let total_l1_requests = shard_hits + shard_misses;
-        if total_l1_requests > 0 {
-            shard_hits as f64 / total_l1_requests as f64 * 100.0
-        } else {
-            0.0
-        }
-    }
-
-    pub fn get_l2_cache_hit_rate(&self) -> f64 {
-        let hits = self.metrics.hits.load(std::sync::atomic::Ordering::Relaxed);
-        let misses = self
-            .metrics
-            .misses
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        let total_l2_requests = hits + misses;
-        if total_l2_requests > 0 {
-            hits as f64 / total_l2_requests as f64 * 100.0
-        } else {
-            0.0
-        }
     }
 }
 
