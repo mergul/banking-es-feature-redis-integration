@@ -125,7 +125,7 @@ async fn setup_cqrs_test_environment(
         event_store,
         projection_store,
         cache_service,
-        kafka_config, // Pass KafkaConfig
+        kafka_config,              // Pass KafkaConfig
         2000,                      // max_concurrent_operations - increased for higher throughput
         500,                       // batch_size - increased for better batching efficiency
         Duration::from_millis(50), // batch_timeout - reduced for faster processing
@@ -189,6 +189,11 @@ enum OperationResult {
 
 #[tokio::test]
 async fn test_cqrs_high_throughput_performance() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .try_init()
+        .ok();
     tracing::info!("🚀 Starting CQRS high throughput performance test...");
 
     // Add global timeout for the entire test
@@ -226,7 +231,10 @@ async fn test_cqrs_high_throughput_performance() {
 
         // Add a delay to allow KafkaEventProcessor to process AccountCreated events
         let initial_processing_delay = Duration::from_secs(5); // Tunable parameter
-        tracing::info!("Waiting {:.1}s for initial event processing before cache warmup...", initial_processing_delay.as_secs_f32());
+        tracing::info!(
+            "Waiting {:.1}s for initial event processing before cache warmup...",
+            initial_processing_delay.as_secs_f32()
+        );
         tokio::time::sleep(initial_processing_delay).await;
 
         // Enhanced cache warmup phase adopting integration test strategy
@@ -264,9 +272,11 @@ async fn test_cqrs_high_throughput_performance() {
 
         // Increased stabilization period after warmup, allowing more time for event processing
         let post_warmup_delay = Duration::from_secs(3); // Tunable
-        tracing::info!("Waiting {:.1}s for post-warmup stabilization...", post_warmup_delay.as_secs_f32());
+        tracing::info!(
+            "Waiting {:.1}s for post-warmup stabilization...",
+            post_warmup_delay.as_secs_f32()
+        );
         tokio::time::sleep(post_warmup_delay).await;
-
 
         // Start CQRS performance test
         tracing::info!("🚀 Starting CQRS high throughput performance test...");
