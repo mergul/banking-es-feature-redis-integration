@@ -49,30 +49,31 @@ pub trait OutboxRepositoryTrait: Send + Sync {
     /// This method should ideally implement a way to lock the fetched rows
     /// (e.g., SELECT ... FOR UPDATE SKIP LOCKED) or update their status to 'PROCESSING'
     /// immediately to prevent concurrent pollers from picking the same messages.
-    async fn fetch_pending_messages(
+    async fn fetch_and_lock_pending_messages(
         &self,
-        stuck_threshold: Duration,
         limit: i64,
     ) -> Result<Vec<PersistedOutboxMessage>>;
 
     /// Marks a message as successfully processed (e.g., sent to Kafka).
-    /// This might involve updating its status to 'PROCESSED' or deleting it.
+    /// This typically involves deleting it from the outbox.
     async fn mark_as_processed(&self, outbox_message_id: Uuid) -> Result<()>;
 
     /// Deletes a batch of messages by their outbox IDs.
+    /// Note: This might be redundant if mark_as_processed deletes individual messages.
+    /// Kept for now if batch deletion is specifically needed elsewhere.
     async fn delete_processed_batch(&self, outbox_message_ids: &[Uuid]) -> Result<usize>;
 
     /// Increments the retry count and updates the last attempt timestamp for a message.
-    /// Optionally, if retries exceed a max, it could update status to 'FAILED'.
-    async fn increment_retry_attempt(
+    /// If retries exceed a max, it updates status to 'FAILED'. Otherwise, sets back to 'PENDING'.
+    async fn record_failed_attempt(
         &self,
         outbox_message_id: Uuid,
-        new_last_attempt_at: DateTime<Utc>,
         max_retries: i32,
+        error_message: Option<String>, // Store the last error message
     ) -> Result<()>;
 
-    /// Marks a message as 'FAILED' after exhausting retries.
-    async fn mark_as_failed(&self, outbox_message_id: Uuid) -> Result<()>;
+    /// Directly marks a message as 'FAILED'. Used if a message should not be retried.
+    async fn mark_as_failed(&self, outbox_message_id: Uuid, error_message: Option<String>) -> Result<()>;
 
     /// Finds messages that might be stuck in 'PROCESSING' state for too long.
     async fn find_stuck_processing_messages(
@@ -140,30 +141,75 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         Ok(())
     }
 
-    async fn fetch_pending_messages(
+    async fn fetch_and_lock_pending_messages(
         &self,
-        stuck_threshold: Duration,
         limit: i64,
     ) -> Result<Vec<PersistedOutboxMessage>> {
-        let threshold_timestamp = Utc::now() - chrono::Duration::from_std(stuck_threshold)?;
-        sqlx::query_as!(PersistedOutboxMessage,
-            "SELECT * FROM kafka_outbox WHERE status = 'PROCESSING' AND updated_at < $1 ORDER BY updated_at ASC LIMIT $2",
-            threshold_timestamp,
-            limit
+        let mut tx = self.pool.begin().await?;
+
+        // Select PENDING messages, lock them, and update their status to PROCESSING
+        // The RETURNING clause gets the updated rows, including their original values before the update.
+        // Note: The actual PersistedOutboxMessage fields (like status) will reflect the state *after* this update if selected directly.
+        // It's often better to select first, then update. However, for atomicity:
+        // 1. Select IDs of PENDING messages with FOR UPDATE SKIP LOCKED.
+        // 2. Update these IDs to PROCESSING.
+        // 3. Select the full rows for these IDs.
+
+        let messages_to_process: Vec<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT id FROM kafka_outbox
+            WHERE status = 'PENDING'
+            ORDER BY created_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT $1
+            "#,
         )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Into::into)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        if messages_to_process.is_empty() {
+            tx.commit().await?;
+            return Ok(Vec::new());
+        }
+
+        // Update status to 'PROCESSING' for the selected messages
+        sqlx::query(
+            r#"
+            UPDATE kafka_outbox
+            SET status = 'PROCESSING', updated_at = NOW(), last_attempt_at = NOW()
+            WHERE id = ANY($1)
+            "#,
+        )
+        .bind(&messages_to_process)
+        .execute(&mut *tx)
+        .await?;
+
+        // Now fetch the full details of these messages that are now 'PROCESSING'
+        let fetched_messages = sqlx::query_as!(
+            PersistedOutboxMessage,
+            "SELECT * FROM kafka_outbox WHERE id = ANY($1) ORDER BY created_at ASC",
+            &messages_to_process
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(fetched_messages)
     }
 
     async fn mark_as_processed(&self, outbox_message_id: Uuid) -> Result<()> {
-        // Poller Service Logic:
-        // UPDATE kafka_outbox SET status = 'PROCESSED', updated_at = NOW() WHERE id = $1;
-        // Or DELETE FROM kafka_outbox WHERE id = $1;
-        tracing::warn!(
-            "PostgresOutboxRepository::mark_as_processed is not fully implemented (sketch)."
-        );
-        let _ = outbox_message_id; //
+        sqlx::query!(
+            "DELETE FROM kafka_outbox WHERE id = $1",
+            outbox_message_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete processed outbox message {}: {}", outbox_message_id, e);
+            anyhow::anyhow!("Failed to delete processed outbox message {}: {}", outbox_message_id, e)
+        })?;
+        tracing::info!("Successfully processed and deleted outbox message {}", outbox_message_id);
         Ok(())
     }
 
@@ -177,66 +223,87 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to delete processed outbox messages: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to delete processed outbox messages batch: {}", e))?;
         Ok(result.rows_affected() as usize)
     }
 
-    async fn increment_retry_attempt(
+    async fn record_failed_attempt(
         &self,
         outbox_message_id: Uuid,
-        new_last_attempt_at: DateTime<Utc>,
         max_retries: i32,
+        error_message: Option<String>,
     ) -> Result<()> {
-        // Poller Service Logic:
-        // Atomically increment retry_count and update last_attempt_at.
-        // If retry_count >= max_retries, set status = 'FAILED'.
-        // Else, ensure status is 'PENDING' (or remains 'PROCESSING' if poller manages this state for retries).
         let mut tx = self.pool.begin().await?;
-        let current: Option<PersistedOutboxMessage> = sqlx::query_as!(
-            PersistedOutboxMessage,
-            "SELECT * FROM kafka_outbox WHERE id = $1 FOR UPDATE",
-            outbox_message_id
+
+        let current: Option<(i32, String)> = sqlx::query_as(
+            "SELECT retry_count, status FROM kafka_outbox WHERE id = $1 FOR UPDATE",
         )
+        .bind(outbox_message_id)
         .fetch_optional(&mut *tx)
         .await?;
 
-        if let Some(msg) = current {
-            let new_retry_count = msg.retry_count + 1;
-            if new_retry_count >= max_retries {
-                sqlx::query!(
-                    "UPDATE kafka_outbox SET status = 'FAILED', retry_count = $1, last_attempt_at = $2, updated_at = NOW() WHERE id = $3",
-                    new_retry_count, new_last_attempt_at, outbox_message_id
-                )
-                .execute(&mut *tx).await?;
-            } else {
-                sqlx::query!(
-                    // Keep status as PENDING or PROCESSING depending on poller strategy
-                    "UPDATE kafka_outbox SET retry_count = $1, last_attempt_at = $2, updated_at = NOW() WHERE id = $3",
-                    new_retry_count, new_last_attempt_at, outbox_message_id
-                )
-                .execute(&mut *tx).await?;
+        match current {
+            Some((current_retry_count, current_status)) => {
+                if current_status == "PROCESSED" || current_status == "FAILED" {
+                     tracing::warn!("Attempted to record failure for already {} message: {}", current_status, outbox_message_id);
+                     tx.commit().await?; // Or rollback, depending on desired strictness
+                     return Ok(()); // Or an error indicating invalid state transition
+                }
+
+                let new_retry_count = current_retry_count + 1;
+                let new_last_attempt_at = Utc::now();
+
+                if new_retry_count >= max_retries {
+                    sqlx::query!(
+                        "UPDATE kafka_outbox SET status = 'FAILED', retry_count = $1, last_attempt_at = $2, updated_at = NOW(), error_details = $3 WHERE id = $4",
+                        new_retry_count,
+                        new_last_attempt_at,
+                        error_message,
+                        outbox_message_id
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                    tracing::error!("Message {} failed after {} retries. Last error: {:?}", outbox_message_id, new_retry_count, error_message);
+                } else {
+                    // Set back to PENDING for the poller to pick it up again after a delay (poller will implement the delay)
+                    sqlx::query!(
+                        "UPDATE kafka_outbox SET status = 'PENDING', retry_count = $1, last_attempt_at = $2, updated_at = NOW(), error_details = $3 WHERE id = $4",
+                        new_retry_count,
+                        new_last_attempt_at,
+                        error_message,
+                        outbox_message_id
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                    tracing::warn!("Message {} failed attempt {}. Will retry. Error: {:?}", outbox_message_id, new_retry_count, error_message);
+                }
+                tx.commit().await?;
             }
-            tx.commit().await?;
-        } else {
-            // Message not found, perhaps already processed and deleted.
-            tx.rollback().await?; // Rollback the transaction
-            return Err(anyhow::anyhow!(
-                "Outbox message {} not found for retry increment.",
-                outbox_message_id
-            ));
+            None => {
+                tx.rollback().await?;
+                tracing::error!("Outbox message {} not found for recording failed attempt.", outbox_message_id);
+                return Err(anyhow::anyhow!(
+                    "Outbox message {} not found for recording failed attempt.",
+                    outbox_message_id
+                ));
+            }
         }
-        tracing::warn!("PostgresOutboxRepository::increment_retry_attempt is a partial sketch.");
         Ok(())
     }
 
-    async fn mark_as_failed(&self, outbox_message_id: Uuid) -> Result<()> {
+    async fn mark_as_failed(&self, outbox_message_id: Uuid, error_message: Option<String>) -> Result<()> {
         sqlx::query!(
-            "UPDATE kafka_outbox SET status = 'FAILED', updated_at = NOW() WHERE id = $1",
-            outbox_message_id
+            "UPDATE kafka_outbox SET status = 'FAILED', updated_at = NOW(), last_attempt_at = NOW(), error_details = $1 WHERE id = $2",
+            error_message,
+            outbox_message_id,
         )
-        .execute(&self.pool) // This should ideally be within a transaction if called by poller
-        .await?;
-        tracing::warn!("PostgresOutboxRepository::mark_as_failed is a sketch.");
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to mark outbox message {} as FAILED: {}", outbox_message_id, e);
+            anyhow::anyhow!("Failed to mark outbox message {} as FAILED: {}", outbox_message_id, e)
+        })?;
+        tracing::info!("Marked outbox message {} as FAILED. Error: {:?}", outbox_message_id, error_message);
         Ok(())
     }
 

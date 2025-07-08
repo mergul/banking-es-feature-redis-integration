@@ -27,6 +27,7 @@ pub mod timeout_manager;
 pub mod troubleshooting;
 pub mod user_repository;
 pub mod outbox; // Added
+pub mod outbox_poller; // Added for OutboxPollingService
 
 pub use auth::*;
 pub use cache_service::*;
@@ -53,3 +54,4 @@ pub use sharding::*;
 pub use user_repository::*;
 pub use user_repository::{NewUser, User, UserRepository, UserRepositoryError}; // Added re-export
 pub use outbox::{OutboxMessage, PersistedOutboxMessage, OutboxRepositoryTrait, PostgresOutboxRepository}; // Added PostgresOutboxRepository
+pub use outbox_poller::{OutboxPollingService, OutboxPollerConfig}; // Added for OutboxPollingService
