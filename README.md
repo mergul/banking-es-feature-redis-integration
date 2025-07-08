@@ -1200,3 +1200,5 @@ The system provides comprehensive metrics:
    - Connection pool usage
    - Cache utilization
    - Batch processing stats
+
+for topic in $(/home/kafka/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list | grep -v '^__'); do /home/kafka/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic "$topic"; done
