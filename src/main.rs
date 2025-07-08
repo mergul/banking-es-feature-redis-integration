@@ -1,8 +1,10 @@
 use crate::infrastructure::auth::{AuthConfig, AuthService};
 use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
 use crate::infrastructure::event_store::{EventStore, DB_POOL};
-use crate::infrastructure::kafka_abstraction::KafkaConfig;
+use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaProducer, KafkaProducerTrait};
 use crate::infrastructure::logging::{init_logging, start_log_rotation_task, LoggingConfig};
+use crate::infrastructure::outbox::PostgresOutboxRepository;
+use crate::infrastructure::outbox_poller::{OutboxPollerConfig, OutboxPollingService};
 use crate::infrastructure::projections::ProjectionStore;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
 use crate::infrastructure::redis_abstraction::RedisClient;
@@ -126,25 +128,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize all services with background tasks
     let service_context = init_all_services().await?;
 
-    // Clone services once for router state - NO LONGER NEEDED FOR DEPRECATED ROUTER
-    // let router_state = (
-    //     service_context.account_service.clone(), // account_service is removed from ServiceContext
-    //     service_context.auth_service.clone(),
-    // );
-
-    // Initialize CQRS service using the services from ServiceContext
     // Create KafkaConfig instance (can be loaded from env or defaults)
     let kafka_config = KafkaConfig::default(); // Or load from env
 
+    // Initialize CQRS service using the services from ServiceContext
     let cqrs_service = Arc::new(CQRSAccountService::new(
         service_context.event_store.clone(),
         service_context.projection_store.clone(),
         service_context.cache_service.clone(),
-        kafka_config, // Pass KafkaConfig
+        kafka_config.clone(), // Clone KafkaConfig for CQRS service
         1000,                       // max_concurrent_operations
         100,                        // batch_size
         Duration::from_millis(100), // batch_timeout
     ));
+
+    // --- Initialize and Start Outbox Poller Service ---
+    let outbox_repo = Arc::new(PostgresOutboxRepository::new(DB_POOL.get().unwrap().clone())); // Assuming DB_POOL is initialized
+    let kafka_producer_for_poller = Arc::new(KafkaProducer::new(kafka_config.clone())?); // Clone KafkaConfig for producer
+    let poller_config = OutboxPollerConfig::default();
+    let (poller_shutdown_tx, poller_shutdown_rx) = tokio::sync::mpsc::channel(1);
+
+    let outbox_poller_service = OutboxPollingService::new(
+        outbox_repo,
+        kafka_producer_for_poller,
+        poller_config,
+        poller_shutdown_rx,
+    );
+    tokio::spawn(outbox_poller_service.run());
+    info!("Outbox Polling Service started.");
+    // --- End Outbox Poller Service ---
 
     // Create CQRS router
     // The auth_service is cloned for potential future use in CQRS auth middleware/handlers
@@ -196,6 +208,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Graceful shutdown of services
+    info!("Sending shutdown signal to Outbox Poller Service...");
+    if poller_shutdown_tx.send(()).await.is_err() {
+        error!("Failed to send shutdown signal to Outbox Poller Service. It might have already stopped.");
+    }
+    // Add a small delay to allow the poller to process the shutdown signal, if necessary.
+    // Alternatively, the poller's run method could return a JoinHandle to await on.
+    // For simplicity here, we'll just send the signal.
+
     service_context.shutdown().await;
     info!("Server shutdown complete");
 

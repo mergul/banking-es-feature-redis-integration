@@ -285,37 +285,26 @@ impl KafkaEventProcessor {
         let mut process_account_state_related_updates = true;
 
         if let Some(existing_proj) = existing_projection_opt {
-            if existing_proj.version.unwrap_or(0) >= batch.version {
-                info!(
-                    "Skipping account projection update for account {} (batch version {}, projection version {}). Events likely already processed.",
-                    batch.account_id, batch.version, existing_proj.version.unwrap_or(0)
-                );
-                process_account_state_related_updates = false;
-                // Although we skip DB update, we use the existing projection for any potential (though unlikely needed) downstream cache updates.
-                account_projection_to_update = existing_proj;
-            } else {
-                let mut current_proj = existing_proj.clone();
-                for event in &batch.events {
-                    current_proj = current_proj.apply_event(event)?;
-                }
-                current_proj.version = Some(batch.version);
-                current_proj.updated_at = chrono::Utc::now();
-                account_projection_to_update = current_proj;
+            // Since we removed version from projections, we'll always process updates
+            // This is simpler and avoids potential issues with version tracking
+            let mut current_proj = existing_proj.clone();
+            for event in &batch.events {
+                current_proj = current_proj.apply_event(event)?;
             }
+            current_proj.updated_at = chrono::Utc::now();
+            account_projection_to_update = current_proj;
         } else {
             account_projection_to_update = AccountProjection {
                 id: batch.account_id,
                 owner_name: "".to_string(),
                 balance: Decimal::ZERO,
                 is_active: false,
-                version: Some(0),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
             for event in &batch.events {
                 account_projection_to_update = account_projection_to_update.apply_event(event)?;
             }
-            account_projection_to_update.version = Some(batch.version);
             account_projection_to_update.updated_at = chrono::Utc::now();
             // If it's an AccountCreated event, apply_event should set created_at.
             if account_projection_to_update.created_at.timestamp_millis()
@@ -343,7 +332,7 @@ impl KafkaEventProcessor {
                 owner_name: account_projection_to_update.owner_name.clone(),
                 balance: account_projection_to_update.balance,
                 is_active: account_projection_to_update.is_active,
-                version: account_projection_to_update.version.unwrap_or(0),
+                version: 0, // Projections don't track version anymore
             };
 
             self.cache_service

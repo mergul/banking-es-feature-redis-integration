@@ -1,5 +1,5 @@
 use banking_es::{
-    application::services::{AccountService, CQRSAccountService},
+    application::services::CQRSAccountService,
     domain::AccountError,
     infrastructure::{
         cache_service::{CacheConfig, CacheService, CacheServiceTrait, EvictionPolicy},
@@ -9,7 +9,6 @@ use banking_es::{
             TransactionProjection,
         },
         redis_abstraction::RealRedisClient,
-        repository::AccountRepository,
     },
 };
 use futures::FutureExt;
@@ -41,7 +40,6 @@ use uuid::Uuid;
 
 struct CQRSTestContext {
     cqrs_service: Arc<CQRSAccountService>,
-    standard_service: Arc<AccountService>,
     db_pool: PgPool,
     _shutdown_tx: mpsc::Sender<()>,
     _background_tasks: Vec<JoinHandle<()>>,
@@ -71,8 +69,8 @@ async fn setup_cqrs_test_environment(
     });
 
     let pool = PgPoolOptions::new()
-        .max_connections(10000)
-        .min_connections(5000)
+        .max_connections(50)
+        .min_connections(25)
         .acquire_timeout(Duration::from_secs(30))
         .idle_timeout(Duration::from_secs(3600))
         .max_lifetime(Duration::from_secs(7200))
@@ -108,18 +106,6 @@ async fn setup_cqrs_test_environment(
 
     let cache_service = Arc::new(CacheService::new(redis_client_trait.clone(), cache_config))
         as Arc<dyn CacheServiceTrait + 'static>;
-    let repository: Arc<AccountRepository> = Arc::new(AccountRepository::new(event_store.clone()));
-    let repository_clone = repository.clone();
-
-    // Initialize both services for comparison
-    let standard_service = Arc::new(AccountService::new(
-        repository,
-        projection_store.clone(),
-        cache_service.clone(),
-        Arc::new(Default::default()),
-        5000,
-    ));
-
     let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default(); // Add KafkaConfig
     let cqrs_service = Arc::new(CQRSAccountService::new(
         event_store,
@@ -161,7 +147,6 @@ async fn setup_cqrs_test_environment(
 
     Ok(CQRSTestContext {
         cqrs_service,
-        standard_service: standard_service,
         db_pool: pool,
         _shutdown_tx: shutdown_tx,
         _background_tasks: background_tasks,
@@ -189,11 +174,11 @@ enum OperationResult {
 
 #[tokio::test]
 async fn test_cqrs_high_throughput_performance() {
-    use tracing_subscriber::{fmt, EnvFilter};
-    fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
-        .try_init()
-        .ok();
+    // use tracing_subscriber::{fmt, EnvFilter};
+    // fmt()
+    //     .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+    //     .try_init()
+    //     .ok();
     tracing::info!("🚀 Starting CQRS high throughput performance test...");
 
     // Add global timeout for the entire test
