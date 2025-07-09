@@ -21,15 +21,15 @@ pub fn create_cqrs_router(
             post(crate::web::cqrs_handlers::create_account),
         )
         .route(
-            "/api/cqrs/accounts/:id/deposit",
+            "/api/cqrs/accounts/{id}/deposit",
             post(crate::web::cqrs_handlers::deposit_money),
         )
         .route(
-            "/api/cqrs/accounts/:id/withdraw",
+            "/api/cqrs/accounts/{id}/withdraw",
             post(crate::web::cqrs_handlers::withdraw_money),
         )
         .route(
-            "/api/cqrs/accounts/:id/close",
+            "/api/cqrs/accounts/{id}/close",
             post(crate::web::cqrs_handlers::close_account),
         )
         // Account queries
@@ -38,19 +38,19 @@ pub fn create_cqrs_router(
             get(crate::web::cqrs_handlers::get_all_accounts),
         )
         .route(
-            "/api/cqrs/accounts/:id",
+            "/api/cqrs/accounts/{id}",
             get(crate::web::cqrs_handlers::get_account),
         )
         .route(
-            "/api/cqrs/accounts/:id/balance",
+            "/api/cqrs/accounts/{id}/balance",
             get(crate::web::cqrs_handlers::get_account_balance),
         )
         .route(
-            "/api/cqrs/accounts/:id/status",
+            "/api/cqrs/accounts/{id}/status",
             get(crate::web::cqrs_handlers::is_account_active),
         )
         .route(
-            "/api/cqrs/accounts/:id/transactions",
+            "/api/cqrs/accounts/{id}/transactions",
             get(crate::web::cqrs_handlers::get_account_transactions),
         )
         // Batch operations

@@ -1,0 +1,4 @@
+2025-07-08T23:36:31.670088Z ERROR ThreadId(01) src/infrastructure/init.rs:54: Error during Kafka event processor shutdown
+2025-07-08T23:36:31.677698Z ERROR ThreadId(01) src/infrastructure/init.rs:61: Error during L1 cache updater shutdown
+2025-07-08T23:55:14.325721Z ERROR ThreadId(01) src/infrastructure/init.rs:54: Error during Kafka event processor shutdown
+2025-07-08T23:55:14.326501Z ERROR ThreadId(01) src/infrastructure/init.rs:61: Error during L1 cache updater shutdown

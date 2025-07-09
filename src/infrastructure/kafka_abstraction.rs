@@ -29,6 +29,23 @@ use rdkafka::{
 };
 use tokio::time::timeout;
 
+#[async_trait]
+pub trait KafkaProducerTrait: Send + Sync {
+    async fn publish_event(
+        &self,
+        topic: &str,
+        payload: &str,
+        key: &str,
+    ) -> Result<(), BankingKafkaError>;
+
+    async fn publish_binary_event(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        key: &str,
+    ) -> Result<(), BankingKafkaError>;
+}
+
 // Custom module for bincode-compatible DateTime<Utc> serialization
 mod bincode_datetime {
     use chrono::{DateTime, TimeZone, Utc};
@@ -205,7 +222,7 @@ impl KafkaProducer {
             return Ok(());
         }
 
-        let topic = "{}-events".to_string() + &(self.config.topic_prefix).to_string();
+        let topic = format!("{}-events", self.config.topic_prefix);
         let key = account_id.to_string();
 
         let batch = EventBatch {
@@ -247,7 +264,7 @@ impl KafkaProducer {
             return Ok(());
         }
 
-        let topic = "{}-cache".to_string() + &(self.config.topic_prefix).to_string();
+        let topic = format!("{}-cache", self.config.topic_prefix);
         let key = account_id.to_string();
 
         let payload = bincode::serialize(account)?;
@@ -281,7 +298,7 @@ impl KafkaProducer {
             return Ok(());
         }
 
-        let topic = "{}-dlq".to_string() + &(self.config.topic_prefix).to_string();
+        let topic = format!("{}-dlq", self.config.topic_prefix);
         let key = message.account_id.to_string();
 
         let payload = bincode::serialize(message)?;
@@ -345,6 +362,57 @@ impl KafkaProducer {
     }
 }
 
+#[async_trait]
+impl KafkaProducerTrait for KafkaProducer {
+    async fn publish_event(
+        &self,
+        topic: &str,
+        payload: &str,
+        key: &str,
+    ) -> Result<(), BankingKafkaError> {
+        if !self.config.enabled || self.producer.is_none() {
+            return Ok(());
+        }
+
+        self.producer
+            .as_ref()
+            .unwrap()
+            .send(
+                FutureRecord::to(topic)
+                    .payload(payload.as_bytes())
+                    .key(key.as_bytes()),
+                Timeout::After(Duration::from_secs(5)),
+            )
+            .await
+            .map_err(|(e, _)| BankingKafkaError::ProducerError(format!("{:?}", e)))?;
+
+        Ok(())
+    }
+
+    async fn publish_binary_event(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        key: &str,
+    ) -> Result<(), BankingKafkaError> {
+        if !self.config.enabled || self.producer.is_none() {
+            return Ok(());
+        }
+
+        self.producer
+            .as_ref()
+            .unwrap()
+            .send(
+                FutureRecord::to(topic).payload(payload).key(key.as_bytes()),
+                Timeout::After(Duration::from_secs(5)),
+            )
+            .await
+            .map_err(|(e, _)| BankingKafkaError::ProducerError(format!("{:?}", e)))?;
+
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct KafkaConsumer {
     consumer: Option<Arc<StreamConsumer>>,
@@ -385,7 +453,7 @@ impl KafkaConsumer {
             return Ok(());
         }
 
-        let topic = "{}-events".to_string() + &(self.config.topic_prefix).to_string();
+        let topic = format!("{}-events", self.config.topic_prefix);
         self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
         Ok(())
     }
@@ -395,7 +463,7 @@ impl KafkaConsumer {
             return Ok(());
         }
 
-        let topic = "{}-cache".to_string() + &(self.config.topic_prefix).to_string();
+        let topic = format!("{}-cache", self.config.topic_prefix);
         self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
         Ok(())
     }
@@ -405,7 +473,7 @@ impl KafkaConsumer {
             return Ok(());
         }
 
-        let topic = "{}-dlq".to_string() + &(self.config.topic_prefix).to_string();
+        let topic = format!("{}-dlq", self.config.topic_prefix);
         self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
         Ok(())
     }
@@ -418,7 +486,7 @@ impl KafkaConsumer {
             return Ok(0);
         }
 
-        let topic = "{}-events".to_string() + &(self.config.topic_prefix).to_string();
+        let topic = format!("{}-events", self.config.topic_prefix);
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition(&topic, 0);
         self.consumer.as_ref().unwrap().assign(&tpl)?;

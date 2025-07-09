@@ -136,14 +136,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_context.event_store.clone(),
         service_context.projection_store.clone(),
         service_context.cache_service.clone(),
-        kafka_config.clone(), // Clone KafkaConfig for CQRS service
+        kafka_config.clone(),       // Clone KafkaConfig for CQRS service
         1000,                       // max_concurrent_operations
         100,                        // batch_size
         Duration::from_millis(100), // batch_timeout
     ));
 
     // --- Initialize and Start Outbox Poller Service ---
-    let outbox_repo = Arc::new(PostgresOutboxRepository::new(DB_POOL.get().unwrap().clone())); // Assuming DB_POOL is initialized
+    let outbox_repo = Arc::new(PostgresOutboxRepository::new(
+        Arc::clone(DB_POOL.get().unwrap()).as_ref().clone(),
+    )); // Assuming DB_POOL is initialized
     let kafka_producer_for_poller = Arc::new(KafkaProducer::new(kafka_config.clone())?); // Clone KafkaConfig for producer
     let poller_config = OutboxPollerConfig::default();
     let (poller_shutdown_tx, poller_shutdown_rx) = tokio::sync::mpsc::channel(1);
@@ -160,7 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create CQRS router
     // The auth_service is cloned for potential future use in CQRS auth middleware/handlers
-    let cqrs_router = create_cqrs_router(cqrs_service.clone(), service_context.auth_service.clone());
+    let cqrs_router =
+        create_cqrs_router(cqrs_service.clone(), service_context.auth_service.clone());
 
     // The main app is now just the CQRS router, potentially with some global/static routes.
     // For now, the root HTML page lists both old and new endpoints. This should be updated later.
@@ -171,8 +174,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http()) // This was already in create_router, ensure it's not duplicated if also in create_cqrs_router
-                .layer(CompressionLayer::new())    // Same as above
-                .layer(CorsLayer::permissive())    // Same as above
+                .layer(CompressionLayer::new()) // Same as above
+                .layer(CorsLayer::permissive()) // Same as above
                 .into_inner(),
         )
         // Fallback for static files

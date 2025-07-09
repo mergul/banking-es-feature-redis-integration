@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -39,6 +40,8 @@ impl Default for LoggingConfig {
     }
 }
 
+static LOG_GUARDS: OnceCell<Vec<tracing_appender::non_blocking::WorkerGuard>> = OnceCell::new();
+
 /// Initialize comprehensive logging with file rotation and structured output
 pub fn init_logging(config: Option<LoggingConfig>) -> Result<(), Box<dyn std::error::Error>> {
     let config = config.unwrap_or_default();
@@ -51,17 +54,26 @@ pub fn init_logging(config: Option<LoggingConfig>) -> Result<(), Box<dyn std::er
     let warn_appender = RollingFileAppender::new(Rotation::DAILY, &config.log_dir, "warn.log");
     let info_appender = RollingFileAppender::new(Rotation::DAILY, &config.log_dir, "info.log");
     let debug_appender = RollingFileAppender::new(Rotation::DAILY, &config.log_dir, "debug.log");
-
-    // Create non-blocking writers
-    let (error_writer, _error_guard) = tracing_appender::non_blocking(error_appender);
-    let (warn_writer, _warn_guard) = tracing_appender::non_blocking(warn_appender);
-    let (info_writer, _info_guard) = tracing_appender::non_blocking(info_appender);
-    let (debug_writer, _debug_guard) = tracing_appender::non_blocking(debug_appender);
-
-    // Create combined appender for all logs
     let all_appender =
         RollingFileAppender::new(Rotation::DAILY, &config.log_dir, "banking-service.log");
-    let (all_writer, _all_guard) = tracing_appender::non_blocking(all_appender);
+
+    // Create non-blocking writers
+    let (error_writer, error_guard) = tracing_appender::non_blocking(error_appender);
+    let (warn_writer, warn_guard) = tracing_appender::non_blocking(warn_appender);
+    let (info_writer, info_guard) = tracing_appender::non_blocking(info_appender);
+    let (debug_writer, debug_guard) = tracing_appender::non_blocking(debug_appender);
+    let (all_writer, all_guard) = tracing_appender::non_blocking(all_appender);
+
+    // Store guards in static so they are not dropped
+    LOG_GUARDS
+        .set(vec![
+            error_guard,
+            warn_guard,
+            info_guard,
+            debug_guard,
+            all_guard,
+        ])
+        .ok();
 
     // Configure environment filter
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {

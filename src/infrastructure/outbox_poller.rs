@@ -1,11 +1,14 @@
 use anyhow::Result;
+use bincode;
+use chrono;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
-use crate::infrastructure::kafka_abstraction::{KafkaProducer, KafkaProducerTrait};
+use crate::domain::AccountEvent;
+use crate::infrastructure::kafka_abstraction::{EventBatch, KafkaProducer, KafkaProducerTrait};
 use crate::infrastructure::outbox::{OutboxRepositoryTrait, PersistedOutboxMessage};
 
 #[derive(Clone, Debug)]
@@ -52,7 +55,10 @@ impl OutboxPollingService {
     }
 
     pub async fn run(mut self) {
-        info!("OutboxPollingService started with config: {:?}", self.config);
+        info!(
+            "OutboxPollingService started with config: {:?}",
+            self.config
+        );
 
         loop {
             tokio::select! {
@@ -72,7 +78,10 @@ impl OutboxPollingService {
             {
                 Ok(messages) => {
                     if !messages.is_empty() {
-                        info!("Fetched {} messages from outbox for processing.", messages.len());
+                        info!(
+                            "Fetched {} messages from outbox for processing.",
+                            messages.len()
+                        );
                     }
                     for message in messages {
                         self.process_message(message).await;
@@ -90,14 +99,72 @@ impl OutboxPollingService {
 
     async fn process_message(&self, message: PersistedOutboxMessage) {
         info!("Processing outbox message ID: {}", message.id);
+
+        // Deserialize the individual event from the outbox
+        let event: AccountEvent = match bincode::deserialize(&message.payload) {
+            Ok(event) => event,
+            Err(e) => {
+                error!(
+                    "Failed to deserialize event from outbox message {}: {}",
+                    message.id, e
+                );
+                if let Err(repo_err) = self
+                    .outbox_repo
+                    .record_failed_attempt(message.id, self.config.max_retries, Some(e.to_string()))
+                    .await
+                {
+                    error!(
+                        "Failed to record failed attempt for message {}: {}",
+                        message.id, repo_err
+                    );
+                }
+                return;
+            }
+        };
+
+        // Create an EventBatch with the single event
+        let batch = EventBatch {
+            account_id: message.aggregate_id,
+            events: vec![event],
+            version: 0, // We don't track version in outbox, so use 0
+            timestamp: chrono::Utc::now(),
+        };
+
+        // Serialize the batch
+        let batch_payload = match bincode::serialize(&batch) {
+            Ok(payload) => payload,
+            Err(e) => {
+                error!(
+                    "Failed to serialize EventBatch for outbox message {}: {}",
+                    message.id, e
+                );
+                if let Err(repo_err) = self
+                    .outbox_repo
+                    .record_failed_attempt(message.id, self.config.max_retries, Some(e.to_string()))
+                    .await
+                {
+                    error!(
+                        "Failed to record failed attempt for message {}: {}",
+                        message.id, repo_err
+                    );
+                }
+                return;
+            }
+        };
+
+        // Send the batch using the publish_binary_event method
         match self
             .kafka_producer
-            .publish_event(&message.topic, &message.payload, &message.event_id.to_string()) // Assuming event_id as key
+            .publish_binary_event(
+                &message.topic,
+                &batch_payload,
+                &message.event_id.to_string(),
+            )
             .await
         {
             Ok(_) => {
                 info!(
-                    "Successfully published message {} (event_id: {}) to Kafka topic {}.",
+                    "Successfully published EventBatch for outbox message {} (event_id: {}) to Kafka topic {}.",
                     message.id, message.event_id, message.topic
                 );
                 if let Err(e) = self.outbox_repo.mark_as_processed(message.id).await {
@@ -111,7 +178,7 @@ impl OutboxPollingService {
             }
             Err(e) => {
                 error!(
-                    "Failed to publish message {} (event_id: {}) to Kafka: {}. Recording failed attempt.",
+                    "Failed to publish EventBatch for outbox message {} (event_id: {}) to Kafka: {}. Recording failed attempt.",
                     message.id, message.event_id, e
                 );
                 let error_string = Some(e.to_string());

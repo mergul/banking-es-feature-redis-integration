@@ -33,6 +33,7 @@ pub struct PersistedOutboxMessage {
     pub last_attempt_at: Option<DateTime<Utc>>,
     pub retry_count: i32,
     pub metadata: Option<serde_json::Value>,
+    pub error_details: Option<String>, // Error message when processing fails
 }
 
 #[async_trait]
@@ -73,7 +74,11 @@ pub trait OutboxRepositoryTrait: Send + Sync {
     ) -> Result<()>;
 
     /// Directly marks a message as 'FAILED'. Used if a message should not be retried.
-    async fn mark_as_failed(&self, outbox_message_id: Uuid, error_message: Option<String>) -> Result<()>;
+    async fn mark_as_failed(
+        &self,
+        outbox_message_id: Uuid,
+        error_message: Option<String>,
+    ) -> Result<()>;
 
     /// Finds messages that might be stuck in 'PROCESSING' state for too long.
     async fn find_stuck_processing_messages(
@@ -188,7 +193,7 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         // Now fetch the full details of these messages that are now 'PROCESSING'
         let fetched_messages = sqlx::query_as!(
             PersistedOutboxMessage,
-            "SELECT * FROM kafka_outbox WHERE id = ANY($1) ORDER BY created_at ASC",
+            "SELECT id, aggregate_id, event_id, event_type, payload, topic, status, created_at, updated_at, last_attempt_at, retry_count, metadata, error_details FROM kafka_outbox WHERE id = ANY($1) ORDER BY created_at ASC",
             &messages_to_process
         )
         .fetch_all(&mut *tx)
@@ -199,17 +204,25 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
     }
 
     async fn mark_as_processed(&self, outbox_message_id: Uuid) -> Result<()> {
-        sqlx::query!(
-            "DELETE FROM kafka_outbox WHERE id = $1",
+        sqlx::query!("DELETE FROM kafka_outbox WHERE id = $1", outbox_message_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to delete processed outbox message {}: {}",
+                    outbox_message_id,
+                    e
+                );
+                anyhow::anyhow!(
+                    "Failed to delete processed outbox message {}: {}",
+                    outbox_message_id,
+                    e
+                )
+            })?;
+        tracing::info!(
+            "Successfully processed and deleted outbox message {}",
             outbox_message_id
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete processed outbox message {}: {}", outbox_message_id, e);
-            anyhow::anyhow!("Failed to delete processed outbox message {}: {}", outbox_message_id, e)
-        })?;
-        tracing::info!("Successfully processed and deleted outbox message {}", outbox_message_id);
+        );
         Ok(())
     }
 
@@ -235,19 +248,22 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
-        let current: Option<(i32, String)> = sqlx::query_as(
-            "SELECT retry_count, status FROM kafka_outbox WHERE id = $1 FOR UPDATE",
-        )
-        .bind(outbox_message_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let current: Option<(i32, String)> =
+            sqlx::query_as("SELECT retry_count, status FROM kafka_outbox WHERE id = $1 FOR UPDATE")
+                .bind(outbox_message_id)
+                .fetch_optional(&mut *tx)
+                .await?;
 
         match current {
             Some((current_retry_count, current_status)) => {
                 if current_status == "PROCESSED" || current_status == "FAILED" {
-                     tracing::warn!("Attempted to record failure for already {} message: {}", current_status, outbox_message_id);
-                     tx.commit().await?; // Or rollback, depending on desired strictness
-                     return Ok(()); // Or an error indicating invalid state transition
+                    tracing::warn!(
+                        "Attempted to record failure for already {} message: {}",
+                        current_status,
+                        outbox_message_id
+                    );
+                    tx.commit().await?; // Or rollback, depending on desired strictness
+                    return Ok(()); // Or an error indicating invalid state transition
                 }
 
                 let new_retry_count = current_retry_count + 1;
@@ -263,7 +279,12 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
                     )
                     .execute(&mut *tx)
                     .await?;
-                    tracing::error!("Message {} failed after {} retries. Last error: {:?}", outbox_message_id, new_retry_count, error_message);
+                    tracing::error!(
+                        "Message {} failed after {} retries. Last error: {:?}",
+                        outbox_message_id,
+                        new_retry_count,
+                        error_message
+                    );
                 } else {
                     // Set back to PENDING for the poller to pick it up again after a delay (poller will implement the delay)
                     sqlx::query!(
@@ -275,13 +296,21 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
                     )
                     .execute(&mut *tx)
                     .await?;
-                    tracing::warn!("Message {} failed attempt {}. Will retry. Error: {:?}", outbox_message_id, new_retry_count, error_message);
+                    tracing::warn!(
+                        "Message {} failed attempt {}. Will retry. Error: {:?}",
+                        outbox_message_id,
+                        new_retry_count,
+                        error_message
+                    );
                 }
                 tx.commit().await?;
             }
             None => {
                 tx.rollback().await?;
-                tracing::error!("Outbox message {} not found for recording failed attempt.", outbox_message_id);
+                tracing::error!(
+                    "Outbox message {} not found for recording failed attempt.",
+                    outbox_message_id
+                );
                 return Err(anyhow::anyhow!(
                     "Outbox message {} not found for recording failed attempt.",
                     outbox_message_id
@@ -291,7 +320,11 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         Ok(())
     }
 
-    async fn mark_as_failed(&self, outbox_message_id: Uuid, error_message: Option<String>) -> Result<()> {
+    async fn mark_as_failed(
+        &self,
+        outbox_message_id: Uuid,
+        error_message: Option<String>,
+    ) -> Result<()> {
         sqlx::query!(
             "UPDATE kafka_outbox SET status = 'FAILED', updated_at = NOW(), last_attempt_at = NOW(), error_details = $1 WHERE id = $2",
             error_message,
@@ -303,7 +336,11 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
             tracing::error!("Failed to mark outbox message {} as FAILED: {}", outbox_message_id, e);
             anyhow::anyhow!("Failed to mark outbox message {} as FAILED: {}", outbox_message_id, e)
         })?;
-        tracing::info!("Marked outbox message {} as FAILED. Error: {:?}", outbox_message_id, error_message);
+        tracing::info!(
+            "Marked outbox message {} as FAILED. Error: {:?}",
+            outbox_message_id,
+            error_message
+        );
         Ok(())
     }
 
@@ -313,8 +350,9 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         limit: i32,
     ) -> Result<Vec<PersistedOutboxMessage>> {
         let threshold_timestamp = Utc::now() - chrono::Duration::from_std(stuck_threshold)?;
-        sqlx::query_as!(PersistedOutboxMessage,
-            "SELECT * FROM kafka_outbox WHERE status = 'PROCESSING' AND updated_at < $1 ORDER BY updated_at ASC LIMIT $2",
+        sqlx::query_as!(
+            PersistedOutboxMessage,
+            "SELECT id, aggregate_id, event_id, event_type, payload, topic, status, created_at, updated_at, last_attempt_at, retry_count, metadata, error_details FROM kafka_outbox WHERE status = 'PROCESSING' AND updated_at < $1 ORDER BY updated_at ASC LIMIT $2",
             threshold_timestamp,
             limit as i64
         )
