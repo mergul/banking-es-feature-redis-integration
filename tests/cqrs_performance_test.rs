@@ -197,7 +197,7 @@ async fn test_cqrs_high_throughput_performance() {
     let test_future = async {
         // Optimized test parameters for maximum throughput and success rate
         let target_ops = 1200; // Target 1200 OPS
-        let worker_count = 80; // Reduced from 100 to 80 to reduce contention
+        let worker_count = 500; // Increased to 500 for maximum concurrency
         let account_count = 10000; // Increased from 5000 to 10000 for larger account pool
         let channel_buffer_size = 100000; // Large buffer to avoid backpressure
         let max_retries = 2; // Increased from 1 to 2 for better reliability
@@ -782,7 +782,7 @@ async fn test_cqrs_read_heavy_performance() {
 
     let test_future = async {
         let target_ops = 1500; // Higher target for read-heavy workload
-        let worker_count = 100; // More workers for read operations
+        let worker_count = 500; // More workers for read operations
         let account_count = 15000; // More accounts for read variety
         let test_duration = Duration::from_secs(45); // Longer test for read patterns
         let operation_timeout = Duration::from_millis(300); // Faster timeout for reads
