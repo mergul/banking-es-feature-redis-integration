@@ -38,11 +38,34 @@ use tokio::time::timeout;
 use tracing;
 use uuid::Uuid;
 
+// Step 1: Define Enhanced Metrics Structures
+#[derive(Debug)]
+struct AsyncCacheMetrics {
+    propagation_times: Mutex<Vec<Duration>>,
+    hot_account_reads: AtomicU64,
+    hot_account_immediate_cache_hits: AtomicU64, // For a simplified hot account hit measure
+    propagation_measurement_attempts: AtomicU64,
+    propagation_measurement_timeouts: AtomicU64,
+}
+
+impl Default for AsyncCacheMetrics {
+    fn default() -> Self {
+        AsyncCacheMetrics {
+            propagation_times: Mutex::new(Vec::new()),
+            hot_account_reads: AtomicU64::new(0),
+            hot_account_immediate_cache_hits: AtomicU64::new(0),
+            propagation_measurement_attempts: AtomicU64::new(0),
+            propagation_measurement_timeouts: AtomicU64::new(0),
+        }
+    }
+}
+
 struct CQRSTestContext {
     cqrs_service: Arc<CQRSAccountService>,
     db_pool: PgPool,
     _shutdown_tx: mpsc::Sender<()>,
     _background_tasks: Vec<JoinHandle<()>>,
+    async_cache_metrics: Arc<AsyncCacheMetrics>, // Added for new metrics
 }
 
 impl Drop for CQRSTestContext {
@@ -62,6 +85,7 @@ async fn setup_cqrs_test_environment(
     // Create shutdown channel for cleanup
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     let mut background_tasks = Vec::new();
+    let async_cache_metrics = Arc::new(AsyncCacheMetrics::default());
 
     // Initialize database pool with highly optimized settings for maximum throughput
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -150,6 +174,7 @@ async fn setup_cqrs_test_environment(
         db_pool: pool,
         _shutdown_tx: shutdown_tx,
         _background_tasks: background_tasks,
+        async_cache_metrics,
     })
 }
 
@@ -174,6 +199,7 @@ enum CQRSOperation {
     SearchAccounts,
     GetAccountByOwner,
     GetAccountEvents,
+    DepositAndMeasurePropagation, // New operation for cache propagation
 }
 
 #[derive(Debug)]
@@ -225,6 +251,17 @@ async fn test_cqrs_high_throughput_performance() {
                 tracing::info!("Created {}/{} accounts", i, account_count);
             }
         }
+        tracing::info!("✅ All {} accounts created.", account_count);
+
+        // Step 2: Identify Hot Accounts
+        let hot_account_percentage = 0.10; // 10% of accounts will be "hot"
+        let num_hot_accounts = (account_ids.len() as f64 * hot_account_percentage).ceil() as usize;
+        let hot_account_ids: Vec<Uuid> = account_ids.iter().take(num_hot_accounts).cloned().collect();
+        tracing::info!(
+            "🔥 Designated {} out of {} accounts as 'hot' accounts.",
+            hot_account_ids.len(),
+            account_ids.len()
+        );
 
         // Add a delay to allow KafkaEventProcessor to process AccountCreated events
         let initial_processing_delay = Duration::from_secs(5); // Tunable parameter
@@ -309,11 +346,13 @@ async fn test_cqrs_high_throughput_performance() {
         for worker_id in 0..worker_count {
             let tx = tx.clone();
             let cqrs_service = context.cqrs_service.clone();
-            let account_ids = account_ids.clone();
-            let operation_timeout = operation_timeout;
+            let local_account_ids = account_ids.clone(); // Use a more specific name
+            let local_hot_account_ids = hot_account_ids.clone();
+            let async_metrics_collector = context.async_cache_metrics.clone();
+            let operation_timeout = operation_timeout; // Already a Duration
 
             let handle = tokio::spawn(async move {
-                use rand::{Rng, SeedableRng};
+                use rand::{seq::SliceRandom, Rng, SeedableRng};
                 use rand_chacha::ChaCha8Rng;
                 let mut rng = ChaCha8Rng::from_rng(rand::thread_rng()).unwrap();
                 let mut operations = 0;
@@ -328,288 +367,198 @@ async fn test_cqrs_high_throughput_performance() {
                 };
 
                 while Instant::now() < end_time {
-                    // Use more random distribution to reduce contention
-                    let random_account_index = rng.gen_range(0..account_ids.len());
-                    let account_id = account_ids[random_account_index];
+                    let account_id: Uuid;
+                    let mut is_hot_read_attempt = false;
 
-                    // Enhanced workload with extensive read activity - 95% read operations
+                    // Determine if this will be a hot account access
+                    // 30% chance to target a hot account for reads, if hot accounts are available
+                    if !local_hot_account_ids.is_empty() && rng.gen_bool(0.3) {
+                        account_id = *local_hot_account_ids.choose(&mut rng).unwrap();
+                        is_hot_read_attempt = true; // Mark as a hot read attempt
+                    } else {
+                        // Use more random distribution to reduce contention for general ops
+                        let random_account_index = rng.gen_range(0..local_account_ids.len());
+                        account_id = local_account_ids[random_account_index];
+                    }
+
+                    // Define operation distribution
+                    // Adjusted to include DepositAndMeasurePropagation
+                    // Writes: Deposit (2%) + Withdraw (1%) + DepositAndMeasure (2%) = 5%
+                    // Reads: 95%
                     let op_roll = rng.gen_range(0..=99);
                     let operation = match op_roll {
-                        0..=2 => CQRSOperation::Deposit(rng.gen_range(1..=5)), // 3% deposit (reduced for more reads)
-                        3..=4 => CQRSOperation::Withdraw(rng.gen_range(1..=3)), // 2% withdraw (reduced for more reads)
-                        5..=15 => CQRSOperation::GetAccount, // 11% basic get account
-                        16..=25 => CQRSOperation::GetAccountBalance, // 10% get balance
-                        26..=35 => CQRSOperation::GetAccountTransactions, // 10% get transactions
-                        36..=45 => CQRSOperation::GetAccountWithCache, // 10% get account with cache focus
-                        46..=55 => CQRSOperation::GetAccountBalanceWithCache, // 10% get balance with cache focus
-                        56..=65 => CQRSOperation::GetAccountTransactionsWithCache, // 10% get transactions with cache focus
-                        66..=75 => CQRSOperation::GetAccountHistory, // 10% get account history
-                        76..=85 => CQRSOperation::GetAccountSummary, // 10% get account summary
-                        86..=95 => CQRSOperation::GetAccountStats,   // 10% get account stats
-                        96..=99 => CQRSOperation::GetAccountMetadata, // 4% get account metadata
-                        _ => CQRSOperation::GetAccount,
+                        0..=1 => CQRSOperation::Deposit(rng.gen_range(1..=5)), // 2%
+                        2..=2 => CQRSOperation::Withdraw(rng.gen_range(1..=3)), // 1%
+                        3..=4 => CQRSOperation::DepositAndMeasurePropagation, // 2%
+                        5..=15 => CQRSOperation::GetAccount,
+                        16..=25 => CQRSOperation::GetAccountBalance,
+                        26..=35 => CQRSOperation::GetAccountTransactions,
+                        36..=45 => CQRSOperation::GetAccountWithCache,
+                        46..=55 => CQRSOperation::GetAccountBalanceWithCache,
+                        56..=65 => CQRSOperation::GetAccountTransactionsWithCache,
+                        66..=75 => CQRSOperation::GetAccountHistory,
+                        76..=85 => CQRSOperation::GetAccountSummary,
+                        86..=95 => CQRSOperation::GetAccountStats,
+                        _ => CQRSOperation::GetAccountMetadata, // Approx 4%
                     };
 
-                    let result = match operation {
+                    if is_hot_read_attempt {
+                         match operation {
+                            CQRSOperation::GetAccount | CQRSOperation::GetAccountBalance |
+                            CQRSOperation::GetAccountTransactions | CQRSOperation::GetAccountWithCache |
+                            CQRSOperation::GetAccountBalanceWithCache | CQRSOperation::GetAccountTransactionsWithCache |
+                            CQRSOperation::GetAccountHistory | CQRSOperation::GetAccountSummary |
+                            CQRSOperation::GetAccountStats | CQRSOperation::GetAccountMetadata => {
+                                async_metrics_collector.hot_account_reads.fetch_add(1, Ordering::Relaxed);
+                            }
+                            _ => {} // Not a read op, or not a simple one we are measuring for hotness this way
+                         }
+                    }
+
+                    let mut result: Result<Result<(), AccountError>, tokio::time::error::Elapsed> = tokio::time::timeout(
+                        Duration::from_secs(1), // Default placeholder, will be overwritten
+                        async { Ok(Ok(())) } // Default placeholder
+                    ).await;
+
+
+                    match operation {
                         CQRSOperation::Deposit(amount) => {
-                            tokio::time::timeout(
+                            result = tokio::time::timeout(
                                 operation_timeout,
                                 cqrs_service.deposit_money(account_id, amount.into()),
                             )
-                            .await
+                            .await;
                         }
                         CQRSOperation::Withdraw(amount) => {
-                            tokio::time::timeout(
+                            result = tokio::time::timeout(
                                 operation_timeout,
                                 cqrs_service.withdraw_money(account_id, amount.into()),
                             )
-                            .await
+                            .await;
                         }
-                        CQRSOperation::GetAccount => tokio::time::timeout(
-                            operation_timeout,
-                            cqrs_service.get_account(account_id),
-                        )
-                        .await
-                        .map(|result| result.map(|_| ())),
-                        CQRSOperation::GetAccountBalance => tokio::time::timeout(
-                            operation_timeout,
-                            cqrs_service.get_account_balance(account_id),
-                        )
-                        .await
-                        .map(|result| result.map(|_| ())),
-                        CQRSOperation::GetAccountTransactions => tokio::time::timeout(
-                            operation_timeout,
-                            cqrs_service.get_account_transactions(account_id),
-                        )
-                        .await
-                        .map(|result| result.map(|_| ())),
-                        // New read operations for extensive read activity
+                        CQRSOperation::DepositAndMeasurePropagation => {
+                            async_metrics_collector.propagation_measurement_attempts.fetch_add(1, Ordering::Relaxed);
+                            let deposit_amount = Decimal::new(10, 0);
+                            let balance_before_res = tokio::time::timeout(operation_timeout, cqrs_service.get_account_balance(account_id)).await;
+
+                            if let Ok(Ok(balance_before)) = balance_before_res {
+                                result = tokio::time::timeout(operation_timeout, cqrs_service.deposit_money(account_id, deposit_amount)).await;
+
+                                if result.is_ok() && result.as_ref().unwrap().is_ok() { // Deposit successful
+                                    let write_completion_time = Instant::now();
+                                    let mut propagated = false;
+                                    for _attempt in 0..10 { // Max 10 poll attempts
+                                        tokio::time::sleep(Duration::from_millis(50)).await; // 50ms interval
+                                        match tokio::time::timeout(operation_timeout, cqrs_service.get_account_balance(account_id)).await {
+                                            Ok(Ok(current_balance)) => {
+                                                if current_balance == balance_before + deposit_amount {
+                                                    let prop_time = write_completion_time.elapsed();
+                                                    async_metrics_collector.propagation_times.lock().unwrap().push(prop_time);
+                                                    propagated = true;
+                                                    break;
+                                                }
+                                            }
+                                            _ => {} // Error fetching balance during poll, continue polling
+                                        }
+                                    }
+                                    if !propagated {
+                                        async_metrics_collector.propagation_measurement_timeouts.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            } else {
+                                // Failed to get balance before, count as a regular failure for this op
+                                result = Ok(Err(AccountError::NotFound)); // Or some other appropriate error
+                            }
+                        }
+                        // Read operations with simplified hot cache check
                         CQRSOperation::GetAccountWithCache => {
-                            // Multiple rapid reads to test cache hit patterns
-                            let result1 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account(account_id),
-                            )
-                            .await;
-                            let result2 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account(account_id), // Duplicate for cache hit
-                            )
-                            .await;
-                            result1.and(result2).map(|_| Ok(()))
+                            let res1 = tokio::time::timeout(operation_timeout, cqrs_service.get_account(account_id)).await;
+                            let res2 = tokio::time::timeout(operation_timeout, cqrs_service.get_account(account_id)).await;
+                            if is_hot_read_attempt && res1.is_ok() && res1.as_ref().unwrap().is_ok() && res2.is_ok() && res2.as_ref().unwrap().is_ok() {
+                                // Simplified: if both reads are successful back-to-back, assume second was a cache hit for hot metric
+                                async_metrics_collector.hot_account_immediate_cache_hits.fetch_add(1, Ordering::Relaxed);
+                            }
+                            result = res1.and(res2).map(|_| Ok(()));
                         }
                         CQRSOperation::GetAccountBalanceWithCache => {
-                            // Multiple balance reads for cache testing
-                            let result1 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account_balance(account_id),
-                            )
-                            .await;
-                            let result2 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account_balance(account_id), // Duplicate for cache hit
-                            )
-                            .await;
-                            result1.and(result2).map(|_| Ok(()))
+                            let res1 = tokio::time::timeout(operation_timeout, cqrs_service.get_account_balance(account_id)).await;
+                            let res2 = tokio::time::timeout(operation_timeout, cqrs_service.get_account_balance(account_id)).await;
+                             if is_hot_read_attempt && res1.is_ok() && res1.as_ref().unwrap().is_ok() && res2.is_ok() && res2.as_ref().unwrap().is_ok() {
+                                async_metrics_collector.hot_account_immediate_cache_hits.fetch_add(1, Ordering::Relaxed);
+                            }
+                            result = res1.and(res2).map(|_| Ok(()));
                         }
                         CQRSOperation::GetAccountTransactionsWithCache => {
-                            // Multiple transaction reads for cache testing
-                            let result1 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account_transactions(account_id),
-                            )
-                            .await;
-                            let result2 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account_transactions(account_id), // Duplicate for cache hit
-                            )
-                            .await;
-                            result1.and(result2).map(|_| Ok(()))
+                            let res1 = tokio::time::timeout(operation_timeout, cqrs_service.get_account_transactions(account_id)).await;
+                            let res2 = tokio::time::timeout(operation_timeout, cqrs_service.get_account_transactions(account_id)).await;
+                            if is_hot_read_attempt && res1.is_ok() && res1.as_ref().unwrap().is_ok() && res2.is_ok() && res2.as_ref().unwrap().is_ok() {
+                                async_metrics_collector.hot_account_immediate_cache_hits.fetch_add(1, Ordering::Relaxed);
+                            }
+                           result = res1.and(res2).map(|_| Ok(()));
                         }
-                        CQRSOperation::GetAccountHistory => {
-                            // Simulate account history read (combination of operations)
-                            let result1 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account(account_id),
-                            )
-                            .await;
-                            let result2 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account_transactions(account_id),
-                            )
-                            .await;
-                            result1.and(result2).map(|_| Ok(()))
+                        // Standard read operations
+                        CQRSOperation::GetAccount => {
+                            result = tokio::time::timeout(operation_timeout, cqrs_service.get_account(account_id)).await.map(|r| r.map(|_| ()));
+                        }
+                        CQRSOperation::GetAccountBalance => {
+                             result = tokio::time::timeout(operation_timeout, cqrs_service.get_account_balance(account_id)).await.map(|r| r.map(|_| ()));
+                        }
+                        CQRSOperation::GetAccountTransactions => {
+                             result = tokio::time::timeout(operation_timeout, cqrs_service.get_account_transactions(account_id)).await.map(|r| r.map(|_| ()));
+                        }
+                        CQRSOperation::GetAccountHistory => { // Combination, harder to measure "hotness" simply
+                            let r1 = tokio::time::timeout(operation_timeout, cqrs_service.get_account(account_id)).await;
+                            let r2 = tokio::time::timeout(operation_timeout, cqrs_service.get_account_transactions(account_id)).await;
+                            result = r1.and(r2).map(|_| Ok(()));
                         }
                         CQRSOperation::GetAccountSummary => {
-                            // Simulate account summary read (combination of operations)
-                            let result1 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account(account_id),
-                            )
-                            .await;
-                            let result2 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account_balance(account_id),
-                            )
-                            .await;
-                            result1.and(result2).map(|_| Ok(()))
+                            let r1 = tokio::time::timeout(operation_timeout, cqrs_service.get_account(account_id)).await;
+                            let r2 = tokio::time::timeout(operation_timeout, cqrs_service.get_account_balance(account_id)).await;
+                            result = r1.and(r2).map(|_| Ok(()));
                         }
                         CQRSOperation::GetAccountStats => {
-                            // Simulate account stats read (multiple operations)
-                            let result1 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account(account_id),
-                            )
-                            .await;
-                            let result2 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account_transactions(account_id),
-                            )
-                            .await;
-                            let result3 = tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account_balance(account_id),
-                            )
-                            .await;
-                            result1.and(result2).and(result3).map(|_| Ok(()))
+                            let r1 = tokio::time::timeout(operation_timeout, cqrs_service.get_account(account_id)).await;
+                            let r2 = tokio::time::timeout(operation_timeout, cqrs_service.get_account_transactions(account_id)).await;
+                            let r3 = tokio::time::timeout(operation_timeout, cqrs_service.get_account_balance(account_id)).await;
+                            result = r1.and(r2).and(r3).map(|_| Ok(()));
                         }
                         CQRSOperation::GetAccountMetadata => {
-                            // Simulate metadata read (basic account info)
-                            tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account(account_id),
-                            )
-                            .await
-                            .map(|result| result.map(|_| ()))
+                             result = tokio::time::timeout(operation_timeout, cqrs_service.get_account(account_id)).await.map(|r| r.map(|_| ()));
                         }
+                        // The following are more complex/less frequent, not specifically instrumented for hot cache here
                         CQRSOperation::BulkGetAccounts => {
-                            // Simulate bulk read operation
-                            let mut results = Vec::new();
+                            let mut results_vec = Vec::new();
                             for i in 0..3 {
-                                let idx = (random_account_index + i) % account_ids.len();
-                                let acc_id = account_ids[idx];
-                                results.push(
-                                    tokio::time::timeout(
-                                        operation_timeout,
-                                        cqrs_service.get_account(acc_id),
-                                    )
-                                    .await,
-                                );
+                                let idx = (rng.gen_range(0..local_account_ids.len()) + i) % local_account_ids.len(); // Ensure different accounts
+                                let acc_id_bulk = local_account_ids[idx];
+                                results_vec.push(tokio::time::timeout(operation_timeout, cqrs_service.get_account(acc_id_bulk)).await);
                             }
-                            // Wait for all results
-                            let mut all_success = true;
-                            for result in results {
-                                if let Ok(Ok(_)) = result {
-                                    // Success
-                                } else {
-                                    all_success = false;
-                                }
-                            }
-                            if all_success {
-                                Ok(Ok(()))
-                            } else {
-                                Ok(Err(AccountError::NotFound))
-                            }
+                            let all_success = results_vec.iter().all(|r| r.is_ok() && r.as_ref().unwrap().is_ok());
+                            result = if all_success { Ok(Ok(())) } else { Ok(Err(AccountError::NotFound)) };
                         }
                         CQRSOperation::SearchAccounts => {
-                            // Simulate search operation (multiple account reads)
-                            let mut results = Vec::new();
+                            let mut results_vec = Vec::new();
                             for i in 0..2 {
-                                let idx = (random_account_index + i * 10) % account_ids.len();
-                                let acc_id = account_ids[idx];
-                                results.push(
-                                    tokio::time::timeout(
-                                        operation_timeout,
-                                        cqrs_service.get_account(acc_id),
-                                    )
-                                    .await,
-                                );
+                               let idx = (rng.gen_range(0..local_account_ids.len()) + i * 10) % local_account_ids.len();
+                                let acc_id_search = local_account_ids[idx];
+                                results_vec.push(tokio::time::timeout(operation_timeout, cqrs_service.get_account(acc_id_search)).await);
                             }
-                            let mut all_success = true;
-                            for result in results {
-                                if let Ok(Ok(_)) = result {
-                                    // Success
-                                } else {
-                                    all_success = false;
-                                }
-                            }
-                            if all_success {
-                                Ok(Ok(()))
-                            } else {
-                                Ok(Err(AccountError::NotFound))
-                            }
+                            let all_success = results_vec.iter().all(|r| r.is_ok() && r.as_ref().unwrap().is_ok());
+                            result = if all_success { Ok(Ok(())) } else { Ok(Err(AccountError::NotFound)) };
                         }
-                        CQRSOperation::GetAccountByOwner => {
-                            // Simulate get by owner (just get account for now)
-                            tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account(account_id),
-                            )
-                            .await
-                            .map(|result| result.map(|_| ()))
+                        CQRSOperation::GetAccountByOwner => { // Placeholder, effectively GetAccount
+                            result = tokio::time::timeout(operation_timeout, cqrs_service.get_account(account_id)).await.map(|r| r.map(|_| ()));
                         }
-                        CQRSOperation::GetAccountEvents => {
-                            // Simulate get account events (get transactions for now)
-                            tokio::time::timeout(
-                                operation_timeout,
-                                cqrs_service.get_account_transactions(account_id),
-                            )
-                            .await
-                            .map(|result| result.map(|_| ()))
-                        }
-                        _ => tokio::time::timeout(
-                            operation_timeout,
-                            cqrs_service.get_account(account_id),
-                        )
-                        .await
-                        .map(|result| result.map(|_| ())),
-                    };
-
-                    // Retry logic for failed operations
-                    let mut final_result = result;
-                    let mut retry_count = 0;
-                    while retry_count < max_retries {
-                        match &final_result {
-                            Ok(Ok(_)) => break, // Success, no retry needed
-                            Ok(Err(_)) | Err(_) => {
-                                retry_count += 1;
-                                if retry_count < max_retries {
-                                    // Exponential backoff
-                                    let backoff_duration =
-                                        Duration::from_millis(50 * (2_u64.pow(retry_count as u32)));
-                                    tokio::time::sleep(backoff_duration).await;
-
-                                    // Retry the operation (simplified retry logic for read operations)
-                                    final_result = match operation {
-                                        CQRSOperation::Deposit(amount) => {
-                                            tokio::time::timeout(
-                                                operation_timeout,
-                                                cqrs_service
-                                                    .deposit_money(account_id, amount.into()),
-                                            )
-                                            .await
-                                        }
-                                        CQRSOperation::Withdraw(amount) => {
-                                            tokio::time::timeout(
-                                                operation_timeout,
-                                                cqrs_service
-                                                    .withdraw_money(account_id, amount.into()),
-                                            )
-                                            .await
-                                        }
-                                        _ => tokio::time::timeout(
-                                            operation_timeout,
-                                            cqrs_service.get_account(account_id),
-                                        )
-                                        .await
-                                        .map(|result| result.map(|_| ())),
-                                    };
-                                }
-                            }
+                        CQRSOperation::GetAccountEvents => { // Placeholder, effectively GetAccountTransactions
+                            result = tokio::time::timeout(operation_timeout, cqrs_service.get_account_transactions(account_id)).await.map(|r| r.map(|_| ()));
                         }
                     }
 
-                    match final_result {
+                    // Retry logic for failed operations (simplified for this integration)
+                    // The main result for success/failure tracking should be from the primary action of the operation.
+                    // For DepositAndMeasurePropagation, this is the deposit itself.
+                    // The propagation measurement is auxiliary.
+                    match result {
                         Ok(Ok(_)) => {
                             operations += 1;
                             tx.send(OperationResult::Success).await.ok();
@@ -687,6 +636,60 @@ async fn test_cqrs_high_throughput_performance() {
         let conflict_rate = (conflict_ops as f64 / total_ops as f64) * 100.0;
         tracing::info!("⚡ Conflict Rate: {:.2}%", conflict_rate);
 
+        // Report on Async Cache Metrics
+        let async_metrics_data = context.async_cache_metrics.clone();
+        let propagation_times_vec = async_metrics_data.propagation_times.lock().unwrap().clone();
+        let hot_reads = async_metrics_data.hot_account_reads.load(Ordering::Relaxed);
+        let hot_hits = async_metrics_data
+            .hot_account_immediate_cache_hits
+            .load(Ordering::Relaxed);
+        let prop_attempts = async_metrics_data
+            .propagation_measurement_attempts
+            .load(Ordering::Relaxed);
+        let prop_timeouts = async_metrics_data
+            .propagation_measurement_timeouts
+            .load(Ordering::Relaxed);
+
+        tracing::info!("⏱️ Async Cache Propagation Metrics:");
+        if !propagation_times_vec.is_empty() {
+            let mut sorted_times = propagation_times_vec.clone();
+            sorted_times.sort_unstable();
+            let sum: Duration = sorted_times.iter().sum();
+            let count = sorted_times.len() as u32;
+            let mean = sum / count;
+            let p50 = sorted_times.get( (count / 2) as usize).unwrap_or(&Duration::ZERO);
+            let p90 = sorted_times.get( (count * 9 / 10) as usize).unwrap_or(&Duration::ZERO);
+            let p99 = sorted_times.get( (count * 99 / 100) as usize).unwrap_or(&Duration::ZERO);
+            tracing::info!("  - Propagation Times ({} samples):", count);
+            tracing::info!("    - Mean: {:.2?}", mean);
+            tracing::info!("    - P50 (Median): {:.2?}", p50);
+            tracing::info!("    - P90: {:.2?}", p90);
+            tracing::info!("    - P99: {:.2?}", p99);
+        } else {
+            tracing::info!("  - No cache propagation times recorded.");
+        }
+        tracing::info!(
+            "  - Propagation Measurement Attempts: {}",
+            prop_attempts
+        );
+        tracing::info!(
+            "  - Propagation Measurement Timeouts: {}",
+            prop_timeouts
+        );
+
+        tracing::info!("🔥 Hot Account Cache Metrics (Simplified):");
+        if hot_reads > 0 {
+            let hot_hit_rate = (hot_hits as f64 / hot_reads as f64) * 100.0;
+            tracing::info!("  - Hot Account Reads: {}", hot_reads);
+            tracing::info!(
+                "  - Hot Account Immediate Dupe Read Hits: {}",
+                hot_hits
+            );
+            tracing::info!("  - Hot Account Immediate Hit Rate: {:.2}%", hot_hit_rate);
+        } else {
+            tracing::info!("  - No hot account reads recorded.");
+        }
+
         // CQRS-specific metrics
         let cqrs_metrics = context.cqrs_service.get_metrics();
         tracing::info!("🔧 CQRS System Metrics:");
@@ -744,8 +747,27 @@ async fn test_cqrs_high_throughput_performance() {
         );
         println!("💾 Cache Hits: {}", cache_hits);
         println!("💾 Cache Misses: {}", cache_misses);
-        println!("📖 Read Operations: ~95% of total operations");
-        println!("✍️ Write Operations: ~5% of total operations");
+        println!("📖 Read Operations: ~95% of total operations"); // Note: This will change with new op
+        println!("✍️ Write Operations: ~5% of total operations"); // Note: This will change
+        println!("{}", "=".repeat(80));
+        if !propagation_times_vec.is_empty() {
+            let mut sorted_times = propagation_times_vec.clone();
+            sorted_times.sort_unstable();
+            let sum: Duration = sorted_times.iter().sum();
+            let count = sorted_times.len() as u32;
+            let mean = sum / count;
+            let p50 = sorted_times.get( (count / 2) as usize).unwrap_or(&Duration::ZERO);
+            let p90 = sorted_times.get( (count * 9 / 10) as usize).unwrap_or(&Duration::ZERO);
+             let p99 = sorted_times.get( (count * 99 / 100) as usize).unwrap_or(&Duration::ZERO);
+            println!("⏱️ Avg Cache Propagation: {:.2?}", mean);
+            println!("⏱️ P50 Cache Propagation: {:.2?}", p50);
+            println!("⏱️ P90 Cache Propagation: {:.2?}", p90);
+            println!("⏱️ P99 Cache Propagation: {:.2?}", p99);
+        }
+         if hot_reads > 0 {
+            let hot_hit_rate = (hot_hits as f64 / hot_reads as f64) * 100.0;
+            println!("🔥 Hot Account Cache Hit Rate (Simplified): {:.2}% ({} hits / {} reads)", hot_hit_rate, hot_hits, hot_reads);
+        }
         println!("{}", "=".repeat(80));
 
         // Assertions for performance targets
