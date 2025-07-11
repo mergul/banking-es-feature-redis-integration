@@ -884,21 +884,30 @@ async fn test_cqrs_high_throughput_performance() {
 
         // Calculate cache hit rate from cache service metrics
         let cache_metrics = context.cqrs_service.get_cache_metrics();
-        let cache_hits = cache_metrics.hits.load(Ordering::Relaxed);
-        let cache_misses = cache_metrics.misses.load(Ordering::Relaxed);
-        let cache_hit_rate = if cache_hits + cache_misses > 0 {
-            (cache_hits as f64 / (cache_hits + cache_misses) as f64) * 100.0
+        let l1_shard_hits = cache_metrics.shard_hits.load(Ordering::Relaxed); // L1 In-Memory Hits
+        let l2_redis_hits = cache_metrics.hits.load(Ordering::Relaxed); // L2 Redis Hits (as per CacheService logic)
+        let cache_misses = cache_metrics.misses.load(Ordering::Relaxed); // Misses (not in L1 or L2)
+
+        let total_effective_hits = l1_shard_hits + l2_redis_hits;
+
+        let overall_cache_hit_rate = if total_effective_hits + cache_misses > 0 {
+            (total_effective_hits as f64 / (total_effective_hits + cache_misses) as f64) * 100.0
         } else {
             0.0
         };
         tracing::info!("💾 Cache Performance (with extensive read activity):");
-        tracing::info!("Cache Hits: {}", cache_hits);
-        tracing::info!("Cache Misses: {}", cache_misses);
-        tracing::info!("Cache Hit Rate: {:.2}%", cache_hit_rate);
+        tracing::info!("  L1 Cache Hits (In-Memory Shard): {}", l1_shard_hits);
+        tracing::info!("  L2 Cache Hits (Redis): {}", l2_redis_hits);
+        tracing::info!(
+            "  Total Effective Cache Hits (L1+L2): {}",
+            total_effective_hits
+        );
+        tracing::info!("  Cache Misses: {}", cache_misses);
+        tracing::info!("  Overall Cache Hit Rate: {:.2}%", overall_cache_hit_rate);
 
         // Also show total cache operations for context
-        let total_cache_ops = cache_hits + cache_misses;
-        tracing::info!("Total Cache Operations: {}", total_cache_ops);
+        let total_cache_ops = total_effective_hits + cache_misses;
+        tracing::info!("  Total Cache Operations: {}", total_cache_ops);
 
         // Print a summary table
         println!("\n{}", "=".repeat(80));
@@ -906,7 +915,7 @@ async fn test_cqrs_high_throughput_performance() {
         println!("{}", "=".repeat(80));
         println!("📊 Operations/Second: {:.2} OPS", ops);
         println!("✅ Success Rate: {:.2}%", success_rate);
-        println!("💾 Cache Hit Rate: {:.2}%", cache_hit_rate);
+        println!("💾 Overall Cache Hit Rate: {:.2}%", overall_cache_hit_rate);
         println!("⚡ Conflict Rate: {:.2}%", conflict_rate);
         println!("📈 Total Operations: {}", total_ops);
         println!(
@@ -917,7 +926,12 @@ async fn test_cqrs_high_throughput_performance() {
             "🔍 Queries Processed: {}",
             cqrs_metrics.queries_processed.load(Ordering::Relaxed)
         );
-        println!("💾 Cache Hits: {}", cache_hits);
+        println!("💾 L1 Cache Hits (In-Memory Shard): {}", l1_shard_hits);
+        println!("💾 L2 Cache Hits (Redis): {}", l2_redis_hits);
+        println!(
+            "💾 Total Effective Cache Hits (L1+L2): {}",
+            total_effective_hits
+        );
         println!("💾 Cache Misses: {}", cache_misses);
         println!("📖 Read Operations: ~95% of total operations"); // Note: This will change with new op
         println!("✍️ Write Operations: ~5% of total operations"); // Note: This will change

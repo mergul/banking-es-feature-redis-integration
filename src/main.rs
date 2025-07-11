@@ -3,8 +3,6 @@ use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPo
 use crate::infrastructure::event_store::{EventStore, DB_POOL};
 use crate::infrastructure::kafka_abstraction::{KafkaConfig, KafkaProducer, KafkaProducerTrait};
 use crate::infrastructure::logging::{init_logging, start_log_rotation_task, LoggingConfig};
-use crate::infrastructure::outbox::PostgresOutboxRepository;
-use crate::infrastructure::outbox_poller::{OutboxPollerConfig, OutboxPollingService};
 use crate::infrastructure::projections::ProjectionStore;
 use crate::infrastructure::redis_abstraction::RealRedisClient;
 use crate::infrastructure::redis_abstraction::RedisClient;
@@ -142,23 +140,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_millis(100), // batch_timeout
     ));
 
-    // --- Initialize and Start Outbox Poller Service ---
-    let outbox_repo = Arc::new(PostgresOutboxRepository::new(
-        Arc::clone(DB_POOL.get().unwrap()).as_ref().clone(),
-    )); // Assuming DB_POOL is initialized
-    let kafka_producer_for_poller = Arc::new(KafkaProducer::new(kafka_config.clone())?); // Clone KafkaConfig for producer
-    let poller_config = OutboxPollerConfig::default();
-    let (poller_shutdown_tx, poller_shutdown_rx) = tokio::sync::mpsc::channel(1);
-
-    let outbox_poller_service = OutboxPollingService::new(
-        outbox_repo,
-        kafka_producer_for_poller,
-        poller_config,
-        poller_shutdown_rx,
+    // --- Initialize and Start CDC Service Manager ---
+    let cdc_outbox_repo = Arc::new(
+        crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
+            Arc::clone(DB_POOL.get().unwrap()).as_ref().clone(),
+        ),
     );
-    tokio::spawn(outbox_poller_service.run());
-    info!("Outbox Polling Service started.");
-    // --- End Outbox Poller Service ---
+
+    let kafka_producer_for_cdc =
+        crate::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())?;
+    let kafka_consumer_for_cdc =
+        crate::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())?;
+
+    let cdc_config = crate::infrastructure::cdc_debezium::DebeziumConfig::default();
+    let mut cdc_service_manager = crate::infrastructure::cdc_debezium::CDCServiceManager::new(
+        cdc_config,
+        cdc_outbox_repo,
+        kafka_producer_for_cdc,
+        kafka_consumer_for_cdc,
+    )?;
+
+    // Start CDC service
+    cdc_service_manager.start().await?;
+    info!("CDC Service Manager started.");
+    // --- End CDC Service Manager ---
 
     // Create CQRS router
     // The auth_service is cloned for potential future use in CQRS auth middleware/handlers
@@ -211,13 +216,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Graceful shutdown of services
-    info!("Sending shutdown signal to Outbox Poller Service...");
-    if poller_shutdown_tx.send(()).await.is_err() {
-        error!("Failed to send shutdown signal to Outbox Poller Service. It might have already stopped.");
+    info!("Sending shutdown signal to CDC Service Manager...");
+    if let Err(e) = cdc_service_manager.stop().await {
+        error!("Failed to stop CDC Service Manager: {}", e);
     }
-    // Add a small delay to allow the poller to process the shutdown signal, if necessary.
-    // Alternatively, the poller's run method could return a JoinHandle to await on.
-    // For simplicity here, we'll just send the signal.
+    // Add a small delay to allow the CDC service to process the shutdown signal
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     service_context.shutdown().await;
     info!("Server shutdown complete");

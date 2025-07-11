@@ -31,9 +31,9 @@ impl CQRSHandler {
         kafka_config: crate::infrastructure::kafka_abstraction::KafkaConfig,
         max_concurrent_operations: usize,
     ) -> Self {
-        // Create outbox repository for command bus
+        // Create CDC outbox repository for command bus
         let outbox_repository = Arc::new(
-            crate::infrastructure::outbox::PostgresOutboxRepository::new(
+            crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
                 event_store.get_pool().clone(),
             ),
         )

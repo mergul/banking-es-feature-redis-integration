@@ -632,3 +632,13 @@ pub enum CacheInvalidationType {
     FullInvalidation,
     PartialInvalidation,
 }
+
+#[derive(Debug, Clone)]
+pub struct KafkaMessage {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+    pub key: Option<Vec<u8>>,
+    pub payload: Vec<u8>,
+    pub timestamp: Option<i64>,
+}

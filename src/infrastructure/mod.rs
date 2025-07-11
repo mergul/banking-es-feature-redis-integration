@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cache_service;
+pub mod cdc_debezium; // Added CDC module
 pub mod config;
 pub mod connection_pool_monitor;
 pub mod deadlock_detector;
@@ -16,6 +17,8 @@ pub mod kafka_tracing;
 pub mod l1_cache_updater;
 pub mod logging;
 pub mod middleware;
+pub mod outbox; // Added
+pub mod outbox_poller;
 pub mod projections;
 pub mod rate_limiter;
 pub mod redis_abstraction;
@@ -25,12 +28,11 @@ pub mod sharding;
 pub mod stuck_operation_diagnostic;
 pub mod timeout_manager;
 pub mod troubleshooting;
-pub mod user_repository;
-pub mod outbox; // Added
-pub mod outbox_poller; // Added for OutboxPollingService
+pub mod user_repository; // Added for OutboxPollingService
 
 pub use auth::*;
 pub use cache_service::*;
+pub use cdc_debezium::*; // Added CDC exports
 pub use config::*;
 pub use event_store::{EventStore, EventStoreConfig};
 pub use kafka_abstraction::KafkaConfig;
@@ -42,6 +44,10 @@ pub use kafka_recovery::*;
 pub use kafka_recovery_strategies::*;
 pub use kafka_tracing::*;
 pub use middleware::*;
+pub use outbox::{
+    OutboxMessage, OutboxRepositoryTrait, PersistedOutboxMessage, PostgresOutboxRepository,
+}; // Added PostgresOutboxRepository
+pub use outbox_poller::{OutboxPollerConfig, OutboxPollingService};
 pub use projections::ProjectionStore;
 pub use projections::*;
 pub use rate_limiter::*;
@@ -52,6 +58,4 @@ pub use repository::{AccountRepository, AccountRepositoryTrait, RepositoryError}
 pub use scaling::*;
 pub use sharding::*;
 pub use user_repository::*;
-pub use user_repository::{NewUser, User, UserRepository, UserRepositoryError}; // Added re-export
-pub use outbox::{OutboxMessage, PersistedOutboxMessage, OutboxRepositoryTrait, PostgresOutboxRepository}; // Added PostgresOutboxRepository
-pub use outbox_poller::{OutboxPollingService, OutboxPollerConfig}; // Added for OutboxPollingService
+pub use user_repository::{NewUser, User, UserRepository, UserRepositoryError}; // Added re-export // Added for OutboxPollingService
