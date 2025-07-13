@@ -158,6 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cdc_outbox_repo,
         kafka_producer_for_cdc,
         kafka_consumer_for_cdc,
+        service_context.cache_service.clone(),
+        service_context.projection_store.clone(),
     )?;
 
     // Start CDC service

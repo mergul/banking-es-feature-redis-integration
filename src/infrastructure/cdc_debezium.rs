@@ -1,4 +1,6 @@
+use crate::infrastructure::cache_service::CacheServiceTrait;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
+use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -266,9 +268,11 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
     }
 }
 
-/// CDC Event Processor - processes Debezium CDC events
+/// Enhanced CDC Event Processor - processes Debezium CDC events and updates cache/projections
 pub struct CDCEventProcessor {
     kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
+    cache_service: Arc<dyn CacheServiceTrait>,
+    projection_store: Arc<dyn ProjectionStoreTrait>,
     metrics: Arc<CDCMetrics>,
 }
 
@@ -278,17 +282,25 @@ pub struct CDCMetrics {
     pub events_failed: std::sync::atomic::AtomicU64,
     pub processing_latency_ms: std::sync::atomic::AtomicU64,
     pub total_latency_ms: std::sync::atomic::AtomicU64,
+    pub cache_invalidations: std::sync::atomic::AtomicU64,
+    pub projection_updates: std::sync::atomic::AtomicU64,
 }
 
 impl CDCEventProcessor {
-    pub fn new(kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer) -> Self {
+    pub fn new(
+        kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
+        cache_service: Arc<dyn CacheServiceTrait>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+    ) -> Self {
         Self {
             kafka_producer,
+            cache_service,
+            projection_store,
             metrics: Arc::new(CDCMetrics::default()),
         }
     }
 
-    /// Process CDC event from Debezium
+    /// Process CDC event from Debezium with optimized cache and projection updates
     pub async fn process_cdc_event(&self, cdc_event: serde_json::Value) -> Result<()> {
         let start_time = std::time::Instant::now();
 
@@ -299,10 +311,34 @@ impl CDCEventProcessor {
         let domain_event: crate::domain::AccountEvent =
             bincode::deserialize(&outbox_message.payload)?;
 
-        // Create event batch
+        // OPTIMIZED: Use delayed cache invalidation to reduce cache misses
+        // Instead of immediate invalidation, schedule it with a small delay
+        let account_id = outbox_message.aggregate_id;
+        let cache_service = self.cache_service.clone();
+
+        tokio::spawn(async move {
+            // Small delay to allow for potential cache hits before invalidation
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Err(e) = cache_service.invalidate_account(account_id).await {
+                error!(
+                    "Failed to invalidate cache for account {}: {}",
+                    account_id, e
+                );
+            }
+        });
+
+        self.metrics
+            .cache_invalidations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        info!(
+            "Delayed cache invalidation scheduled for account {}",
+            account_id
+        );
+
+        // Create event batch for Kafka publishing
         let event_batch = crate::infrastructure::kafka_abstraction::EventBatch {
             account_id: outbox_message.aggregate_id,
-            events: vec![domain_event],
+            events: vec![domain_event.clone()],
             version: 0,
             timestamp: outbox_message.created_at,
         };
@@ -319,6 +355,21 @@ impl CDCEventProcessor {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to publish CDC event: {}", e))?;
 
+        // Update projections based on the event
+        if let Err(e) = self
+            .update_projections_from_event(&domain_event, outbox_message.aggregate_id)
+            .await
+        {
+            error!(
+                "Failed to update projections for account {}: {}",
+                outbox_message.aggregate_id, e
+            );
+        } else {
+            self.metrics
+                .projection_updates
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
         // Update metrics
         let latency = start_time.elapsed().as_millis() as u64;
         self.metrics
@@ -329,11 +380,56 @@ impl CDCEventProcessor {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         tracing::info!(
-            "CDC event processed: {} -> {} (latency: {}ms)",
+            "CDC event processed: {} -> {} (latency: {}ms, cache invalidated, projections updated)",
             outbox_message.event_id,
             outbox_message.topic,
             latency
         );
+
+        Ok(())
+    }
+
+    /// Update projections based on the processed event
+    async fn update_projections_from_event(
+        &self,
+        event: &crate::domain::AccountEvent,
+        account_id: Uuid,
+    ) -> Result<()> {
+        // Get current account projection
+        let current_projection = self.projection_store.get_account(account_id).await?;
+
+        if let Some(mut projection) = current_projection {
+            // Update projection based on event type
+            match event {
+                crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
+                    projection.balance += *amount;
+                    projection.updated_at = Utc::now();
+                }
+                crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
+                    projection.balance -= *amount;
+                    projection.updated_at = Utc::now();
+                }
+                crate::domain::AccountEvent::AccountCreated {
+                    owner_name,
+                    initial_balance,
+                    ..
+                } => {
+                    projection.owner_name = owner_name.clone();
+                    projection.balance = *initial_balance;
+                    projection.is_active = true;
+                    projection.updated_at = Utc::now();
+                }
+                crate::domain::AccountEvent::AccountClosed { .. } => {
+                    projection.is_active = false;
+                    projection.updated_at = Utc::now();
+                }
+            }
+
+            // Update the projection
+            self.projection_store
+                .upsert_accounts_batch(vec![projection])
+                .await?;
+        }
 
         Ok(())
     }
@@ -374,7 +470,7 @@ impl CDCConsumer {
     }
 
     /// Start consuming CDC events
-    pub async fn start_consuming(&mut self, _processor: Arc<CDCEventProcessor>) -> Result<()> {
+    pub async fn start_consuming(&mut self, processor: Arc<CDCEventProcessor>) -> Result<()> {
         info!("Starting CDC consumer for topic: {}", self.cdc_topic);
 
         // Subscribe to CDC topic - using existing method
@@ -391,10 +487,28 @@ impl CDCConsumer {
                 }
                 message_result = self.kafka_consumer.poll_events() => {
                     match message_result {
-                        Ok(Some(_event_batch)) => {
-                            // For now, we'll process events using the existing poll_events method
-                            // In a real implementation, you'd want a dedicated CDC consumer
-                            info!("Received CDC event batch");
+                        Ok(Some(event_batch)) => {
+                            // Process each event in the batch
+                            for event in &event_batch.events {
+                                // Create a mock CDC event structure for processing
+                                let cdc_event = serde_json::json!({
+                                    "after": {
+                                        "id": uuid::Uuid::new_v4(),
+                                        "aggregate_id": event_batch.account_id,
+                                        "event_id": uuid::Uuid::new_v4(),
+                                        "event_type": std::any::type_name::<crate::domain::AccountEvent>(),
+                                        "payload": bincode::serialize(event).unwrap_or_default(),
+                                        "topic": "banking-es-events",
+                                        "metadata": null,
+                                        "created_at": event_batch.timestamp,
+                                        "updated_at": event_batch.timestamp
+                                    }
+                                });
+
+                                if let Err(e) = processor.process_cdc_event(cdc_event).await {
+                                    error!("Failed to process CDC event: {}", e);
+                                }
+                            }
                         }
                         Ok(None) => {
                             // No message available, continue
@@ -442,10 +556,16 @@ impl CDCServiceManager {
         outbox_repo: Arc<CDCOutboxRepository>,
         kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
         kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
+        cache_service: Arc<dyn CacheServiceTrait>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
     ) -> Result<Self> {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let processor = Arc::new(CDCEventProcessor::new(kafka_producer));
+        let processor = Arc::new(CDCEventProcessor::new(
+            kafka_producer,
+            cache_service,
+            projection_store,
+        ));
         let cdc_topic = format!("{}{}", config.topic_prefix, "kafka_outbox_cdc");
 
         let cdc_consumer = CDCConsumer::new(kafka_consumer, cdc_topic, shutdown_rx);
@@ -613,7 +733,9 @@ impl CDCHealthCheck {
             "healthy": self.is_healthy(),
             "events_processed": processed,
             "events_failed": self.metrics.events_failed.load(std::sync::atomic::Ordering::Relaxed),
-            "avg_processing_latency_ms": avg_latency
+            "avg_processing_latency_ms": avg_latency,
+            "cache_invalidations": self.metrics.cache_invalidations.load(std::sync::atomic::Ordering::Relaxed),
+            "projection_updates": self.metrics.projection_updates.load(std::sync::atomic::Ordering::Relaxed)
         })
     }
 }

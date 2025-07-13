@@ -3,8 +3,8 @@ pub mod domain;
 pub mod infrastructure;
 pub mod web;
 
-// Re-export commonly used types
-pub use application::AccountService;
+// Remove deprecated AccountService export
+// pub use application::AccountService;
 pub use domain::AccountError;
 pub use infrastructure::repository::AccountRepositoryTrait;
 pub use infrastructure::{

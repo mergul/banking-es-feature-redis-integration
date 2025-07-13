@@ -50,6 +50,10 @@ impl QueryBus {
     pub fn get_cache_metrics(&self) -> &crate::infrastructure::cache_service::CacheMetrics {
         self.account_query_handler.get_cache_metrics()
     }
+
+    pub fn get_cache_service(&self) -> Arc<dyn CacheServiceTrait> {
+        self.account_query_handler.get_cache_service()
+    }
 }
 
 /// Result of query execution
@@ -125,6 +129,10 @@ impl AccountQueryHandler {
 
     pub fn get_cache_metrics(&self) -> &crate::infrastructure::cache_service::CacheMetrics {
         self.cache_service.get_metrics()
+    }
+
+    pub fn get_cache_service(&self) -> Arc<dyn CacheServiceTrait> {
+        self.cache_service.clone()
     }
 
     /// Get account by ID

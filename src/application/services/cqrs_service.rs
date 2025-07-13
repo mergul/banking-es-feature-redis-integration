@@ -479,6 +479,11 @@ impl CQRSAccountService {
         self.cqrs_handler.get_cache_metrics()
     }
 
+    /// Get cache service for advanced cache operations
+    pub fn get_cache_service(&self) -> Arc<dyn CacheServiceTrait> {
+        self.cqrs_handler.get_cache_service()
+    }
+
     /// Health check
     pub async fn health_check(&self) -> Result<CQRSHealth, AccountError> {
         self.cqrs_handler.health_check().await

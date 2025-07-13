@@ -35,6 +35,7 @@ strum_macros = "0.26"
 rand_chacha = "0.3"
 # Serialization
 bincode = "1.3"
+base64 = "0.21"
 
 # Database and persistence
 
@@ -80,6 +81,10 @@ panic = "abort"
 inherits = "dev"
 opt-level = 2
 debug = true
+
+[[bin]]
+name = "projection_consumer"
+path = "src/bin/projection_consumer.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

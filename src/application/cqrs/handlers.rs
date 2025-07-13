@@ -214,6 +214,11 @@ impl CQRSHandler {
         self.query_bus.get_cache_metrics()
     }
 
+    /// Get cache service for advanced cache operations
+    pub fn get_cache_service(&self) -> Arc<dyn CacheServiceTrait> {
+        self.query_bus.get_cache_service()
+    }
+
     /// Health check
     pub async fn health_check(&self) -> Result<CQRSHealth, AccountError> {
         let start_time = Instant::now();

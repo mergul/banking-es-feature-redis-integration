@@ -1,6 +1,5 @@
 use banking_es::web;
 use banking_es::{
-    application::services::AccountService,
     domain::AccountError,
     infrastructure::{
         cache_service::{CacheConfig, CacheService, CacheServiceTrait, EvictionPolicy},
