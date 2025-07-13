@@ -89,7 +89,7 @@ async fn setup_cqrs_test_environment(
 
     // Initialize database pool with more conservative settings to prevent exhaustion
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
     });
 
     let pool = PgPoolOptions::new()
@@ -112,7 +112,7 @@ async fn setup_cqrs_test_environment(
 
     // Initialize Redis client with optimized settings
     let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let redis_client = redis::Client::open(redis_url).expect("Failed to connect to Redis");
 
     // Test Redis connection with timeout

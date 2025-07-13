@@ -453,10 +453,13 @@ impl KafkaConsumer {
             return Ok(());
         }
 
-        let topic = format!("{}-events", self.config.topic_prefix);
-        self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
+        self.consumer
+            .as_ref()
+            .unwrap()
+            .subscribe(&["banking-es.public.kafka_outbox_cdc"])?;
         Ok(())
     }
+
 
     pub async fn subscribe_to_cache(&self) -> Result<(), BankingKafkaError> {
         if !self.config.enabled || self.consumer.is_none() {
