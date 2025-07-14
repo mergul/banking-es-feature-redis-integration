@@ -66,17 +66,21 @@ struct CQRSTestContext {
     _shutdown_tx: mpsc::Sender<()>,
     _background_tasks: Vec<JoinHandle<()>>,
     async_cache_metrics: Arc<AsyncCacheMetrics>, // Added for new metrics
+    _cdc_service_manager: banking_es::infrastructure::cdc_debezium::CDCServiceManager, // Added for CDC cleanup
 }
 
 impl Drop for CQRSTestContext {
     fn drop(&mut self) {
-        // Send shutdown signal
-        let _ = self._shutdown_tx.try_send(());
-
-        // Wait for background tasks to complete
-        for handle in self._background_tasks.drain(..) {
-            let _ = handle.abort();
+        tracing::info!("🧹 Cleaning up CQRS test context...");
+        // NOTE: CDC service async shutdown is not called here to avoid runtime-in-runtime errors.
+        // If explicit async cleanup is needed, add a shutdown method and call it at the end of the test.
+        if let Err(e) = self._shutdown_tx.try_send(()) {
+            tracing::warn!("Failed to send shutdown signal: {}", e);
         }
+        for handle in &self._background_tasks {
+            handle.abort();
+        }
+        tracing::info!("✅ CQRS test context cleanup complete");
     }
 }
 
@@ -149,6 +153,65 @@ async fn setup_cqrs_test_environment(
     let cache_service = Arc::new(CacheService::new(redis_client_trait.clone(), cache_config))
         as Arc<dyn CacheServiceTrait + 'static>;
     let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+
+    // Start CDC Service for processing outbox events
+    let cdc_outbox_repo =
+        Arc::new(banking_es::infrastructure::cdc_debezium::CDCOutboxRepository::new(pool.clone()));
+
+    let kafka_producer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())
+            .expect("Failed to create Kafka producer for CDC");
+    let kafka_consumer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())
+            .expect("Failed to create Kafka consumer for CDC");
+
+    let cdc_config = banking_es::infrastructure::cdc_debezium::DebeziumConfig::default();
+    tracing::info!(
+        "🔧 Creating CDC Service Manager with config: {:?}",
+        cdc_config
+    );
+    let mut cdc_service_manager =
+        match banking_es::infrastructure::cdc_debezium::CDCServiceManager::new(
+            cdc_config,
+            cdc_outbox_repo,
+            kafka_producer_for_cdc,
+            kafka_consumer_for_cdc,
+            cache_service.clone(),
+            projection_store.clone(),
+        ) {
+            Ok(manager) => {
+                tracing::info!("✅ CDC Service Manager created successfully");
+                manager
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to create CDC service manager: {}", e);
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+        };
+
+    // Start CDC service
+    tracing::info!("🔧 Starting CDC Service Manager...");
+    match cdc_service_manager.start().await {
+        Ok(_) => {
+            tracing::info!("✅ CDC Service started for test environment");
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to start CDC service: {}", e);
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )) as Box<dyn std::error::Error + Send + Sync>);
+        }
+    }
+
+    // Give CDC service time to initialize
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    tracing::info!("🔧 CDC Service initialization complete");
+
     let cqrs_service = Arc::new(CQRSAccountService::new(
         event_store,
         projection_store,
@@ -195,6 +258,7 @@ async fn setup_cqrs_test_environment(
         _shutdown_tx: shutdown_tx,
         _background_tasks: background_tasks,
         async_cache_metrics,
+        _cdc_service_manager: cdc_service_manager,
     })
 }
 
@@ -1806,13 +1870,34 @@ async fn test_single_account_creation_and_read() {
 
     let test_future = async {
         // Setup test environment
+        tracing::info!("🔧 Setting up CQRS test environment...");
         let context = setup_cqrs_test_environment().await?;
         tracing::info!("✅ Test environment setup complete");
+
+        // Verify CDC service is running
+        tracing::info!("🔍 Verifying CDC service status...");
+        let cdc_metrics = context._cdc_service_manager.get_metrics();
+        let events_processed = cdc_metrics
+            .events_processed
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let events_failed = cdc_metrics
+            .events_failed
+            .load(std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            "📊 CDC Metrics - Events processed: {}, Events failed: {}",
+            events_processed,
+            events_failed
+        );
 
         // Create a single test account
         let owner_name = "SingleTestUser".to_string();
         let initial_balance = Decimal::new(1000, 0);
 
+        tracing::info!(
+            "🔧 Creating test account: {} with balance {}",
+            owner_name,
+            initial_balance
+        );
         match tokio::time::timeout(
             Duration::from_secs(5),
             context
@@ -1823,6 +1908,91 @@ async fn test_single_account_creation_and_read() {
         {
             Ok(Ok(account_id)) => {
                 tracing::info!("✅ Created account: {} ({})", account_id, owner_name);
+
+                // DIAGNOSIS STEP 1: Check if outbox event was written
+                tracing::info!("🔍 DIAGNOSIS STEP 1: Checking outbox event insertion...");
+                let outbox_count = sqlx::query!(
+                    "SELECT COUNT(*) as count FROM kafka_outbox_cdc WHERE aggregate_id = $1",
+                    account_id
+                )
+                .fetch_one(&context.db_pool)
+                .await?;
+                let outbox_count_value = outbox_count.count.unwrap_or(0);
+                tracing::info!(
+                    "📊 Outbox events found for account {}: {}",
+                    account_id,
+                    outbox_count_value
+                );
+
+                if outbox_count_value == 0 {
+                    tracing::error!(
+                        "❌ No outbox events found! CDC pipeline cannot work without events."
+                    );
+                    return Err("No outbox events found".into());
+                }
+
+                // DIAGNOSIS STEP 2: Check if CDC topic has messages (simulate CDC consumption)
+                tracing::info!("🔍 DIAGNOSIS STEP 2: Checking CDC topic messages...");
+                // Note: In a real CDC setup, Debezium would publish to Kafka topic
+                // For testing, we'll check if the CDC service is processing events
+                tokio::time::sleep(Duration::from_millis(500)).await; // Give CDC time to process
+
+                // DIAGNOSIS STEP 3: Check if projection was updated
+                tracing::info!("🔍 DIAGNOSIS STEP 3: Checking projection update...");
+                let projection_count = sqlx::query!(
+                    "SELECT COUNT(*) as count FROM account_projections WHERE id = $1",
+                    account_id
+                )
+                .fetch_one(&context.db_pool)
+                .await?;
+                let projection_count_value = projection_count.count.unwrap_or(0);
+                tracing::info!(
+                    "📊 Projections found for account {}: {}",
+                    account_id,
+                    projection_count_value
+                );
+
+                if projection_count_value == 0 {
+                    tracing::error!(
+                        "❌ No projection found! CDC event processor may not be working."
+                    );
+
+                    // Additional diagnosis: Check if CDC service is running
+                    tracing::info!("🔍 Additional diagnosis: Checking CDC service status...");
+                    let cdc_metrics = context._cdc_service_manager.get_metrics();
+                    let events_processed = cdc_metrics
+                        .events_processed
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let events_failed = cdc_metrics
+                        .events_failed
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!(
+                        "📊 CDC Metrics - Events processed: {}, Events failed: {}",
+                        events_processed,
+                        events_failed
+                    );
+
+                    // Check if CDC consumer is actually subscribed to the right topic
+                    tracing::info!(
+                        "🔍 CDC Topic being consumed: banking-es.public.kafka_outbox_cdc"
+                    );
+
+                    // Check if there are any messages in the topic that the consumer should be seeing
+                    tracing::info!("🔍 Checking if CDC consumer can see messages...");
+                    // Give CDC consumer more time to process
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    let cdc_metrics_after_wait = context._cdc_service_manager.get_metrics();
+                    let events_processed_after = cdc_metrics_after_wait
+                        .events_processed
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!(
+                        "📊 CDC Metrics after 2s wait - Events processed: {}",
+                        events_processed_after
+                    );
+
+                    return Err("No projection found - CDC pipeline issue".into());
+                }
 
                 // Wait for projection to be updated (shorter wait for single account)
                 let mut attempts = 0;
@@ -1897,10 +2067,14 @@ async fn test_single_account_creation_and_read() {
         }
         Ok(Err(e)) => {
             tracing::error!("❌ Single account test failed: {}", e);
+            // Sleep to allow background logs to flush
+            tokio::time::sleep(Duration::from_secs(10)).await;
             panic!("Single account test failed: {}", e);
         }
         Err(_) => {
             tracing::error!("❌ Single account test timeout");
+            // Sleep to allow background logs to flush
+            tokio::time::sleep(Duration::from_secs(10)).await;
             panic!("Single account test timeout");
         }
     }

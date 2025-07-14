@@ -4,6 +4,7 @@ use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 use std::sync::Arc;
@@ -55,14 +56,14 @@ pub struct DebeziumConfig {
 impl Default for DebeziumConfig {
     fn default() -> Self {
         Self {
-            connector_name: "banking-outbox-connector".to_string(),
+            connector_name: "banking-es-connector".to_string(),
             database_host: "localhost".to_string(),
             database_port: 5432,
             database_name: "banking_es".to_string(),
             database_user: "postgres".to_string(),
-            database_password: "password".to_string(),
-            table_include_list: "banking_es.kafka_outbox_cdc".to_string(), // Updated to use CDC table
-            topic_prefix: "banking_es.cdc.".to_string(),
+            database_password: "Francisco1".to_string(),
+            table_include_list: "public.kafka_outbox_cdc".to_string(), // Match actual Debezium config
+            topic_prefix: "banking-es.public.".to_string(), // Match actual Debezium config
             snapshot_mode: "initial".to_string(),
             poll_interval_ms: 100, // Much faster than 5-second polling
         }
@@ -100,6 +101,7 @@ impl CDCOutboxRepository {
 
     /// Create optimized outbox table for CDC
     pub async fn create_cdc_outbox_table(&self) -> Result<()> {
+        // Create the table
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS kafka_outbox_cdc (
@@ -112,19 +114,33 @@ impl CDCOutboxRepository {
                 metadata JSONB,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-            
-            -- Optimized indexes for CDC
-            CREATE INDEX IF NOT EXISTS idx_outbox_cdc_created_at ON kafka_outbox_cdc(created_at);
-            CREATE INDEX IF NOT EXISTS idx_outbox_cdc_aggregate_id ON kafka_outbox_cdc(aggregate_id);
-            CREATE INDEX IF NOT EXISTS idx_outbox_cdc_event_id ON kafka_outbox_cdc(event_id);
-            
-            -- Enable logical replication
-            ALTER TABLE kafka_outbox_cdc REPLICA IDENTITY FULL;
+            )
             "#,
         )
         .execute(&self.pool)
         .await?;
+
+        // Create indexes separately
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_outbox_cdc_created_at ON kafka_outbox_cdc(created_at)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_outbox_cdc_aggregate_id ON kafka_outbox_cdc(aggregate_id)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_outbox_cdc_event_id ON kafka_outbox_cdc(event_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Enable logical replication
+        sqlx::query("ALTER TABLE kafka_outbox_cdc REPLICA IDENTITY FULL")
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -303,13 +319,27 @@ impl CDCEventProcessor {
     /// Process CDC event from Debezium with optimized cache and projection updates
     pub async fn process_cdc_event(&self, cdc_event: serde_json::Value) -> Result<()> {
         let start_time = std::time::Instant::now();
+        tracing::info!(
+            "🔍 CDC Event Processor: Starting to process CDC event: {:?}",
+            cdc_event
+        );
 
         // Extract the actual outbox message from CDC event
         let outbox_message = self.extract_outbox_message(cdc_event)?;
+        tracing::info!(
+            "🔍 CDC Event Processor: Extracted outbox message for account {} (event_id: {}, event_type: {})",
+            outbox_message.aggregate_id,
+            outbox_message.event_id,
+            outbox_message.event_type
+        );
 
         // Deserialize the domain event
         let domain_event: crate::domain::AccountEvent =
             bincode::deserialize(&outbox_message.payload)?;
+        tracing::info!(
+            "🔍 CDC Event Processor: Deserialized domain event: {:?}",
+            domain_event
+        );
 
         // OPTIMIZED: Use delayed cache invalidation to reduce cache misses
         // Instead of immediate invalidation, schedule it with a small delay
@@ -335,27 +365,11 @@ impl CDCEventProcessor {
             account_id
         );
 
-        // Create event batch for Kafka publishing
-        let event_batch = crate::infrastructure::kafka_abstraction::EventBatch {
-            account_id: outbox_message.aggregate_id,
-            events: vec![domain_event.clone()],
-            version: 0,
-            timestamp: outbox_message.created_at,
-        };
-
-        // Serialize and publish to Kafka
-        let batch_payload = bincode::serialize(&event_batch)?;
-
-        self.kafka_producer
-            .publish_binary_event(
-                &outbox_message.topic,
-                &batch_payload,
-                &outbox_message.event_id.to_string(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to publish CDC event: {}", e))?;
-
         // Update projections based on the event
+        tracing::info!(
+            "🔍 CDC Event Processor: Updating projections for account {}",
+            account_id
+        );
         if let Err(e) = self
             .update_projections_from_event(&domain_event, outbox_message.aggregate_id)
             .await
@@ -364,7 +378,15 @@ impl CDCEventProcessor {
                 "Failed to update projections for account {}: {}",
                 outbox_message.aggregate_id, e
             );
+            self.metrics
+                .events_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(e);
         } else {
+            tracing::info!(
+                "✅ CDC Event Processor: Successfully updated projections for account {}",
+                account_id
+            );
             self.metrics
                 .projection_updates
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -380,7 +402,7 @@ impl CDCEventProcessor {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         tracing::info!(
-            "CDC event processed: {} -> {} (latency: {}ms, cache invalidated, projections updated)",
+            "✅ CDC Event Processor: Event processed successfully - {} -> {} (latency: {}ms, cache invalidated, projections updated)",
             outbox_message.event_id,
             outbox_message.topic,
             latency
@@ -395,8 +417,18 @@ impl CDCEventProcessor {
         event: &crate::domain::AccountEvent,
         account_id: Uuid,
     ) -> Result<()> {
+        tracing::info!(
+            "🔍 Projection Update: Starting projection update for account {}",
+            account_id
+        );
+
         // Get current account projection
         let current_projection = self.projection_store.get_account(account_id).await?;
+        tracing::info!(
+            "🔍 Projection Update: Current projection for account {}: {:?}",
+            account_id,
+            current_projection.is_some()
+        );
 
         if let Some(mut projection) = current_projection {
             // Update projection based on event type
@@ -404,10 +436,20 @@ impl CDCEventProcessor {
                 crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
                     projection.balance += *amount;
                     projection.updated_at = Utc::now();
+                    tracing::info!(
+                        "🔍 Projection Update: Updated balance for account {}: +{}",
+                        account_id,
+                        amount
+                    );
                 }
                 crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
                     projection.balance -= *amount;
                     projection.updated_at = Utc::now();
+                    tracing::info!(
+                        "🔍 Projection Update: Updated balance for account {}: -{}",
+                        account_id,
+                        amount
+                    );
                 }
                 crate::domain::AccountEvent::AccountCreated {
                     owner_name,
@@ -418,17 +460,68 @@ impl CDCEventProcessor {
                     projection.balance = *initial_balance;
                     projection.is_active = true;
                     projection.updated_at = Utc::now();
+                    tracing::info!("🔍 Projection Update: Created projection for account {}: owner={}, balance={}", account_id, owner_name, initial_balance);
                 }
                 crate::domain::AccountEvent::AccountClosed { .. } => {
                     projection.is_active = false;
                     projection.updated_at = Utc::now();
+                    tracing::info!("🔍 Projection Update: Closed account {}", account_id);
                 }
             }
 
             // Update the projection
+            tracing::info!(
+                "🔍 Projection Update: Upserting projection for account {}",
+                account_id
+            );
             self.projection_store
                 .upsert_accounts_batch(vec![projection])
                 .await?;
+            tracing::info!(
+                "✅ Projection Update: Successfully upserted projection for account {}",
+                account_id
+            );
+        } else {
+            // No existing projection, create new one
+            tracing::info!("🔍 Projection Update: No existing projection found, creating new one for account {}", account_id);
+            let mut new_projection = crate::infrastructure::projections::AccountProjection {
+                id: account_id,
+                owner_name: "".to_string(),
+                balance: Decimal::ZERO,
+                is_active: false,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+
+            // Apply event to new projection
+            match event {
+                crate::domain::AccountEvent::AccountCreated {
+                    owner_name,
+                    initial_balance,
+                    ..
+                } => {
+                    new_projection.owner_name = owner_name.clone();
+                    new_projection.balance = *initial_balance;
+                    new_projection.is_active = true;
+                    tracing::info!("🔍 Projection Update: Created new projection for account {}: owner={}, balance={}", account_id, owner_name, initial_balance);
+                }
+                _ => {
+                    tracing::warn!("🔍 Projection Update: Non-creation event for non-existent projection: {:?}", event);
+                }
+            }
+
+            // Insert the new projection
+            tracing::info!(
+                "🔍 Projection Update: Inserting new projection for account {}",
+                account_id
+            );
+            self.projection_store
+                .upsert_accounts_batch(vec![new_projection])
+                .await?;
+            tracing::info!(
+                "✅ Projection Update: Successfully inserted new projection for account {}",
+                account_id
+            );
         }
 
         Ok(())
@@ -472,56 +565,90 @@ impl CDCConsumer {
     /// Start consuming CDC events
     pub async fn start_consuming(&mut self, processor: Arc<CDCEventProcessor>) -> Result<()> {
         info!("Starting CDC consumer for topic: {}", self.cdc_topic);
+        tracing::info!(
+            "CDCConsumer: Entered start_consuming async loop for topic: {}",
+            self.cdc_topic
+        );
 
-        // Subscribe to CDC topic - using existing method
-        self.kafka_consumer
-            .subscribe_to_events()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to subscribe to CDC topic: {}", e))?;
+        // Subscribe to CDC topic directly
+        tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
+        let subscribe_result = self
+            .kafka_consumer
+            .subscribe_to_topic(&self.cdc_topic)
+            .await;
+        match &subscribe_result {
+            Ok(_) => tracing::info!(
+                "CDCConsumer: Successfully subscribed to topic: {}",
+                self.cdc_topic
+            ),
+            Err(e) => tracing::error!(
+                "CDCConsumer: Failed to subscribe to topic: {}: {}",
+                self.cdc_topic,
+                e
+            ),
+        }
+        subscribe_result.map_err(|e| anyhow::anyhow!("Failed to subscribe to CDC topic: {}", e))?;
+
+        tracing::info!(
+            "CDCConsumer: Starting main consumption loop for topic: {}",
+            self.cdc_topic
+        );
+        let mut poll_count = 0;
+        let mut last_log_time = std::time::Instant::now();
+
+        // Log immediately to confirm we're in the loop
+        tracing::info!("CDCConsumer: Entering main polling loop");
 
         loop {
+            poll_count += 1;
+
+            // Log every 10 polls initially, then every 100
+            if poll_count <= 10
+                || poll_count % 100 == 0
+                || last_log_time.elapsed() > Duration::from_secs(10)
+            {
+                tracing::info!(
+                    "CDCConsumer: Poll attempt #{} for topic: {}",
+                    poll_count,
+                    self.cdc_topic
+                );
+                last_log_time = std::time::Instant::now();
+            }
+
             tokio::select! {
                 _ = self.shutdown_rx.recv() => {
                     info!("CDC consumer received shutdown signal");
+                    tracing::info!("CDCConsumer: Received shutdown signal, breaking loop");
                     break;
                 }
-                message_result = self.kafka_consumer.poll_events() => {
+                message_result = self.kafka_consumer.poll_cdc_events() => {
                     match message_result {
-                        Ok(Some(event_batch)) => {
-                            // Process each event in the batch
-                            for event in &event_batch.events {
-                                // Create a mock CDC event structure for processing
-                                let cdc_event = serde_json::json!({
-                                    "after": {
-                                        "id": uuid::Uuid::new_v4(),
-                                        "aggregate_id": event_batch.account_id,
-                                        "event_id": uuid::Uuid::new_v4(),
-                                        "event_type": std::any::type_name::<crate::domain::AccountEvent>(),
-                                        "payload": bincode::serialize(event).unwrap_or_default(),
-                                        "topic": "banking-es-events",
-                                        "metadata": null,
-                                        "created_at": event_batch.timestamp,
-                                        "updated_at": event_batch.timestamp
-                                    }
-                                });
-
-                                if let Err(e) = processor.process_cdc_event(cdc_event).await {
-                                    error!("Failed to process CDC event: {}", e);
-                                }
+                        Ok(Some(cdc_event)) => {
+                            tracing::info!("CDCConsumer: ✅ Received CDC event on poll #{}: {:?}", poll_count, cdc_event);
+                            if let Err(e) = processor.process_cdc_event(cdc_event).await {
+                                error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
+                            } else {
+                                tracing::info!("CDCConsumer: ✅ Successfully processed CDC event on poll #{}", poll_count);
                             }
                         }
                         Ok(None) => {
-                            // No message available, continue
+                            if poll_count <= 10 || poll_count % 50 == 0 { // Log every 50th empty poll to avoid spam
+                                tracing::info!("CDCConsumer: ⏳ No CDC event available on poll #{}", poll_count);
+                            }
                         }
                         Err(e) => {
-                            error!("Error polling CDC message: {}", e);
+                            tracing::error!("CDCConsumer: ❌ Error polling CDC message on poll #{}: {}", poll_count, e);
                         }
                     }
                 }
             }
         }
 
-        info!("CDC consumer stopped");
+        info!("CDC consumer stopped after {} polls", poll_count);
+        tracing::info!(
+            "CDCConsumer: Exiting start_consuming after {} polls",
+            poll_count
+        );
         Ok(())
     }
 
@@ -548,6 +675,7 @@ pub struct CDCServiceManager {
     processor: Arc<CDCEventProcessor>,
     shutdown_tx: mpsc::Sender<()>,
     cleanup_handle: Option<tokio::task::JoinHandle<()>>,
+    cdc_consumer_handle: Option<tokio::task::JoinHandle<()>>, // Store the CDC consumer handle
 }
 
 impl CDCServiceManager {
@@ -577,6 +705,7 @@ impl CDCServiceManager {
             processor,
             shutdown_tx,
             cleanup_handle: None,
+            cdc_consumer_handle: None, // Initialize the CDC consumer handle
         })
     }
 
@@ -585,21 +714,46 @@ impl CDCServiceManager {
         info!("Starting CDC Service Manager");
 
         // Create CDC table if it doesn't exist
+        tracing::info!("CDC Service Manager: Creating CDC outbox table...");
         self.outbox_repo.create_cdc_outbox_table().await?;
+        tracing::info!("CDC Service Manager: ✅ CDC outbox table created/verified");
 
         // Start CDC consumer
         if let Some(mut consumer) = self.cdc_consumer.take() {
             let processor = self.processor.clone();
-            tokio::spawn(async move {
-                if let Err(e) = consumer.start_consuming(processor).await {
-                    error!("CDC consumer failed: {}", e);
+            let cdc_topic = self.config.topic_prefix.clone() + "kafka_outbox_cdc";
+            tracing::info!(
+                "CDC Service Manager: Starting CDC consumer for topic: {}",
+                cdc_topic
+            );
+            tracing::info!("CDC Service Manager: About to spawn CDC consumer task");
+
+            let handle = tokio::spawn(async move {
+                tracing::info!("CDC Service Manager: CDC consumer task spawned and running");
+                tracing::info!("CDC Service Manager: About to call consumer.start_consuming()");
+
+                match consumer.start_consuming(processor).await {
+                    Ok(_) => {
+                        tracing::info!("CDC Service Manager: CDC consumer completed normally");
+                    }
+                    Err(e) => {
+                        error!("CDC Service Manager: CDC consumer failed: {}", e);
+                        tracing::error!("CDC Service Manager: CDC consumer error details: {:?}", e);
+                    }
                 }
+                tracing::error!("CDC Service Manager: CDC consumer task exited unexpectedly!");
             });
+
+            self.cdc_consumer_handle = Some(handle);
+            tracing::info!("CDC Service Manager: ✅ CDC consumer task spawned and handle stored");
+        } else {
+            tracing::error!("CDC Service Manager: ❌ No CDC consumer available to start");
         }
 
         // Start cleanup task
         let outbox_repo = self.outbox_repo.clone();
         let cleanup_handle = tokio::spawn(async move {
+            tracing::info!("CDC Service Manager: Starting cleanup task");
             let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Run every hour
             loop {
                 interval.tick().await;
@@ -613,6 +767,7 @@ impl CDCServiceManager {
             }
         });
         self.cleanup_handle = Some(cleanup_handle);
+        tracing::info!("CDC Service Manager: ✅ Cleanup task spawned");
 
         info!("CDC Service Manager started successfully");
         Ok(())
@@ -629,6 +784,11 @@ impl CDCServiceManager {
 
         // Cancel cleanup task
         if let Some(handle) = &self.cleanup_handle {
+            handle.abort();
+        }
+
+        // Cancel CDC consumer task
+        if let Some(handle) = &self.cdc_consumer_handle {
             handle.abort();
         }
 

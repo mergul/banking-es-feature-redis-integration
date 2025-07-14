@@ -453,8 +453,42 @@ impl KafkaConsumer {
             return Ok(());
         }
 
-        let topic = format!("{}-events", self.config.topic_prefix);
-        self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
+        self.consumer
+            .as_ref()
+            .unwrap()
+            .subscribe(&["banking-es.public.kafka_outbox_cdc"])?;
+
+        // let topic = format!("{}-events", self.config.topic_prefix);
+        // self.consumer.as_ref().unwrap().subscribe(&[&topic])?;
+        Ok(())
+    }
+
+    pub async fn subscribe_to_topic(&self, topic: &str) -> Result<(), BankingKafkaError> {
+        if !self.config.enabled || self.consumer.is_none() {
+            tracing::warn!(
+                "KafkaConsumer: subscribe_to_topic - Kafka disabled or no consumer for topic: {}",
+                topic
+            );
+            return Ok(());
+        }
+
+        tracing::info!(
+            "KafkaConsumer: subscribe_to_topic - Subscribing to topic: {}",
+            topic
+        );
+        let result = self.consumer.as_ref().unwrap().subscribe(&[topic]);
+        match &result {
+            Ok(_) => tracing::info!(
+                "KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: {}",
+                topic
+            ),
+            Err(e) => tracing::error!(
+                "KafkaConsumer: subscribe_to_topic - Failed to subscribe to topic {}: {}",
+                topic,
+                e
+            ),
+        }
+        result?;
         Ok(())
     }
 
@@ -535,6 +569,60 @@ impl KafkaConsumer {
             Ok(Some(Err(e))) => Err(e.into()),
             Ok(None) => Ok(None),
             Err(_) => Ok(None), // Timeout
+        }
+    }
+
+    pub async fn poll_cdc_events(&self) -> Result<Option<serde_json::Value>, BankingKafkaError> {
+        if !self.config.enabled || self.consumer.is_none() {
+            tracing::info!("KafkaConsumer: poll_cdc_events - Kafka disabled or no consumer");
+            return Ok(None);
+        }
+
+        let mut stream = self.consumer.as_ref().unwrap().stream();
+        match timeout(Duration::from_millis(100), stream.next()).await {
+            Ok(Some(Ok(msg))) => {
+                tracing::info!(
+                    "KafkaConsumer: poll_cdc_events - Received message from topic: {:?}",
+                    msg.topic()
+                );
+
+                let payload = msg.payload().ok_or_else(|| {
+                    tracing::error!("KafkaConsumer: poll_cdc_events - Empty message payload");
+                    BankingKafkaError::ConsumerError("Empty message payload".to_string())
+                })?;
+
+                let cdc_event: serde_json::Value =
+                    serde_json::from_slice(payload).map_err(|e| {
+                        tracing::error!(
+                            "KafkaConsumer: poll_cdc_events - Failed to deserialize CDC event: {}",
+                            e
+                        );
+                        BankingKafkaError::ConsumerError(
+                            "Failed to deserialize CDC event".to_string(),
+                        )
+                    })?;
+
+                tracing::info!(
+                    "KafkaConsumer: poll_cdc_events - Successfully deserialized CDC event: {:?}",
+                    cdc_event
+                );
+                Ok(Some(cdc_event))
+            }
+            Ok(Some(Err(e))) => {
+                tracing::error!(
+                    "KafkaConsumer: poll_cdc_events - Error receiving message: {}",
+                    e
+                );
+                Err(e.into())
+            }
+            Ok(None) => {
+                tracing::info!("KafkaConsumer: poll_cdc_events - No message available");
+                Ok(None)
+            }
+            Err(_) => {
+                tracing::info!("KafkaConsumer: poll_cdc_events - Timeout, no message");
+                Ok(None) // Timeout
+            }
         }
     }
 
