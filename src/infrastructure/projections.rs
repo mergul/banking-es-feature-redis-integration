@@ -236,13 +236,20 @@ impl ProjectionStore {
         };
 
         // Start background processor
-        tokio::spawn(Self::update_processor(
-            pool,
-            update_receiver,
-            account_cache,
-            transaction_cache,
-            config,
-        ));
+        let processor_pool = pool.clone();
+        let processor_account_cache = account_cache.clone();
+        let processor_transaction_cache = transaction_cache.clone();
+        let processor_config = config.clone();
+        tokio::spawn(async move {
+            Self::update_processor(
+                processor_pool,
+                update_receiver,
+                processor_account_cache,
+                processor_transaction_cache,
+                processor_config,
+            )
+            .await;
+        });
 
         // Start metrics reporter
         let metrics = store.metrics.clone();
