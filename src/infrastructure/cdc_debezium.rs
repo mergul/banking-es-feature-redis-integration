@@ -63,7 +63,7 @@ impl Default for DebeziumConfig {
             database_user: "postgres".to_string(),
             database_password: "Francisco1".to_string(),
             table_include_list: "public.kafka_outbox_cdc".to_string(), // Match actual Debezium config
-            topic_prefix: "banking-es.public.".to_string(), // Match actual Debezium config
+            topic_prefix: "banking-es".to_string(), // Match actual Debezium config
             snapshot_mode: "initial".to_string(),
             poll_interval_ms: 100, // Much faster than 5-second polling
         }
@@ -694,7 +694,7 @@ impl CDCServiceManager {
             cache_service,
             projection_store,
         ));
-        let cdc_topic = format!("{}{}", config.topic_prefix, "kafka_outbox_cdc");
+        let cdc_topic = format!("{}.{}", config.topic_prefix, config.table_include_list.replace("public.",""));
 
         let cdc_consumer = CDCConsumer::new(kafka_consumer, cdc_topic, shutdown_rx);
 
@@ -721,7 +721,7 @@ impl CDCServiceManager {
         // Start CDC consumer
         if let Some(mut consumer) = self.cdc_consumer.take() {
             let processor = self.processor.clone();
-            let cdc_topic = self.config.topic_prefix.clone() + "kafka_outbox_cdc";
+            let cdc_topic = format!("{}.{}", self.config.topic_prefix, self.config.table_include_list.replace("public.",""));
             tracing::info!(
                 "CDC Service Manager: Starting CDC consumer for topic: {}",
                 cdc_topic
