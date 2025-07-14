@@ -119,6 +119,7 @@ impl AccountCommandHandler {
         account_id: Uuid,
         events: &[AccountEvent],
     ) -> Vec<OutboxMessage> {
+        let cdc_topic = "banking-es.public.kafka_outbox_cdc".to_string();
         events
             .iter()
             .filter_map(|event| {
@@ -128,7 +129,7 @@ impl AccountCommandHandler {
                         event_id: Self::generate_event_id_for_outbox(event),
                         event_type: event.event_type().to_string(),
                         payload,
-                        topic: self.kafka_config.event_topic.clone(),
+                        topic: cdc_topic.clone(),
                         metadata: None,
                     }),
                     Err(e) => {

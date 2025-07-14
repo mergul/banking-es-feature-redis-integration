@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use rdkafka::{
     config::ClientConfig,
-    consumer::{Consumer, StreamConsumer},
+    consumer::{CommitMode, Consumer, StreamConsumer},
     producer::{FutureProducer, FutureRecord},
     Message,
 };
@@ -692,6 +692,20 @@ impl KafkaConsumer {
             Ok(None) => Ok(None),
             Err(_) => Ok(None), // Timeout
         }
+    }
+
+    /// Commit the current message offset
+    pub async fn commit_current_message(&self) -> Result<(), BankingKafkaError> {
+        if !self.config.enabled || self.consumer.is_none() {
+            return Ok(());
+        }
+
+        // Commit the current offset
+        self.consumer
+            .as_ref()
+            .unwrap()
+            .commit_consumer_state(CommitMode::Async)?;
+        Ok(())
     }
 }
 

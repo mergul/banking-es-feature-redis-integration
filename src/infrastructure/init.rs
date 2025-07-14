@@ -321,7 +321,7 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     ));
 
     // Initialize ProjectionStore with optimized config for high throughput
-    let projection_config = ProjectionConfig {
+    let mut projection_config = ProjectionConfig {
         max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "500".to_string())
             .parse()
@@ -355,6 +355,12 @@ pub async fn init_all_services() -> Result<ServiceContext> {
             .parse()
             .unwrap_or(20),
     };
+    // If in test or development mode, set batch_size=1 and batch_timeout_ms=0 for immediate flush
+    let rust_env = std::env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string());
+    if rust_env == "test" || rust_env == "development" {
+        projection_config.batch_size = 1;
+        projection_config.batch_timeout_ms = 0;
+    }
 
     let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> =
         Arc::new(ProjectionStore::new_with_config(projection_config).await?);

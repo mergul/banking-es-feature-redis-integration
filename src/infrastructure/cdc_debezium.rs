@@ -63,7 +63,7 @@ impl Default for DebeziumConfig {
             database_user: "postgres".to_string(),
             database_password: "Francisco1".to_string(),
             table_include_list: "public.kafka_outbox_cdc".to_string(), // Match actual Debezium config
-            topic_prefix: "banking-es.public.".to_string(), // Match actual Debezium config
+            topic_prefix: "banking-es".to_string(), // Match actual Debezium config
             snapshot_mode: "initial".to_string(),
             poll_interval_ms: 100, // Much faster than 5-second polling
         }
@@ -325,7 +325,12 @@ impl CDCEventProcessor {
         );
 
         // Extract the actual outbox message from CDC event
-        let outbox_message = self.extract_outbox_message(cdc_event)?;
+        let outbox_message_opt = self.extract_outbox_message(cdc_event)?;
+        if outbox_message_opt.is_none() {
+            // Skip processing for deletes/tombstones
+            return Ok(());
+        }
+        let outbox_message = outbox_message_opt.unwrap();
         tracing::info!(
             "🔍 CDC Event Processor: Extracted outbox message for account {} (event_id: {}, event_type: {})",
             outbox_message.aggregate_id,
@@ -527,14 +532,20 @@ impl CDCEventProcessor {
         Ok(())
     }
 
-    fn extract_outbox_message(&self, cdc_event: serde_json::Value) -> Result<CDCOutboxMessage> {
-        // Extract the "after" field from Debezium CDC event
-        let after = cdc_event
-            .get("after")
-            .ok_or_else(|| anyhow::anyhow!("Missing 'after' field in CDC event"))?;
-
-        let outbox_message: CDCOutboxMessage = serde_json::from_value(after.clone())?;
-        Ok(outbox_message)
+    fn extract_outbox_message(
+        &self,
+        cdc_event: serde_json::Value,
+    ) -> Result<Option<CDCOutboxMessage>> {
+        let after = cdc_event.get("after");
+        if after.is_none() || after == Some(&serde_json::Value::Null) {
+            tracing::warn!(
+                "CDC event missing 'after' field (likely a delete or tombstone): {:?}",
+                cdc_event
+            );
+            return Ok(None); // Skip processing
+        }
+        let outbox_message: CDCOutboxMessage = serde_json::from_value(after.unwrap().clone())?;
+        Ok(Some(outbox_message))
     }
 
     pub fn get_metrics(&self) -> &CDCMetrics {
@@ -625,15 +636,28 @@ impl CDCConsumer {
                     match message_result {
                         Ok(Some(cdc_event)) => {
                             tracing::info!("CDCConsumer: ✅ Received CDC event on poll #{}: {:?}", poll_count, cdc_event);
-                            if let Err(e) = processor.process_cdc_event(cdc_event).await {
-                                error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
-                            } else {
+                            match processor.process_cdc_event(cdc_event).await {
+                                Ok(_) => {
                                 tracing::info!("CDCConsumer: ✅ Successfully processed CDC event on poll #{}", poll_count);
+                                    // CRITICAL: Commit offset after successful processing
+                                    if let Err(e) = self.kafka_consumer.commit_current_message().await {
+                                        error!("CDCConsumer: ❌ Failed to commit offset: {}", e);
+                                    } else {
+                                        tracing::info!("CDCConsumer: ✅ Successfully committed offset for poll #{}", poll_count);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
+                                    // Don't commit offset on failure - let it be retried
+                                }
                             }
                         }
                         Ok(None) => {
                             if poll_count <= 10 || poll_count % 50 == 0 { // Log every 50th empty poll to avoid spam
-                                tracing::info!("CDCConsumer: ⏳ No CDC event available on poll #{}", poll_count);
+                                tracing::info!(
+                                    "CDCConsumer: ⏳ No CDC event available on poll #{} for topic: {}",
+                                    poll_count, self.cdc_topic
+                                );
                             }
                         }
                         Err(e) => {
@@ -694,7 +718,11 @@ impl CDCServiceManager {
             cache_service,
             projection_store,
         ));
-        let cdc_topic = format!("{}{}", config.topic_prefix, "kafka_outbox_cdc");
+        let cdc_topic = format!(
+            "{}.{}",
+            config.topic_prefix,
+            config.table_include_list // Do not remove 'public.'
+        );
 
         let cdc_consumer = CDCConsumer::new(kafka_consumer, cdc_topic, shutdown_rx);
 
@@ -721,7 +749,11 @@ impl CDCServiceManager {
         // Start CDC consumer
         if let Some(mut consumer) = self.cdc_consumer.take() {
             let processor = self.processor.clone();
-            let cdc_topic = self.config.topic_prefix.clone() + "kafka_outbox_cdc";
+            let cdc_topic = format!(
+                "{}.{}",
+                self.config.topic_prefix,
+                self.config.table_include_list // Do not remove 'public.'
+            );
             tracing::info!(
                 "CDC Service Manager: Starting CDC consumer for topic: {}",
                 cdc_topic

@@ -37,8 +37,8 @@ log_error() {
 
 # Function to run SQL command
 run_sql() {
-    local sql="$1"
-    local description="$2"
+    sql="$1"
+    description="$2"
     
     log_info "Running: $description"
     sudo -u postgres psql -d "$DB_NAME" -c "$sql"
@@ -46,15 +46,15 @@ run_sql() {
 
 # Function to check if table exists
 table_exists() {
-    local table_name="$1"
-    local result=$(sudo -u postgres psql -d "$DB_NAME" -t -c "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '$table_name');")
+    table_name="$1"
+    result=$(sudo -u postgres psql -d "$DB_NAME" -t -c "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '$table_name');")
     echo "$result" | tr -d ' '
 }
 
 # Function to get table row count
 get_table_count() {
-    local table_name="$1"
-    local result=$(sudo -u postgres psql -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM $table_name;" 2>/dev/null || echo "0")
+    table_name="$1"
+    result=$(sudo -u postgres psql -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM $table_name;" 2>/dev/null || echo "0")
     echo "$result" | tr -d ' '
 }
 
@@ -65,7 +65,7 @@ cleanup_database() {
     # Step 1: Show current state
     log_info "Step 1: Current database state..."
     
-    local tables=(
+    tables=(
         "kafka_outbox"
         "kafka_outbox_cdc"
         "events"
@@ -78,7 +78,7 @@ cleanup_database() {
     
     for table in "${tables[@]}"; do
         if [ "$(table_exists "$table")" = "t" ]; then
-            local count=$(get_table_count "$table")
+            count=$(get_table_count "$table")
             log_info "Table $table: $count rows"
         else
             log_info "Table $table: does not exist"
@@ -88,7 +88,7 @@ cleanup_database() {
     # Step 2: Confirm cleanup
     log_warning "This will DELETE ALL DATA from the banking_es database!"
     read -p "Are you absolutely sure you want to continue? Type 'YES' to confirm: " -r
-    if [[ ! $REPLY =~ ^YES$ ]]; then
+    if [ "$REPLY" != "YES" ]; then
         log_info "Cleanup cancelled by user."
         exit 0
     fi
@@ -158,7 +158,7 @@ cleanup_database() {
     log_info "Step 7: Verifying cleanup..."
     for table in "${tables[@]}"; do
         if [ "$(table_exists "$table")" = "t" ]; then
-            local count=$(get_table_count "$table")
+            count=$(get_table_count "$table")
             if [ "$count" = "0" ]; then
                 log_success "Table $table: cleaned (0 rows)"
             else
@@ -176,11 +176,11 @@ cleanup_database() {
     
     log_success "Database cleanup completed successfully!"
     
-    # Step 9: Show final state
+    # Step 9: Show final database state
     log_info "Final database state:"
     for table in "${tables[@]}"; do
         if [ "$(table_exists "$table")" = "t" ]; then
-            local count=$(get_table_count "$table")
+            count=$(get_table_count "$table")
             log_info "Table $table: $count rows"
         else
             log_info "Table $table: does not exist"
@@ -192,7 +192,7 @@ cleanup_database() {
 drop_all_tables() {
     log_warning "NUCLEAR OPTION: This will DROP ALL TABLES from the database!"
     read -p "Are you absolutely sure? Type 'DROP ALL' to confirm: " -r
-    if [[ ! $REPLY =~ ^DROP ALL$ ]]; then
+    if [ "$REPLY" != "DROP ALL" ]; then
         log_info "Nuclear cleanup cancelled by user."
         exit 0
     fi
@@ -200,7 +200,7 @@ drop_all_tables() {
     log_info "Dropping all tables..."
     
     # Get all tables in the database
-    local tables=$(sudo -u postgres psql -d "$DB_NAME" -t -c "SELECT tablename FROM pg_tables WHERE schemaname = 'public';" | tr -d ' ')
+    tables=$(sudo -u postgres psql -d "$DB_NAME" -t -c "SELECT tablename FROM pg_tables WHERE schemaname = 'public';" | tr -d ' ')
     
     for table in $tables; do
         if [ -n "$table" ] && [ "$table" != "" ]; then
@@ -215,7 +215,7 @@ drop_all_tables() {
     
     # Drop all views
     log_info "Dropping all views..."
-    local views=$(sudo -u postgres psql -d "$DB_NAME" -t -c "SELECT viewname FROM pg_views WHERE schemaname = 'public';" | tr -d ' ')
+    views=$(sudo -u postgres psql -d "$DB_NAME" -t -c "SELECT viewname FROM pg_views WHERE schemaname = 'public';" | tr -d ' ')
     
     for view in $views; do
         if [ -n "$view" ] && [ "$view" != "" ]; then
@@ -237,7 +237,7 @@ case "${1:-cleanup}" in
         ;;
     "status")
         log_info "Database status:"
-        local tables=(
+        tables=(
             "kafka_outbox"
             "kafka_outbox_cdc"
             "events"
@@ -250,7 +250,7 @@ case "${1:-cleanup}" in
         
         for table in "${tables[@]}"; do
             if [ "$(table_exists "$table")" = "t" ]; then
-                local count=$(get_table_count "$table")
+                count=$(get_table_count "$table")
                 log_info "Table $table: $count rows"
             else
                 log_info "Table $table: does not exist"
