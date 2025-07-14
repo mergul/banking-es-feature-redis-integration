@@ -6,7 +6,6 @@ use crate::infrastructure::auth::{AuthConfig, AuthService};
 use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
 use crate::infrastructure::event_store::{EventStore, EventStoreConfig, EventStoreTrait};
 use crate::infrastructure::kafka_abstraction::KafkaConfig;
-use crate::infrastructure::kafka_event_processor::KafkaEventProcessor;
 use crate::infrastructure::l1_cache_updater::L1CacheUpdater;
 use crate::infrastructure::projections::{ProjectionConfig, ProjectionStore, ProjectionStoreTrait};
 use crate::infrastructure::redis_abstraction::{RealRedisClient, RedisClient, RedisPoolConfig};
@@ -577,29 +576,11 @@ pub async fn init_all_services() -> Result<ServiceContext> {
         cache_service.clone(),
     )?);
 
-    // Initialize KafkaEventProcessor
-    let retry_config = crate::infrastructure::kafka_event_processor::RetryConfig::default(); // Or load from env
-    let kafka_processor = Arc::new(KafkaEventProcessor::new(
-        kafka_config,
-        &event_store,
-        &projection_store,
-        &cache_service,
-        retry_config,
-    )?);
-
     // Start L1 cache updater in background
     let l1_updater = l1_cache_updater.clone();
     let l1_handle = tokio::spawn(async move {
         if let Err(_) = l1_updater.start().await {
             error!("L1 cache updater error");
-        }
-    });
-
-    // Start Kafka event processor in background
-    let kafka_processor_for_start = kafka_processor.clone();
-    let kafka_handle = tokio::spawn(async move {
-        if let Err(_) = kafka_processor_for_start.start_processing().await {
-            error!("Kafka event processor error");
         }
     });
 

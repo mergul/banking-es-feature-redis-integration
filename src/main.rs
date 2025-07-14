@@ -167,22 +167,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("CDC Service Manager started.");
     // --- End CDC Service Manager ---
 
-    // --- Initialize and Start Kafka Event Processor ---
-    // let kafka_event_processor =
-    //     crate::infrastructure::kafka_event_processor::KafkaEventProcessor::new(
-    //         kafka_config.clone(),
-    //         &service_context.event_store,
-    //         &service_context.projection_store,
-    //         &service_context.cache_service,
-    //         crate::infrastructure::kafka_event_processor::RetryConfig::default(),
-    //     )?;
-
-    // tokio::spawn(async move {
-    //     if let Err(e) = kafka_event_processor.start_processing().await {
-    //         error!("Kafka Event Processor failed: {}", e);
-    //     }
-    // });
-    // info!("Kafka Event Processor started.");
 
     // Create CQRS router
     // The auth_service is cloned for potential future use in CQRS auth middleware/handlers
