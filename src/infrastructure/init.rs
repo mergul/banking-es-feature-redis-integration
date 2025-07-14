@@ -578,14 +578,14 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     )?);
 
     // Initialize KafkaEventProcessor
-    let retry_config = crate::infrastructure::kafka_event_processor::RetryConfig::default(); // Or load from env
-    let kafka_processor = Arc::new(KafkaEventProcessor::new(
-        kafka_config,
-        &event_store,
-        &projection_store,
-        &cache_service,
-        retry_config,
-    )?);
+    // let retry_config = crate::infrastructure::kafka_event_processor::RetryConfig::default(); // Or load from env
+    // let kafka_processor = Arc::new(KafkaEventProcessor::new(
+    //     kafka_config,
+    //     &event_store,
+    //     &projection_store,
+    //     &cache_service,
+    //     retry_config,
+    // )?);
 
     // Start L1 cache updater in background
     let l1_updater = l1_cache_updater.clone();
@@ -596,12 +596,12 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     });
 
     // Start Kafka event processor in background
-    let kafka_processor_for_start = kafka_processor.clone();
-    let kafka_handle = tokio::spawn(async move {
-        if let Err(_) = kafka_processor_for_start.start_processing().await {
-            error!("Kafka event processor error");
-        }
-    });
+    // let kafka_processor_for_start = kafka_processor.clone();
+    // let kafka_handle = tokio::spawn(async move {
+    //     if let Err(_) = kafka_processor_for_start.start_processing().await {
+    //         error!("Kafka event processor error");
+    //     }
+    // });
 
     info!("All services initialized successfully");
 

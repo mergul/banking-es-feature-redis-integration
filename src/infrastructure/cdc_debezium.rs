@@ -31,6 +31,18 @@ pub struct CDCOutboxMessage {
     pub aggregate_id: Uuid,
     pub event_id: Uuid,
     pub event_type: String,
+    pub topic: String,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CDCOutboxMessageWithPayload {
+    pub id: Uuid,
+    pub aggregate_id: Uuid,
+    pub event_id: Uuid,
+    pub event_type: String,
     pub payload: Vec<u8>,
     pub topic: String,
     pub metadata: Option<serde_json::Value>,
@@ -340,7 +352,7 @@ impl CDCEventProcessor {
 
         // Deserialize the domain event
         let domain_event: crate::domain::AccountEvent =
-            bincode::deserialize(&outbox_message.payload)?;
+            bincode::deserialize(&outbox_message.payload[..])?;
         tracing::info!(
             "🔍 CDC Event Processor: Deserialized domain event: {:?}",
             domain_event
@@ -535,8 +547,8 @@ impl CDCEventProcessor {
     fn extract_outbox_message(
         &self,
         cdc_event: serde_json::Value,
-    ) -> Result<Option<CDCOutboxMessage>> {
-        let after = cdc_event.get("after");
+    ) -> Result<Option<CDCOutboxMessageWithPayload>> {
+        let after = cdc_event.get("payload").and_then(|p| p.get("after"));
         if after.is_none() || after == Some(&serde_json::Value::Null) {
             tracing::warn!(
                 "CDC event missing 'after' field (likely a delete or tombstone): {:?}",
@@ -544,8 +556,25 @@ impl CDCEventProcessor {
             );
             return Ok(None); // Skip processing
         }
-        let outbox_message: CDCOutboxMessage = serde_json::from_value(after.unwrap().clone())?;
-        Ok(Some(outbox_message))
+        let mut outbox_message_raw: serde_json::Value = after.unwrap().clone();
+        let payload_str = outbox_message_raw["payload"].as_str().unwrap();
+        let payload = base64::decode(payload_str)?;
+
+        let outbox_message: CDCOutboxMessage = serde_json::from_value(outbox_message_raw)?;
+
+        let outbox_message_with_payload = CDCOutboxMessageWithPayload {
+            id: outbox_message.id,
+            aggregate_id: outbox_message.aggregate_id,
+            event_id: outbox_message.event_id,
+            event_type: outbox_message.event_type,
+            payload,
+            topic: outbox_message.topic,
+            metadata: outbox_message.metadata,
+            created_at: outbox_message.created_at,
+            updated_at: outbox_message.updated_at,
+        };
+
+        Ok(Some(outbox_message_with_payload))
     }
 
     pub fn get_metrics(&self) -> &CDCMetrics {
@@ -863,7 +892,6 @@ impl CDCIntegrationHelper {
             aggregate_id: outbox_msg.aggregate_id,
             event_id: outbox_msg.event_id,
             event_type: outbox_msg.event_type.clone(),
-            payload: outbox_msg.payload.clone(),
             topic: outbox_msg.topic.clone(),
             metadata: outbox_msg.metadata.clone(),
             created_at: Utc::now(),

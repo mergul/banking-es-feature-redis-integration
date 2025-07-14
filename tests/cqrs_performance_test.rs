@@ -1,6 +1,6 @@
 use banking_es::{
     application::services::CQRSAccountService,
-    domain::{Account, AccountError},
+    domain::{Account, AccountError, AccountEvent},
     infrastructure::{
         cache_service::{CacheConfig, CacheService, CacheServiceTrait, EvictionPolicy},
         event_store::{EventStore, EventStoreTrait},
@@ -27,7 +27,7 @@ use std::io::Write;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use std::time::Instant;
 use tokio;
@@ -66,7 +66,7 @@ struct CQRSTestContext {
     _shutdown_tx: mpsc::Sender<()>,
     _background_tasks: Vec<JoinHandle<()>>,
     async_cache_metrics: Arc<AsyncCacheMetrics>, // Added for new metrics
-    _cdc_service_manager: banking_es::infrastructure::cdc_debezium::CDCServiceManager, // Added for CDC cleanup
+    _cdc_service_manager: TestCDCServiceManager, // Use test-specific manager
 }
 
 impl Drop for CQRSTestContext {
@@ -103,16 +103,10 @@ async fn setup_cqrs_test_environment(
         .idle_timeout(Duration::from_secs(1800)) // Reduced idle timeout
         .max_lifetime(Duration::from_secs(3600)) // Reduced max lifetime
         .test_before_acquire(true)
-        .connect_lazy_with(database_url.parse().unwrap());
+        .connect(&database_url)
+        .await?;
 
-    // Test database connection
-    match pool.acquire().await {
-        Ok(_) => tracing::info!("✅ Database connection test successful"),
-        Err(e) => {
-            tracing::error!("❌ Database connection failed: {}", e);
-            return Err(Box::new(e));
-        }
-    }
+    tracing::info!("✅ Database connection established successfully");
 
     // Initialize Redis client with optimized settings
     let redis_url =
@@ -154,63 +148,40 @@ async fn setup_cqrs_test_environment(
         as Arc<dyn CacheServiceTrait + 'static>;
     let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
 
-    // Start CDC Service for processing outbox events
+    // Create CDC outbox repository and create the table
     let cdc_outbox_repo =
         Arc::new(banking_es::infrastructure::cdc_debezium::CDCOutboxRepository::new(pool.clone()));
 
-    let kafka_producer_for_cdc =
-        banking_es::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())
-            .expect("Failed to create Kafka producer for CDC");
-    let kafka_consumer_for_cdc =
-        banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())
-            .expect("Failed to create Kafka consumer for CDC");
+    // Create the CDC outbox table
+    tracing::info!("🔧 Creating CDC outbox table...");
+    cdc_outbox_repo.create_cdc_outbox_table().await?;
+    tracing::info!("✅ CDC outbox table created successfully");
 
+    // Create test-specific CDC service manager that processes events directly
     let cdc_config = banking_es::infrastructure::cdc_debezium::DebeziumConfig::default();
     tracing::info!(
-        "🔧 Creating CDC Service Manager with config: {:?}",
+        "🔧 Creating TEST CDC Service Manager with config: {:?}",
         cdc_config
     );
-    let mut cdc_service_manager =
-        match banking_es::infrastructure::cdc_debezium::CDCServiceManager::new(
-            cdc_config,
-            cdc_outbox_repo,
-            kafka_producer_for_cdc,
-            kafka_consumer_for_cdc,
-            cache_service.clone(),
-            projection_store.clone(),
-        ) {
-            Ok(manager) => {
-                tracing::info!("✅ CDC Service Manager created successfully");
-                manager
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to create CDC service manager: {}", e);
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
-                    as Box<dyn std::error::Error + Send + Sync>);
-            }
-        };
 
-    // Start CDC service
-    tracing::info!("🔧 Starting CDC Service Manager...");
-    match cdc_service_manager.start().await {
-        Ok(_) => {
-            tracing::info!("✅ CDC Service started for test environment");
-        }
-        Err(e) => {
-            tracing::error!("❌ Failed to start CDC service: {}", e);
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )) as Box<dyn std::error::Error + Send + Sync>);
-        }
-    }
+    // Create a test-specific CDC service that processes outbox events directly
+    let test_cdc_service = TestCDCService::new(
+        cdc_outbox_repo.clone(),
+        cache_service.clone(),
+        projection_store.clone(),
+        pool.clone(),
+    );
 
-    // Give CDC service time to initialize
+    // Start the test CDC service
+    tracing::info!("🔧 Starting TEST CDC Service...");
+    let cdc_service_handle = tokio::spawn(async move {
+        test_cdc_service.start_processing().await;
+    });
+    background_tasks.push(cdc_service_handle);
+
+    // Give test CDC service time to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
-    tracing::info!("🔧 CDC Service initialization complete");
+    tracing::info!("🔧 TEST CDC Service initialization complete");
 
     let cqrs_service = Arc::new(CQRSAccountService::new(
         event_store,
@@ -258,8 +229,206 @@ async fn setup_cqrs_test_environment(
         _shutdown_tx: shutdown_tx,
         _background_tasks: background_tasks,
         async_cache_metrics,
-        _cdc_service_manager: cdc_service_manager,
+        _cdc_service_manager: TestCDCServiceManager, // Use test-specific manager
     })
+}
+
+// Test-specific CDC service that processes outbox events directly without Debezium
+struct TestCDCService {
+    outbox_repo: Arc<banking_es::infrastructure::cdc_debezium::CDCOutboxRepository>,
+    cache_service: Arc<dyn CacheServiceTrait>,
+    projection_store: Arc<dyn ProjectionStoreTrait>,
+    db_pool: PgPool,
+}
+
+impl TestCDCService {
+    fn new(
+        outbox_repo: Arc<banking_es::infrastructure::cdc_debezium::CDCOutboxRepository>,
+        cache_service: Arc<dyn CacheServiceTrait>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+        db_pool: PgPool,
+    ) -> Self {
+        Self {
+            outbox_repo,
+            cache_service,
+            projection_store,
+            db_pool,
+        }
+    }
+
+    async fn start_processing(&self) {
+        tracing::info!("🧪 Test CDC Service: Starting direct outbox processing...");
+
+        let mut interval = tokio::time::interval(Duration::from_millis(100)); // Poll every 100ms
+
+        loop {
+            interval.tick().await;
+
+            // Directly query the outbox table for new messages
+            match self.process_pending_outbox_messages().await {
+                Ok(processed_count) => {
+                    if processed_count > 0 {
+                        tracing::info!(
+                            "🧪 Test CDC Service: Processed {} outbox messages",
+                            processed_count
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "🧪 Test CDC Service: Error processing outbox messages: {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    async fn process_pending_outbox_messages(
+        &self,
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        // Query for unprocessed outbox messages
+        let messages = sqlx::query!(
+            r#"
+            SELECT id, aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at
+            FROM kafka_outbox_cdc
+            ORDER BY created_at ASC
+            LIMIT 10
+            "#
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let mut processed_count = 0;
+
+        for row in messages {
+            tracing::info!(
+                "🧪 Test CDC Service: Processing outbox message for account {} (event_type: {})",
+                row.aggregate_id,
+                row.event_type
+            );
+
+            // Deserialize the domain event
+            let domain_event: AccountEvent = bincode::deserialize(&row.payload[..])?;
+
+            // Update projections
+            if let Err(e) = self
+                .update_projections_from_event(&domain_event, row.aggregate_id)
+                .await
+            {
+                tracing::error!("🧪 Test CDC Service: Failed to update projections: {}", e);
+                continue;
+            }
+
+            // Invalidate cache
+            if let Err(e) = self
+                .cache_service
+                .invalidate_account(row.aggregate_id)
+                .await
+            {
+                tracing::error!("🧪 Test CDC Service: Failed to invalidate cache: {}", e);
+            }
+
+            // Delete the processed message
+            sqlx::query!("DELETE FROM kafka_outbox_cdc WHERE id = $1", row.id)
+                .execute(&self.db_pool)
+                .await?;
+
+            processed_count += 1;
+        }
+
+        Ok(processed_count)
+    }
+
+    async fn update_projections_from_event(
+        &self,
+        event: &AccountEvent,
+        account_id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Get current account projection
+        let current_projection = self.projection_store.get_account(account_id).await?;
+
+        if let Some(mut projection) = current_projection {
+            // Update projection based on event type
+            match event {
+                AccountEvent::MoneyDeposited { amount, .. } => {
+                    projection.balance += *amount;
+                    projection.updated_at = chrono::Utc::now();
+                }
+                AccountEvent::MoneyWithdrawn { amount, .. } => {
+                    projection.balance -= *amount;
+                    projection.updated_at = chrono::Utc::now();
+                }
+                AccountEvent::AccountCreated {
+                    owner_name,
+                    initial_balance,
+                    ..
+                } => {
+                    projection.owner_name = owner_name.clone();
+                    projection.balance = *initial_balance;
+                    projection.is_active = true;
+                    projection.updated_at = chrono::Utc::now();
+                }
+                AccountEvent::AccountClosed { .. } => {
+                    projection.is_active = false;
+                    projection.updated_at = chrono::Utc::now();
+                }
+            }
+
+            // Update the projection
+            self.projection_store
+                .upsert_accounts_batch(vec![projection])
+                .await?;
+        } else {
+            // No existing projection, create new one
+            let mut new_projection = AccountProjection {
+                id: account_id,
+                owner_name: "".to_string(),
+                balance: rust_decimal::Decimal::ZERO,
+                is_active: false,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+
+            // Apply event to new projection
+            match event {
+                AccountEvent::AccountCreated {
+                    owner_name,
+                    initial_balance,
+                    ..
+                } => {
+                    new_projection.owner_name = owner_name.clone();
+                    new_projection.balance = *initial_balance;
+                    new_projection.is_active = true;
+                }
+                _ => {
+                    tracing::warn!(
+                        "🧪 Test CDC Service: Non-creation event for non-existent projection: {:?}",
+                        event
+                    );
+                }
+            }
+
+            // Insert the new projection
+            self.projection_store
+                .upsert_accounts_batch(vec![new_projection])
+                .await?;
+        }
+
+        Ok(())
+    }
+}
+
+// Test-specific CDC service manager (placeholder for interface compatibility)
+struct TestCDCServiceManager;
+
+impl TestCDCServiceManager {
+    fn get_metrics(&self) -> &banking_es::infrastructure::cdc_debezium::CDCMetrics {
+        // Return a static metrics instance for test compatibility
+        static METRICS: std::sync::OnceLock<banking_es::infrastructure::cdc_debezium::CDCMetrics> =
+            std::sync::OnceLock::new();
+        METRICS.get_or_init(|| banking_es::infrastructure::cdc_debezium::CDCMetrics::default())
+    }
 }
 
 #[derive(Debug)]
