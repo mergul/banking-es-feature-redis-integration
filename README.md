@@ -66,6 +66,25 @@ If you run the application directly using `cargo run`:
 
 (Details about API endpoints would go here - e.g., create account, deposit, withdraw, get account)
 
+## Data Capture Method
+
+This project supports two data capture methods:
+
+*   **Outbox Poller:** The application writes events to an outbox table in the same transaction as the business logic. A separate poller process then reads the events from the outbox table and publishes them to Kafka.
+*   **CDC Debezium:** The application writes events to a dedicated table, and a Debezium connector captures the changes from the database's transaction log and publishes them to Kafka.
+
+You can select the data capture method by setting the `DATA_CAPTURE_METHOD` environment variable. The available values are:
+
+*   `outbox_poller`
+*   `cdc_debezium` (default)
+
+Example:
+
+```bash
+export DATA_CAPTURE_METHOD="outbox_poller"
+cargo run
+```
+
 ## Rate Limiting and Request Validation
 
 This system implements a robust rate limiting and request validation middleware to ensure secure and controlled access to the banking API endpoints.

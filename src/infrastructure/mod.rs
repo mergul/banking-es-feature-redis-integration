@@ -23,12 +23,14 @@ pub mod logging;
 pub mod middleware;
 pub mod outbox; // Added
 pub mod outbox_poller;
+pub mod event_processor;
 pub mod projections;
 pub mod rate_limiter;
 pub mod redis_abstraction;
 pub mod repository;
 pub mod scaling;
 pub mod sharding;
+pub mod shutdown;
 pub mod stuck_operation_diagnostic;
 pub mod timeout_manager;
 pub mod troubleshooting;

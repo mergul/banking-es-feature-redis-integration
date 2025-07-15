@@ -26,6 +26,7 @@ use crate::infrastructure::cdc_service_manager::{
     CDCServiceManager as OptimizedCDCServiceManager, EnhancedCDCMetrics, OptimizationConfig,
     ServiceState,
 };
+use crate::infrastructure::event_processor::EventProcessor;
 
 /// Kafka message structure for CDC events
 #[derive(Debug, Clone)]
@@ -420,23 +421,27 @@ impl CDCEventProcessor {
     }
 }
 
+#[async_trait]
+impl EventProcessor for CDCEventProcessor {
+    async fn process_event(&self, event: serde_json::Value) -> Result<()> {
+        self.process_cdc_event(event).await
+    }
+}
+
 /// CDC Consumer - consumes CDC events from Kafka Connect
 pub struct CDCConsumer {
     kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
     cdc_topic: String,
-    shutdown_rx: mpsc::Receiver<()>,
 }
 
 impl CDCConsumer {
     pub fn new(
         kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
         cdc_topic: String,
-        shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
         Self {
             kafka_consumer,
             cdc_topic,
-            shutdown_rx,
         }
     }
 
@@ -451,6 +456,7 @@ impl CDCConsumer {
     pub async fn start_consuming_with_mutex(
         &mut self,
         processor: Arc<tokio::sync::Mutex<CDCEventProcessor>>,
+        mut shutdown_rx: mpsc::Receiver<()>,
     ) -> Result<()> {
         info!("Starting CDC consumer for topic: {}", self.cdc_topic);
         tracing::info!(
@@ -504,7 +510,7 @@ impl CDCConsumer {
             }
 
             tokio::select! {
-                _ = self.shutdown_rx.recv() => {
+                _ = shutdown_rx.recv() => {
                     info!("CDC consumer received shutdown signal");
                     tracing::info!("CDCConsumer: Received shutdown signal, breaking loop");
                     break;
@@ -576,7 +582,7 @@ pub struct CDCServiceManager {
     processor: Arc<tokio::sync::Mutex<CDCEventProcessor>>,
     // Add the optimized producer
     cdc_producer: Option<Arc<tokio::sync::Mutex<CDCProducer>>>,
-    shutdown_tx: mpsc::Sender<()>,
+    shutdown_tx: Option<mpsc::Sender<()>>,
     cleanup_handle: Option<tokio::task::JoinHandle<()>>,
     cdc_consumer_handle: Option<tokio::task::JoinHandle<()>>,
 
@@ -599,6 +605,7 @@ impl CDCServiceManager {
         projection_store: Arc<dyn ProjectionStoreTrait>,
         business_config: Option<BusinessLogicConfig>,
         producer_config: Option<CDCProducerConfig>,
+        shutdown_rx: mpsc::Receiver<()>,
     ) -> Result<Self> {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -630,7 +637,7 @@ impl CDCServiceManager {
             config.table_include_list // Do not remove 'public.'
         );
 
-        let cdc_consumer = CDCConsumer::new(kafka_consumer.clone(), cdc_topic, shutdown_rx);
+        let cdc_consumer = CDCConsumer::new(kafka_consumer.clone(), cdc_topic);
 
         // Initialize enhanced service manager with proper configuration
         let optimization_config = OptimizationConfig::default();
@@ -649,7 +656,7 @@ impl CDCServiceManager {
             cdc_consumer: Some(cdc_consumer),
             processor,
             cdc_producer,
-            shutdown_tx,
+            shutdown_tx: Some(shutdown_tx),
             cleanup_handle: None,
             cdc_consumer_handle: None,
             optimized_service_manager: Some(enhanced_service_manager),
@@ -708,7 +715,7 @@ impl CDCServiceManager {
                 tracing::info!("CDC Service Manager: CDC consumer task spawned and running");
                 tracing::info!("CDC Service Manager: About to call consumer.start_consuming()");
 
-                match consumer.start_consuming_with_mutex(processor).await {
+                match consumer.start_consuming_with_mutex(processor, shutdown_rx).await {
                     Ok(_) => {
                         tracing::info!("CDC Service Manager: CDC consumer completed normally");
                     }
@@ -760,8 +767,10 @@ impl CDCServiceManager {
         info!("Stopping CDC Service Manager");
 
         // Send shutdown signal
-        if let Err(e) = self.shutdown_tx.send(()).await {
-            warn!("Failed to send shutdown signal to CDC consumer: {}", e);
+        if let Some(shutdown_tx) = &self.shutdown_tx {
+            if let Err(e) = shutdown_tx.send(()).await {
+                warn!("Failed to send shutdown signal to CDC consumer: {}", e);
+            }
         }
 
         // Stop the enhanced service manager if available

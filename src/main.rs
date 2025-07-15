@@ -50,7 +50,11 @@ use opentelemetry::sdk::export::trace::SpanExporter;
 use opentelemetry::trace::TracerProvider;
 
 use crate::infrastructure::init::init_all_services;
-use infrastructure::config::AppConfig;
+use crate::infrastructure::outbox_poller::{OutboxPollerConfig, OutboxPollingService};
+use crate::infrastructure::outbox::PostgresOutboxRepository;
+use crate::infrastructure::shutdown::{Shutdown, ShutdownManager};
+use infrastructure::config::{AppConfig, DataCaptureMethod};
+use tokio::sync::mpsc;
 
 async fn root() -> Html<&'static str> {
     Html(
@@ -128,6 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create KafkaConfig instance (can be loaded from env or defaults)
     let kafka_config = KafkaConfig::default(); // Or load from env
+    let app_config = AppConfig::from_env();
 
     // Initialize CQRS service using the services from ServiceContext
     let cqrs_service = Arc::new(CQRSAccountService::new(
@@ -140,52 +145,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_millis(100), // batch_timeout
     ));
 
-    // --- Initialize and Start CDC Service Manager ---
-    let cdc_outbox_repo = Arc::new(
-        crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
-            Arc::clone(DB_POOL.get().unwrap()).as_ref().clone(),
-        ),
-    );
+    match app_config.data_capture.method {
+        DataCaptureMethod::CdcDebezium => {
+            info!("Using CDC Debezium for data capture");
+            let cdc_outbox_repo = Arc::new(
+                crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
+                    Arc::clone(DB_POOL.get().unwrap()).as_ref().clone(),
+                ),
+            );
 
-    let kafka_producer_for_cdc =
-        crate::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())?;
-    let kafka_consumer_for_cdc =
-        crate::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())?;
+            let kafka_producer_for_cdc =
+                crate::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())?;
+            let kafka_consumer_for_cdc =
+                crate::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())?;
 
-    let cdc_config = crate::infrastructure::cdc_debezium::DebeziumConfig::default();
-    let mut cdc_service_manager = crate::infrastructure::cdc_debezium::CDCServiceManager::new(
-        cdc_config,
-        cdc_outbox_repo,
-        kafka_producer_for_cdc,
-        kafka_consumer_for_cdc,
-        service_context.cache_service.clone(),
-        service_context.projection_store.clone(),
-        None,
-        None,
-    )
-    .await?;
+            let cdc_config = crate::infrastructure::cdc_debezium::DebeziumConfig::default();
+            let mut cdc_service_manager =
+                crate::infrastructure::cdc_debezium::CDCServiceManager::new(
+                    cdc_config,
+                    cdc_outbox_repo,
+                    kafka_producer_for_cdc,
+                    kafka_consumer_for_cdc,
+                    service_context.cache_service.clone(),
+                    service_context.projection_store.clone(),
+                    None,
+                    None,
+                )
+                .await?;
 
-    // Start CDC service
-    cdc_service_manager.start().await?;
-    info!("CDC Service Manager started.");
-    // --- End CDC Service Manager ---
+            // Start CDC service
+            cdc_service_manager.start().await?;
+            info!("CDC Service Manager started.");
+        }
+        DataCaptureMethod::OutboxPoller => {
+            info!("Using Outbox Poller for data capture");
+            let outbox_repo = Arc::new(PostgresOutboxRepository::new(Arc::clone(DB_POOL.get().unwrap()).as_ref().clone()));
+            let kafka_producer = Arc::new(KafkaProducer::new(kafka_config.clone())?);
+            let poller_config = OutboxPollerConfig::default();
+            let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-    // --- Initialize and Start Kafka Event Processor ---
-    // let kafka_event_processor =
-    //     crate::infrastructure::kafka_event_processor::KafkaEventProcessor::new(
-    //         kafka_config.clone(),
-    //         &service_context.event_store,
-    //         &service_context.projection_store,
-    //         &service_context.cache_service,
-    //         crate::infrastructure::kafka_event_processor::RetryConfig::default(),
-    //     )?;
+            let poller_service = OutboxPollingService::new(
+                outbox_repo,
+                kafka_producer,
+                poller_config,
+                shutdown_rx,
+            );
 
-    // tokio::spawn(async move {
-    //     if let Err(e) = kafka_event_processor.start_processing().await {
-    //         error!("Kafka Event Processor failed: {}", e);
-    //     }
-    // });
-    // info!("Kafka Event Processor started.");
+            tokio::spawn(poller_service.run());
+            info!("Outbox Poller started.");
+
+            // --- Initialize and Start Kafka Event Processor ---
+            let kafka_event_processor =
+                crate::infrastructure::kafka_event_processor::KafkaEventProcessor::new(
+                    kafka_config.clone(),
+                    &service_context.event_store,
+                    &service_context.projection_store,
+                    &service_context.cache_service,
+                    crate::infrastructure::kafka_event_processor::RetryConfig::default(),
+                )?;
+
+            tokio::spawn(async move {
+                if let Err(e) = kafka_event_processor.start_processing().await {
+                    error!("Kafka Event Processor failed: {}", e);
+                }
+            });
+            info!("Kafka Event Processor started.");
+        }
+    }
 
     // Create CQRS router
     // The auth_service is cloned for potential future use in CQRS auth middleware/handlers
@@ -237,12 +263,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(e.into());
     }
 
-    // Graceful shutdown of services
-    info!("Sending shutdown signal to CDC Service Manager...");
-    if let Err(e) = cdc_service_manager.stop().await {
-        error!("Failed to stop CDC Service Manager: {}", e);
+    let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+    let shutdown_manager = Arc::new(ShutdownManager::new(shutdown_tx));
+
+    match app_config.data_capture.method {
+        DataCaptureMethod::CdcDebezium => {
+            info!("Using CDC Debezium for data capture");
+            let cdc_outbox_repo = Arc::new(
+                crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
+                    Arc::clone(DB_POOL.get().unwrap()).as_ref().clone(),
+                ),
+            );
+
+            let kafka_producer_for_cdc =
+                crate::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())?;
+            let kafka_consumer_for_cdc =
+                crate::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())?;
+
+            let cdc_config = crate::infrastructure::cdc_debezium::DebeziumConfig::default();
+            let mut cdc_service_manager =
+                crate::infrastructure::cdc_debezium::CDCServiceManager::new(
+                    cdc_config,
+                    cdc_outbox_repo,
+                    kafka_producer_for_cdc,
+                    kafka_consumer_for_cdc,
+                    service_context.cache_service.clone(),
+                    service_context.projection_store.clone(),
+                    None,
+                    None,
+                    shutdown_rx,
+                )
+                .await?;
+
+            // Start CDC service
+            cdc_service_manager.start().await?;
+            info!("CDC Service Manager started.");
+        }
+        DataCaptureMethod::OutboxPoller => {
+            info!("Using Outbox Poller for data capture");
+            let outbox_repo = Arc::new(PostgresOutboxRepository::new(Arc::clone(DB_POOL.get().unwrap()).as_ref().clone()));
+            let kafka_producer = Arc::new(KafkaProducer::new(kafka_config.clone())?);
+            let poller_config = OutboxPollerConfig::default();
+
+            let poller_service = OutboxPollingService::new(
+                outbox_repo,
+                kafka_producer,
+                poller_config,
+                shutdown_rx,
+            );
+
+            tokio::spawn(poller_service.run());
+            info!("Outbox Poller started.");
+
+            // --- Initialize and Start Kafka Event Processor ---
+            let kafka_event_processor =
+                crate::infrastructure::kafka_event_processor::KafkaEventProcessor::new(
+                    kafka_config.clone(),
+                    &service_context.event_store,
+                    &service_context.projection_store,
+                    &service_context.cache_service,
+                    crate::infrastructure::kafka_event_processor::RetryConfig::default(),
+                )?;
+
+            tokio::spawn(async move {
+                if let Err(e) = kafka_event_processor.start_processing().await {
+                    error!("Kafka Event Processor failed: {}", e);
+                }
+            });
+            info!("Kafka Event Processor started.");
+        }
     }
-    // Add a small delay to allow the CDC service to process the shutdown signal
+    // Graceful shutdown of services
+    info!("Sending shutdown signal to services...");
+    if let Err(e) = shutdown_manager.shutdown().await {
+        error!("Failed to send shutdown signal: {}", e);
+    }
+    // Add a small delay to allow the services to process the shutdown signal
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     service_context.shutdown().await;

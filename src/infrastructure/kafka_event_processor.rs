@@ -10,6 +10,7 @@ use crate::infrastructure::kafka_monitoring::{MonitoringDashboard, MonitoringDas
 use crate::infrastructure::kafka_recovery::{KafkaRecovery, KafkaRecoveryTrait};
 use crate::infrastructure::kafka_recovery_strategies::{RecoveryStrategies, RecoveryStrategy};
 use crate::infrastructure::kafka_tracing::{KafkaTracing, KafkaTracingTrait};
+use crate::infrastructure::event_processor::EventProcessor;
 use crate::infrastructure::projections::{
     AccountProjection, ProjectionStore, ProjectionStoreTrait,
 };
@@ -469,6 +470,14 @@ impl KafkaEventProcessor {
                 Err(e)
             }
         }
+    }
+}
+
+#[async_trait]
+impl EventProcessor for KafkaEventProcessor {
+    async fn process_event(&self, event: serde_json::Value) -> Result<()> {
+        let batch: EventBatch = serde_json::from_value(event)?;
+        self.process_batch(batch).await
     }
 }
 
