@@ -1,11 +1,5 @@
 # Multi-stage build for Rust application
-FROM rust:1.89.0-slim as builder
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM rust:1.78.0 as builder
 
 # Set working directory
 WORKDIR /app

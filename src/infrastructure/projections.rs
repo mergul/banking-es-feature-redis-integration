@@ -693,15 +693,13 @@ impl ProjectionStore {
         )
         .execute(&mut **tx)
         .await;
-        match &result {
-            Ok(res) => tracing::info!(
-                "[ProjectionStore] bulk_upsert_accounts: upserted {} rows",
-                res.rows_affected()
-            ),
-            Err(e) => tracing::error!("[ProjectionStore] bulk_upsert_accounts: error: {}", e),
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::error!("[ProjectionStore] bulk_upsert_accounts: error: {}", e);
+                Err(anyhow::anyhow!(e))
+            }
         }
-        result?;
-        Ok(())
     }
 
     async fn bulk_insert_transactions(
