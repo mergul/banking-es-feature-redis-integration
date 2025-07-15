@@ -55,7 +55,7 @@ async fn test_real_cdc_pipeline() {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Verify CDC metrics show processing
-        let cdc_metrics = context.cdc_service_manager.get_metrics();
+        let cdc_metrics = context.cdc_service_manager.get_metrics().await?;
         let events_processed = cdc_metrics
             .events_processed
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -251,7 +251,10 @@ async fn setup_real_cdc_test_environment(
         kafka_consumer,
         cache_service,
         projection_store,
-    )?;
+        None,
+        None,
+    )
+    .await?;
 
     // Start REAL CDC service
     cdc_service_manager.start().await?;
@@ -341,7 +344,7 @@ async fn test_real_cdc_high_throughput_performance() {
         tokio::time::sleep(Duration::from_secs(10)).await; // Increased wait time
 
         // Verify CDC metrics show processing
-        let cdc_metrics = context.cdc_service_manager.get_metrics();
+        let cdc_metrics = context.cdc_service_manager.get_metrics().await?;
         let events_processed = cdc_metrics
             .events_processed
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -512,7 +515,7 @@ async fn test_real_cdc_high_throughput_performance() {
         }
 
         // Final CDC metrics
-        let final_cdc_metrics = context.cdc_service_manager.get_metrics();
+        let final_cdc_metrics = context.cdc_service_manager.get_metrics().await?;
         let final_events_processed = final_cdc_metrics
             .events_processed
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -974,7 +977,7 @@ async fn run_real_cdc_performance_test(
     // Get final metrics
     let cqrs_metrics = context.cqrs_service.get_metrics();
     let cache_metrics = context.cqrs_service.get_cache_metrics();
-    let cdc_metrics = context.cdc_service_manager.get_metrics();
+    let cdc_metrics = context.cdc_service_manager.get_metrics().await?;
 
     let teardown_start = std::time::Instant::now();
     // Cleanup

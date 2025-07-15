@@ -7,7 +7,34 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::infrastructure::outbox::{OutboxMessage, OutboxStatus, PersistedOutboxMessage};
+use crate::infrastructure::outbox::{OutboxMessage, OutboxRepositoryTrait, PersistedOutboxMessage};
+
+/// CDC-based outbox message structure
+#[derive(Debug, Clone)]
+pub struct CDCOutboxMessage {
+    pub id: Uuid,
+    pub aggregate_id: Uuid,
+    pub event_id: Uuid,
+    pub event_type: String,
+    pub topic: String,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Simplified CDC message for migration
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CDCMessageRow {
+    pub id: Uuid,
+    pub aggregate_id: Uuid,
+    pub event_id: Uuid,
+    pub event_type: String,
+    pub payload: Vec<u8>,
+    pub topic: String,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
 
 /// Configuration for CDC integration operations
 #[derive(Debug, Clone)]
@@ -80,9 +107,7 @@ impl CDCIntegrationHelper {
         persisted_msg: &PersistedOutboxMessage,
     ) -> Result<CDCOutboxMessage> {
         // Validate that the message is in a suitable state for migration
-        if persisted_msg.status != OutboxStatus::Processed
-            && persisted_msg.status != OutboxStatus::Pending
-        {
+        if persisted_msg.status != "processed" && persisted_msg.status != "pending" {
             return Err(anyhow::anyhow!(
                 "Cannot migrate message {} with status {:?}",
                 persisted_msg.id,
@@ -259,7 +284,7 @@ impl CDCIntegrationHelper {
     /// Convert batch with deduplication logic
     async fn convert_batch_with_deduplication(
         &self,
-        old_messages: &[PersistedOutboxMessage],
+        old_messages: &[CDCMessageRow],
         cdc_messages: &mut Vec<CDCOutboxMessage>,
         stats: &mut MigrationStats,
     ) -> Result<()> {
@@ -273,22 +298,20 @@ impl CDCIntegrationHelper {
                 continue;
             }
 
-            // Skip failed messages if configured
-            if msg.status == OutboxStatus::Failed {
-                stats.skipped_messages += 1;
-                continue;
-            }
+            // Convert CDC message row to CDC outbox message
+            let cdc_msg = CDCOutboxMessage {
+                id: Uuid::new_v4(),
+                aggregate_id: msg.aggregate_id,
+                event_id: msg.event_id,
+                event_type: msg.event_type.clone(),
+                topic: msg.topic.clone(),
+                metadata: msg.metadata.clone(),
+                created_at: msg.created_at,
+                updated_at: Utc::now(),
+            };
 
-            match self.convert_persisted_to_cdc_message(msg) {
-                Ok(cdc_msg) => {
-                    event_ids_seen.insert(msg.event_id, true);
-                    cdc_messages.push(cdc_msg);
-                }
-                Err(e) => {
-                    error!("Failed to convert message {}: {}", msg.id, e);
-                    stats.failed_messages += 1;
-                }
-            }
+            event_ids_seen.insert(msg.event_id, true);
+            cdc_messages.push(cdc_msg);
         }
 
         Ok(())
@@ -316,15 +339,16 @@ impl CDCIntegrationHelper {
             .collect();
 
         // Use the existing add_pending_messages method
+        let message_count = outbox_messages.len();
         new_repo.add_pending_messages(tx, outbox_messages).await?;
-        stats.migrated_messages += outbox_messages.len();
+        stats.migrated_messages += message_count;
 
         Ok(())
     }
 
     /// Get total count of messages in old outbox
     async fn get_total_outbox_count(&self) -> Result<usize> {
-        let row = sqlx::query("SELECT COUNT(*) as count FROM outbox_messages")
+        let row = sqlx::query("SELECT COUNT(*) as count FROM kafka_outbox_cdc")
             .fetch_one(&self.pool)
             .await?;
 
@@ -332,14 +356,13 @@ impl CDCIntegrationHelper {
     }
 
     /// Fetch a batch of messages from old outbox
-    async fn fetch_outbox_batch(&self, offset: usize) -> Result<Vec<PersistedOutboxMessage>> {
+    async fn fetch_outbox_batch(&self, offset: usize) -> Result<Vec<CDCMessageRow>> {
         let rows = sqlx::query_as!(
-            PersistedOutboxMessage,
+            CDCMessageRow,
             r#"
             SELECT id, aggregate_id, event_id, event_type, payload, topic, metadata, 
-                   status as "status: OutboxStatus", created_at, updated_at, 
-                   last_attempted_at, attempt_count, last_error
-            FROM outbox_messages 
+                   created_at, updated_at
+            FROM kafka_outbox_cdc 
             ORDER BY created_at ASC 
             LIMIT $1 OFFSET $2
             "#,
@@ -391,7 +414,7 @@ impl CDCIntegrationHelper {
         let cutoff_time = Utc::now() - chrono::Duration::from_std(older_than)?;
 
         let result = sqlx::query!(
-            "DELETE FROM outbox_messages WHERE created_at < $1 AND status = 'processed'",
+            "DELETE FROM kafka_outbox_cdc WHERE created_at < $1",
             cutoff_time
         )
         .execute(&self.pool)
@@ -408,7 +431,7 @@ impl CDCIntegrationHelper {
         let old_count = self.get_total_outbox_count().await?;
         let new_count = self.get_cdc_outbox_count().await?;
 
-        let old_unique_events = self.get_unique_event_count("outbox_messages").await?;
+        let old_unique_events = self.get_unique_event_count("kafka_outbox_cdc").await?;
         let new_unique_events = self.get_unique_event_count("kafka_outbox_cdc").await?;
 
         let report = MigrationIntegrityReport {

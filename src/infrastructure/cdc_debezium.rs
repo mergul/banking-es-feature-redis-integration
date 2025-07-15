@@ -13,6 +13,20 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+// Import the optimized components
+use crate::infrastructure::cdc_event_processor::{
+    BusinessLogicConfig, UltraOptimizedCDCEventProcessor,
+};
+use crate::infrastructure::cdc_integration_helper::{
+    CDCIntegrationConfig, CDCIntegrationHelper, CDCIntegrationHelperBuilder,
+    MigrationIntegrityReport, MigrationStats,
+};
+use crate::infrastructure::cdc_producer::{BusinessLogicValidator, CDCProducer, CDCProducerConfig};
+use crate::infrastructure::cdc_service_manager::{
+    CDCServiceManager as OptimizedCDCServiceManager, EnhancedCDCMetrics, OptimizationConfig,
+    ServiceState,
+};
+
 /// Kafka message structure for CDC events
 #[derive(Debug, Clone)]
 pub struct KafkaMessage {
@@ -296,11 +310,11 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
     }
 }
 
-/// Enhanced CDC Event Processor - processes Debezium CDC events and updates cache/projections
+/// Enhanced CDC Event Processor - now uses the optimized processor
 pub struct CDCEventProcessor {
-    kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
-    cache_service: Arc<dyn CacheServiceTrait>,
-    projection_store: Arc<dyn ProjectionStoreTrait>,
+    // Use the optimized event processor
+    optimized_processor: UltraOptimizedCDCEventProcessor,
+    // Keep the old metrics for backward compatibility
     metrics: Arc<CDCMetrics>,
 }
 
@@ -319,266 +333,90 @@ impl CDCEventProcessor {
         kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
         cache_service: Arc<dyn CacheServiceTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
+        business_config: Option<BusinessLogicConfig>,
     ) -> Self {
-        Self {
+        let optimized_processor = UltraOptimizedCDCEventProcessor::new(
             kafka_producer,
             cache_service,
             projection_store,
+            business_config,
+        );
+
+        Self {
+            optimized_processor,
             metrics: Arc::new(CDCMetrics::default()),
         }
     }
 
-    /// Process CDC event from Debezium with optimized cache and projection updates
+    /// Process CDC event from Debezium using the optimized processor
     pub async fn process_cdc_event(&self, cdc_event: serde_json::Value) -> Result<()> {
         let start_time = std::time::Instant::now();
         tracing::info!(
-            "🔍 CDC Event Processor: Starting to process CDC event: {:?}",
-            cdc_event
+            "🔍 CDC Event Processor: Starting to process CDC event with optimized processor"
         );
 
-        // Extract the actual outbox message from CDC event
-        let outbox_message_opt = self.extract_outbox_message(cdc_event)?;
-        if outbox_message_opt.is_none() {
-            // Skip processing for deletes/tombstones
-            return Ok(());
-        }
-        let outbox_message = outbox_message_opt.unwrap();
-        tracing::info!(
-            "🔍 CDC Event Processor: Extracted outbox message for account {} (event_id: {}, event_type: {})",
-            outbox_message.aggregate_id,
-            outbox_message.event_id,
-            outbox_message.event_type
-        );
-
-        // Deserialize the domain event
-        let domain_event: crate::domain::AccountEvent =
-            bincode::deserialize(&outbox_message.payload[..])?;
-        tracing::info!(
-            "🔍 CDC Event Processor: Deserialized domain event: {:?}",
-            domain_event
-        );
-
-        // OPTIMIZED: Use delayed cache invalidation to reduce cache misses
-        // Instead of immediate invalidation, schedule it with a small delay
-        let account_id = outbox_message.aggregate_id;
-        let cache_service = self.cache_service.clone();
-
-        tokio::spawn(async move {
-            // Small delay to allow for potential cache hits before invalidation
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            if let Err(e) = cache_service.invalidate_account(account_id).await {
-                error!(
-                    "Failed to invalidate cache for account {}: {}",
-                    account_id, e
-                );
-            }
-        });
-
-        self.metrics
-            .cache_invalidations
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        info!(
-            "Delayed cache invalidation scheduled for account {}",
-            account_id
-        );
-
-        // Update projections based on the event
-        tracing::info!(
-            "🔍 CDC Event Processor: Updating projections for account {}",
-            account_id
-        );
-        if let Err(e) = self
-            .update_projections_from_event(&domain_event, outbox_message.aggregate_id)
+        // Use the optimized processor
+        match self
+            .optimized_processor
+            .process_cdc_event_ultra_fast(cdc_event)
             .await
         {
-            error!(
-                "Failed to update projections for account {}: {}",
-                outbox_message.aggregate_id, e
-            );
-            self.metrics
-                .events_failed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Err(e);
-        } else {
-            tracing::info!(
-                "✅ CDC Event Processor: Successfully updated projections for account {}",
-                account_id
-            );
-            self.metrics
-                .projection_updates
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+            Ok(_) => {
+                // Update legacy metrics for backward compatibility
+                let latency = start_time.elapsed().as_millis() as u64;
+                self.metrics
+                    .processing_latency_ms
+                    .fetch_add(latency, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .events_processed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Update metrics
-        let latency = start_time.elapsed().as_millis() as u64;
-        self.metrics
-            .processing_latency_ms
-            .fetch_add(latency, std::sync::atomic::Ordering::Relaxed);
-        self.metrics
-            .events_processed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        tracing::info!(
-            "✅ CDC Event Processor: Event processed successfully - {} -> {} (latency: {}ms, cache invalidated, projections updated)",
-            outbox_message.event_id,
-            outbox_message.topic,
-            latency
-        );
-
-        Ok(())
-    }
-
-    /// Update projections based on the processed event
-    async fn update_projections_from_event(
-        &self,
-        event: &crate::domain::AccountEvent,
-        account_id: Uuid,
-    ) -> Result<()> {
-        tracing::info!(
-            "🔍 Projection Update: Starting projection update for account {}",
-            account_id
-        );
-
-        // Get current account projection
-        let current_projection = self.projection_store.get_account(account_id).await?;
-        tracing::info!(
-            "🔍 Projection Update: Current projection for account {}: {:?}",
-            account_id,
-            current_projection.is_some()
-        );
-
-        if let Some(mut projection) = current_projection {
-            // Update projection based on event type
-            match event {
-                crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
-                    projection.balance += *amount;
-                    projection.updated_at = Utc::now();
-                    tracing::info!(
-                        "🔍 Projection Update: Updated balance for account {}: +{}",
-                        account_id,
-                        amount
-                    );
-                }
-                crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
-                    projection.balance -= *amount;
-                    projection.updated_at = Utc::now();
-                    tracing::info!(
-                        "🔍 Projection Update: Updated balance for account {}: -{}",
-                        account_id,
-                        amount
-                    );
-                }
-                crate::domain::AccountEvent::AccountCreated {
-                    owner_name,
-                    initial_balance,
-                    ..
-                } => {
-                    projection.owner_name = owner_name.clone();
-                    projection.balance = *initial_balance;
-                    projection.is_active = true;
-                    projection.updated_at = Utc::now();
-                    tracing::info!("🔍 Projection Update: Created projection for account {}: owner={}, balance={}", account_id, owner_name, initial_balance);
-                }
-                crate::domain::AccountEvent::AccountClosed { .. } => {
-                    projection.is_active = false;
-                    projection.updated_at = Utc::now();
-                    tracing::info!("🔍 Projection Update: Closed account {}", account_id);
-                }
+                tracing::info!(
+                    "✅ CDC Event Processor: Event processed successfully with optimized processor (latency: {}ms)",
+                    latency
+                );
+                Ok(())
             }
-
-            // Update the projection
-            tracing::info!(
-                "🔍 Projection Update: Upserting projection for account {}",
-                account_id
-            );
-            self.projection_store
-                .upsert_accounts_batch(vec![projection])
-                .await?;
-            tracing::info!(
-                "✅ Projection Update: Successfully upserted projection for account {}",
-                account_id
-            );
-        } else {
-            // No existing projection, create new one
-            tracing::info!("🔍 Projection Update: No existing projection found, creating new one for account {}", account_id);
-            let mut new_projection = crate::infrastructure::projections::AccountProjection {
-                id: account_id,
-                owner_name: "".to_string(),
-                balance: Decimal::ZERO,
-                is_active: false,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            };
-
-            // Apply event to new projection
-            match event {
-                crate::domain::AccountEvent::AccountCreated {
-                    owner_name,
-                    initial_balance,
-                    ..
-                } => {
-                    new_projection.owner_name = owner_name.clone();
-                    new_projection.balance = *initial_balance;
-                    new_projection.is_active = true;
-                    tracing::info!("🔍 Projection Update: Created new projection for account {}: owner={}, balance={}", account_id, owner_name, initial_balance);
-                }
-                _ => {
-                    tracing::warn!("🔍 Projection Update: Non-creation event for non-existent projection: {:?}", event);
-                }
+            Err(e) => {
+                self.metrics
+                    .events_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!("CDC Event Processor: Failed to process event: {}", e);
+                Err(e)
             }
-
-            // Insert the new projection
-            tracing::info!(
-                "🔍 Projection Update: Inserting new projection for account {}",
-                account_id
-            );
-            self.projection_store
-                .upsert_accounts_batch(vec![new_projection])
-                .await?;
-            tracing::info!(
-                "✅ Projection Update: Successfully inserted new projection for account {}",
-                account_id
-            );
         }
-
-        Ok(())
     }
 
-    fn extract_outbox_message(
+    /// Get metrics from the optimized processor
+    pub async fn get_optimized_metrics(
         &self,
-        cdc_event: serde_json::Value,
-    ) -> Result<Option<CDCOutboxMessageWithPayload>> {
-        let after = cdc_event.get("payload").and_then(|p| p.get("after"));
-        if after.is_none() || after == Some(&serde_json::Value::Null) {
-            tracing::warn!(
-                "CDC event missing 'after' field (likely a delete or tombstone): {:?}",
-                cdc_event
-            );
-            return Ok(None); // Skip processing
-        }
-        let mut outbox_message_raw: serde_json::Value = after.unwrap().clone();
-        let payload_str = outbox_message_raw["payload"].as_str().unwrap();
-        let payload = base64::decode(payload_str)?;
-
-        let outbox_message: CDCOutboxMessage = serde_json::from_value(outbox_message_raw)?;
-
-        let outbox_message_with_payload = CDCOutboxMessageWithPayload {
-            id: outbox_message.id,
-            aggregate_id: outbox_message.aggregate_id,
-            event_id: outbox_message.event_id,
-            event_type: outbox_message.event_type,
-            payload,
-            topic: outbox_message.topic,
-            metadata: outbox_message.metadata,
-            created_at: outbox_message.created_at,
-            updated_at: outbox_message.updated_at,
-        };
-
-        Ok(Some(outbox_message_with_payload))
+    ) -> crate::infrastructure::cdc_event_processor::OptimizedCDCMetrics {
+        self.optimized_processor.get_metrics().await
     }
 
+    /// Get legacy metrics for backward compatibility
     pub fn get_metrics(&self) -> &CDCMetrics {
         &self.metrics
+    }
+
+    /// Get business logic configuration
+    pub fn get_business_config(&self) -> &BusinessLogicConfig {
+        self.optimized_processor.get_business_config()
+    }
+
+    /// Update business logic configuration
+    pub fn update_business_config(&mut self, config: BusinessLogicConfig) {
+        self.optimized_processor.update_business_config(config);
+    }
+
+    /// Start batch processor
+    pub async fn start_batch_processor(&mut self) -> Result<()> {
+        self.optimized_processor.start_batch_processor().await
+    }
+
+    /// Shutdown the processor
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.optimized_processor.shutdown().await
     }
 }
 
@@ -604,6 +442,16 @@ impl CDCConsumer {
 
     /// Start consuming CDC events
     pub async fn start_consuming(&mut self, processor: Arc<CDCEventProcessor>) -> Result<()> {
+        // This method is kept for backward compatibility but should not be used
+        // Use start_consuming_with_mutex directly
+        Err(anyhow::anyhow!("Use start_consuming_with_mutex instead"))
+    }
+
+    /// Start consuming CDC events with mutex-wrapped processor
+    pub async fn start_consuming_with_mutex(
+        &mut self,
+        processor: Arc<tokio::sync::Mutex<CDCEventProcessor>>,
+    ) -> Result<()> {
         info!("Starting CDC consumer for topic: {}", self.cdc_topic);
         tracing::info!(
             "CDCConsumer: Entered start_consuming async loop for topic: {}",
@@ -665,7 +513,7 @@ impl CDCConsumer {
                     match message_result {
                         Ok(Some(cdc_event)) => {
                             tracing::info!("CDCConsumer: ✅ Received CDC event on poll #{}: {:?}", poll_count, cdc_event);
-                            match processor.process_cdc_event(cdc_event).await {
+                            match processor.lock().await.process_cdc_event(cdc_event).await {
                                 Ok(_) => {
                                 tracing::info!("CDCConsumer: ✅ Successfully processed CDC event on poll #{}", poll_count);
                                     // CRITICAL: Commit offset after successful processing
@@ -708,72 +556,139 @@ impl CDCConsumer {
     async fn process_cdc_message(
         &self,
         message: crate::infrastructure::kafka_abstraction::KafkaMessage,
-        processor: &Arc<CDCEventProcessor>,
+        processor: &Arc<tokio::sync::Mutex<CDCEventProcessor>>,
     ) -> Result<()> {
         // Parse CDC event from Kafka message
         let cdc_event: serde_json::Value = serde_json::from_slice(&message.payload)?;
 
         // Process the CDC event
-        processor.process_cdc_event(cdc_event).await?;
+        processor.lock().await.process_cdc_event(cdc_event).await?;
 
         Ok(())
     }
 }
 
-/// CDC Service Manager - manages the entire CDC pipeline
+/// Enhanced CDC Service Manager - manages the entire CDC pipeline with optimized components
 pub struct CDCServiceManager {
     config: DebeziumConfig,
     outbox_repo: Arc<CDCOutboxRepository>,
     cdc_consumer: Option<CDCConsumer>,
-    processor: Arc<CDCEventProcessor>,
+    processor: Arc<tokio::sync::Mutex<CDCEventProcessor>>,
+    // Add the optimized producer
+    cdc_producer: Option<Arc<tokio::sync::Mutex<CDCProducer>>>,
     shutdown_tx: mpsc::Sender<()>,
     cleanup_handle: Option<tokio::task::JoinHandle<()>>,
-    cdc_consumer_handle: Option<tokio::task::JoinHandle<()>>, // Store the CDC consumer handle
+    cdc_consumer_handle: Option<tokio::task::JoinHandle<()>>,
+
+    // Enhanced components from service manager
+    optimized_service_manager: Option<OptimizedCDCServiceManager>,
+    integration_helper: Option<CDCIntegrationHelper>,
+
+    // Enhanced state management
+    service_state: Arc<tokio::sync::RwLock<ServiceState>>,
+    enhanced_metrics: Arc<EnhancedCDCMetrics>,
 }
 
 impl CDCServiceManager {
-    pub fn new(
+    pub async fn new(
         config: DebeziumConfig,
         outbox_repo: Arc<CDCOutboxRepository>,
         kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
         kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
         cache_service: Arc<dyn CacheServiceTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
+        business_config: Option<BusinessLogicConfig>,
+        producer_config: Option<CDCProducerConfig>,
     ) -> Result<Self> {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let processor = Arc::new(CDCEventProcessor::new(
-            kafka_producer,
-            cache_service,
-            projection_store,
-        ));
+        // Create optimized event processor
+        let processor = Arc::new(tokio::sync::Mutex::new(CDCEventProcessor::new(
+            kafka_producer.clone(),
+            cache_service.clone(),
+            projection_store.clone(),
+            business_config,
+        )));
+
+        // Create optimized CDC producer
+        let cdc_producer = if let Some(prod_config) = producer_config {
+            Some(Arc::new(tokio::sync::Mutex::new(
+                CDCProducer::new(
+                    kafka_producer.clone(),
+                    outbox_repo.pool.clone(),
+                    prod_config,
+                )
+                .await?,
+            )))
+        } else {
+            None
+        };
+
         let cdc_topic = format!(
             "{}.{}",
             config.topic_prefix,
             config.table_include_list // Do not remove 'public.'
         );
 
-        let cdc_consumer = CDCConsumer::new(kafka_consumer, cdc_topic, shutdown_rx);
+        let cdc_consumer = CDCConsumer::new(kafka_consumer.clone(), cdc_topic, shutdown_rx);
+
+        // Initialize enhanced service manager with proper configuration
+        let optimization_config = OptimizationConfig::default();
+        let enhanced_service_manager = OptimizedCDCServiceManager::new(
+            config.clone(),
+            outbox_repo.clone(),
+            kafka_producer.clone(),
+            kafka_consumer.clone(),
+            cache_service.clone(),
+            projection_store.clone(),
+        )?;
 
         Ok(Self {
             config,
             outbox_repo,
             cdc_consumer: Some(cdc_consumer),
             processor,
+            cdc_producer,
             shutdown_tx,
             cleanup_handle: None,
-            cdc_consumer_handle: None, // Initialize the CDC consumer handle
+            cdc_consumer_handle: None,
+            optimized_service_manager: Some(enhanced_service_manager),
+            integration_helper: None,
+            service_state: Arc::new(tokio::sync::RwLock::new(ServiceState::Stopped)),
+            enhanced_metrics: Arc::new(EnhancedCDCMetrics::default()),
         })
     }
 
     /// Start the CDC service
     pub async fn start(&mut self) -> Result<()> {
-        info!("Starting CDC Service Manager");
+        // Update service state
+        self.set_service_state(ServiceState::Starting).await;
+
+        info!("Starting CDC Service Manager with optimized components");
 
         // Create CDC table if it doesn't exist
         tracing::info!("CDC Service Manager: Creating CDC outbox table...");
         self.outbox_repo.create_cdc_outbox_table().await?;
         tracing::info!("CDC Service Manager: ✅ CDC outbox table created/verified");
+
+        // Start the optimized CDC producer if configured
+        if let Some(ref mut producer) = self.cdc_producer {
+            tracing::info!("CDC Service Manager: Starting optimized CDC producer...");
+            producer.lock().await.start().await?;
+            tracing::info!("CDC Service Manager: ✅ Optimized CDC producer started");
+        }
+
+        // Start batch processor for the event processor
+        tracing::info!("CDC Service Manager: Starting batch processor...");
+        self.processor.lock().await.start_batch_processor().await?;
+        tracing::info!("CDC Service Manager: ✅ Batch processor started");
+
+        // Start enhanced service manager if available
+        if let Some(ref mut enhanced_manager) = self.optimized_service_manager {
+            tracing::info!("CDC Service Manager: Starting enhanced service manager...");
+            enhanced_manager.start().await?;
+            tracing::info!("CDC Service Manager: ✅ Enhanced service manager started");
+        }
 
         // Start CDC consumer
         if let Some(mut consumer) = self.cdc_consumer.take() {
@@ -793,7 +708,7 @@ impl CDCServiceManager {
                 tracing::info!("CDC Service Manager: CDC consumer task spawned and running");
                 tracing::info!("CDC Service Manager: About to call consumer.start_consuming()");
 
-                match consumer.start_consuming(processor).await {
+                match consumer.start_consuming_with_mutex(processor).await {
                     Ok(_) => {
                         tracing::info!("CDC Service Manager: CDC consumer completed normally");
                     }
@@ -830,17 +745,42 @@ impl CDCServiceManager {
         self.cleanup_handle = Some(cleanup_handle);
         tracing::info!("CDC Service Manager: ✅ Cleanup task spawned");
 
-        info!("CDC Service Manager started successfully");
+        // Update service state to running
+        self.set_service_state(ServiceState::Running).await;
+
+        info!("CDC Service Manager started successfully with optimized components");
         Ok(())
     }
 
     /// Stop the CDC service
     pub async fn stop(&self) -> Result<()> {
+        // Update service state
+        self.set_service_state(ServiceState::Stopping).await;
+
         info!("Stopping CDC Service Manager");
 
         // Send shutdown signal
         if let Err(e) = self.shutdown_tx.send(()).await {
             warn!("Failed to send shutdown signal to CDC consumer: {}", e);
+        }
+
+        // Stop the enhanced service manager if available
+        if let Some(ref enhanced_manager) = self.optimized_service_manager {
+            if let Err(e) = enhanced_manager.stop().await {
+                error!("Failed to stop enhanced service manager: {}", e);
+            }
+        }
+
+        // Stop the CDC producer
+        if let Some(ref producer) = self.cdc_producer {
+            if let Err(e) = producer.lock().await.stop().await {
+                error!("Failed to stop CDC producer: {}", e);
+            }
+        }
+
+        // Shutdown the event processor
+        if let Err(e) = self.processor.lock().await.shutdown().await {
+            error!("Failed to shutdown event processor: {}", e);
         }
 
         // Cancel cleanup task
@@ -853,18 +793,314 @@ impl CDCServiceManager {
             handle.abort();
         }
 
+        // Update service state to stopped
+        self.set_service_state(ServiceState::Stopped).await;
+
         info!("CDC Service Manager stopped");
         Ok(())
     }
 
     /// Get CDC metrics
-    pub fn get_metrics(&self) -> &CDCMetrics {
-        self.processor.get_metrics()
+    pub async fn get_metrics(&self) -> Result<CDCMetrics> {
+        let processor = self.processor.lock().await;
+        let metrics = processor.get_metrics();
+        Ok(CDCMetrics {
+            events_processed: std::sync::atomic::AtomicU64::new(
+                metrics
+                    .events_processed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            events_failed: std::sync::atomic::AtomicU64::new(
+                metrics
+                    .events_failed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                metrics
+                    .processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            total_latency_ms: std::sync::atomic::AtomicU64::new(
+                metrics
+                    .total_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            cache_invalidations: std::sync::atomic::AtomicU64::new(
+                metrics
+                    .cache_invalidations
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            projection_updates: std::sync::atomic::AtomicU64::new(
+                metrics
+                    .projection_updates
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        })
+    }
+
+    /// Get optimized metrics
+    pub async fn get_optimized_metrics(
+        &self,
+    ) -> Result<crate::infrastructure::cdc_event_processor::OptimizedCDCMetrics> {
+        Ok(self.processor.lock().await.get_optimized_metrics().await)
+    }
+
+    /// Get producer metrics if available
+    pub async fn get_producer_metrics(
+        &self,
+    ) -> Option<crate::infrastructure::cdc_producer::CDCProducerMetrics> {
+        if let Some(ref producer) = self.cdc_producer {
+            let producer_guard = producer.lock().await;
+            let metrics = producer_guard.get_metrics();
+            Some(crate::infrastructure::cdc_producer::CDCProducerMetrics {
+                messages_produced: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .messages_produced
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                messages_failed: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .messages_failed
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                batch_count: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .batch_count
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                avg_batch_size: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .avg_batch_size
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                produce_latency_ms: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .produce_latency_ms
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                db_write_latency_ms: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .db_write_latency_ms
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                kafka_produce_latency_ms: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .kafka_produce_latency_ms
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                circuit_breaker_trips: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .circuit_breaker_trips
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                retries_attempted: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .retries_attempted
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                health_check_failures: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .health_check_failures
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                last_successful_produce: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .last_successful_produce
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                queue_depth: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .queue_depth
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                throughput_per_second: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .throughput_per_second
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                validation_failures: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .validation_failures
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                duplicate_messages_rejected: std::sync::atomic::AtomicU64::new(
+                    metrics
+                        .duplicate_messages_rejected
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Get producer health status if available
+    pub async fn get_producer_health(
+        &self,
+    ) -> Option<crate::infrastructure::cdc_producer::HealthStatus> {
+        if let Some(ref producer) = self.cdc_producer {
+            Some(producer.lock().await.get_health_status().await)
+        } else {
+            None
+        }
     }
 
     /// Generate Debezium connector configuration
     pub fn get_debezium_config(&self) -> serde_json::Value {
         self.outbox_repo.generate_debezium_config(&self.config)
+    }
+
+    /// Produce a message using the optimized producer
+    pub async fn produce_message(&self, message: CDCOutboxMessage) -> Result<()> {
+        if let Some(ref producer) = self.cdc_producer {
+            // Convert to producer's CDCOutboxMessage type
+            let producer_message = crate::infrastructure::cdc_producer::CDCOutboxMessage {
+                id: message.id,
+                aggregate_id: message.aggregate_id,
+                event_id: message.event_id,
+                event_type: message.event_type,
+                topic: message.topic,
+                metadata: message.metadata,
+                created_at: message.created_at,
+                updated_at: message.updated_at,
+            };
+            producer
+                .lock()
+                .await
+                .produce_message(producer_message)
+                .await
+        } else {
+            Err(anyhow::anyhow!("CDC producer not configured"))
+        }
+    }
+
+    /// Initialize integration helper for migration operations
+    pub async fn initialize_integration_helper(
+        &mut self,
+        config: CDCIntegrationConfig,
+    ) -> Result<()> {
+        let integration_helper = CDCIntegrationHelper::new(self.outbox_repo.pool.clone(), config);
+        self.integration_helper = Some(integration_helper);
+
+        // Update enhanced metrics to reflect integration helper initialization
+        self.enhanced_metrics
+            .integration_helper_initialized
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        info!("CDC Integration Helper initialized");
+        Ok(())
+    }
+
+    /// Migrate existing outbox to CDC format
+    pub async fn migrate_existing_outbox(
+        &self,
+        old_repo: &crate::infrastructure::outbox::PostgresOutboxRepository,
+    ) -> Result<MigrationStats> {
+        if let Some(ref helper) = self.integration_helper {
+            // Update service state during migration
+            self.set_service_state(ServiceState::Migrating).await;
+
+            let result = helper
+                .migrate_existing_outbox(old_repo, &self.outbox_repo)
+                .await;
+
+            // Update service state back to running after migration
+            self.set_service_state(ServiceState::Running).await;
+
+            result
+        } else {
+            Err(anyhow::anyhow!(
+                "Integration helper not initialized. Call initialize_integration_helper first."
+            ))
+        }
+    }
+
+    /// Verify migration integrity
+    pub async fn verify_migration_integrity(&self) -> Result<MigrationIntegrityReport> {
+        if let Some(ref helper) = self.integration_helper {
+            helper.verify_migration_integrity(&self.outbox_repo).await
+        } else {
+            Err(anyhow::anyhow!("Integration helper not initialized"))
+        }
+    }
+
+    /// Get enhanced service status with all metrics
+    pub async fn get_enhanced_status(&self) -> serde_json::Value {
+        let processor_guard = self.processor.lock().await;
+        let processor_metrics = processor_guard.get_metrics();
+        let mut status = serde_json::json!({
+            "service_state": format!("{:?}", *self.service_state.read().await),
+            "basic_metrics": {
+                "events_processed": processor_metrics.events_processed.load(std::sync::atomic::Ordering::Relaxed),
+                "events_failed": processor_metrics.events_failed.load(std::sync::atomic::Ordering::Relaxed),
+                "cache_invalidations": processor_metrics.cache_invalidations.load(std::sync::atomic::Ordering::Relaxed),
+                "projection_updates": processor_metrics.projection_updates.load(std::sync::atomic::Ordering::Relaxed),
+            },
+            "enhanced_metrics": {
+                "memory_usage_bytes": self.enhanced_metrics.memory_usage_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                "throughput_per_second": self.enhanced_metrics.throughput_per_second.load(std::sync::atomic::Ordering::Relaxed),
+                "error_rate": self.enhanced_metrics.error_rate.load(std::sync::atomic::Ordering::Relaxed),
+                "circuit_breaker_trips": self.enhanced_metrics.circuit_breaker_trips.load(std::sync::atomic::Ordering::Relaxed),
+                "integration_helper_initialized": self.enhanced_metrics.integration_helper_initialized.load(std::sync::atomic::Ordering::Relaxed),
+            }
+        });
+
+        // Add optimized metrics if available
+        if let Ok(optimized_metrics) = self.get_optimized_metrics().await {
+            status["optimized_metrics"] = serde_json::json!({
+                "business_validation_failures": optimized_metrics.business_validation_failures.load(std::sync::atomic::Ordering::Relaxed),
+                "duplicate_events_skipped": optimized_metrics.duplicate_events_skipped.load(std::sync::atomic::Ordering::Relaxed),
+                "projection_update_failures": optimized_metrics.projection_update_failures.load(std::sync::atomic::Ordering::Relaxed),
+            });
+        }
+
+        // Add producer health if available
+        if let Some(producer_health) = self.get_producer_health().await {
+            status["producer_health"] =
+                serde_json::to_value(producer_health).unwrap_or(serde_json::Value::Null);
+        }
+
+        // Add enhanced service manager status if available
+        if let Some(ref enhanced_manager) = self.optimized_service_manager {
+            let enhanced_status = enhanced_manager.get_service_status().await;
+            status["enhanced_service_manager"] = enhanced_status;
+        }
+
+        status
+    }
+
+    /// Update service state
+    pub async fn set_service_state(&self, state: ServiceState) {
+        let mut state_guard = self.service_state.write().await;
+        *state_guard = state;
+    }
+
+    /// Get current service state
+    pub async fn get_service_state(&self) -> ServiceState {
+        self.service_state.read().await.clone()
+    }
+
+    /// Get enhanced metrics
+    pub fn get_enhanced_metrics(&self) -> &EnhancedCDCMetrics {
+        &self.enhanced_metrics
+    }
+
+    /// Cleanup old messages from both outbox systems
+    pub async fn cleanup_old_messages(
+        &self,
+        old_repo: &crate::infrastructure::outbox::PostgresOutboxRepository,
+        older_than: std::time::Duration,
+    ) -> Result<(usize, usize)> {
+        if let Some(ref helper) = self.integration_helper {
+            helper
+                .cleanup_old_messages(old_repo, &self.outbox_repo, older_than)
+                .await
+        } else {
+            // Fallback to basic cleanup
+            let old_cleaned = 0; // Would need to implement
+            let new_cleaned = self.outbox_repo.cleanup_old_messages(older_than).await?;
+            Ok((old_cleaned, new_cleaned))
+        }
     }
 }
 
@@ -879,45 +1115,38 @@ impl<T: 'static> AsAny for T {
     }
 }
 
-/// Integration helper for existing outbox system
-pub struct CDCIntegrationHelper;
-
-impl CDCIntegrationHelper {
-    /// Convert existing outbox message to CDC format
-    pub fn convert_to_cdc_message(
-        outbox_msg: &crate::infrastructure::outbox::OutboxMessage,
-    ) -> CDCOutboxMessage {
-        CDCOutboxMessage {
-            id: uuid::Uuid::new_v4(), // Generate new ID for CDC table
-            aggregate_id: outbox_msg.aggregate_id,
-            event_id: outbox_msg.event_id,
-            event_type: outbox_msg.event_type.clone(),
-            topic: outbox_msg.topic.clone(),
-            metadata: outbox_msg.metadata.clone(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    /// Migrate existing outbox to CDC format
-    pub async fn migrate_existing_outbox(
-        old_repo: &crate::infrastructure::outbox::PostgresOutboxRepository,
-        new_repo: &CDCOutboxRepository,
-    ) -> Result<usize> {
-        // This would implement migration logic from old outbox to CDC outbox
-        // For now, return 0 as placeholder
-        Ok(0)
-    }
-}
+// Integration helper is now imported from cdc_integration_helper module
 
 /// Health check for CDC service
 pub struct CDCHealthCheck {
     metrics: Arc<CDCMetrics>,
+    optimized_metrics: Option<crate::infrastructure::cdc_event_processor::OptimizedCDCMetrics>,
+    producer_health: Option<crate::infrastructure::cdc_producer::HealthStatus>,
 }
 
 impl CDCHealthCheck {
     pub fn new(metrics: Arc<CDCMetrics>) -> Self {
-        Self { metrics }
+        Self {
+            metrics,
+            optimized_metrics: None,
+            producer_health: None,
+        }
+    }
+
+    pub fn with_optimized_metrics(
+        mut self,
+        optimized_metrics: crate::infrastructure::cdc_event_processor::OptimizedCDCMetrics,
+    ) -> Self {
+        self.optimized_metrics = Some(optimized_metrics);
+        self
+    }
+
+    pub fn with_producer_health(
+        mut self,
+        producer_health: crate::infrastructure::cdc_producer::HealthStatus,
+    ) -> Self {
+        self.producer_health = Some(producer_health);
+        self
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -949,13 +1178,31 @@ impl CDCHealthCheck {
             0
         };
 
-        serde_json::json!({
+        let mut status = serde_json::json!({
             "healthy": self.is_healthy(),
             "events_processed": processed,
             "events_failed": self.metrics.events_failed.load(std::sync::atomic::Ordering::Relaxed),
             "avg_processing_latency_ms": avg_latency,
             "cache_invalidations": self.metrics.cache_invalidations.load(std::sync::atomic::Ordering::Relaxed),
             "projection_updates": self.metrics.projection_updates.load(std::sync::atomic::Ordering::Relaxed)
-        })
+        });
+
+        // Add optimized metrics if available
+        if let Some(ref opt_metrics) = self.optimized_metrics {
+            status["optimized_metrics"] = serde_json::json!({
+                "business_validation_failures": opt_metrics.business_validation_failures.load(std::sync::atomic::Ordering::Relaxed),
+                "duplicate_events_skipped": opt_metrics.duplicate_events_skipped.load(std::sync::atomic::Ordering::Relaxed),
+                "projection_update_failures": opt_metrics.projection_update_failures.load(std::sync::atomic::Ordering::Relaxed),
+                "memory_usage_bytes": opt_metrics.memory_usage_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            });
+        }
+
+        // Add producer health if available
+        if let Some(ref prod_health) = self.producer_health {
+            status["producer_health"] =
+                serde_json::to_value(prod_health).unwrap_or(serde_json::Value::Null);
+        }
+
+        status
     }
 }

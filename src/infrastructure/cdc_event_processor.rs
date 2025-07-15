@@ -4,435 +4,198 @@ use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
-// Enhanced CDC-based outbox message structure with optimization fields
+// Optimized CDC outbox message with memory layout improvements
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CDCOutboxMessage {
+pub struct OptimizedCDCOutboxMessage {
     pub id: Uuid,
     pub aggregate_id: Uuid,
     pub event_id: Uuid,
     pub event_type: String,
     pub topic: String,
-    pub metadata: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub partition_key: Option<String>, // For optimal Kafka partitioning
+    pub metadata: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema_version: Option<i32>, // For schema evolution
+    pub partition_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<i32>,
 }
 
-/// Enhanced Debezium configuration with performance optimizations
+// Lightweight projection cache entry with business validation
 #[derive(Debug, Clone)]
-pub struct OptimizedDebeziumConfig {
-    pub connector_name: String,
-    pub database_host: String,
-    pub database_port: u16,
-    pub database_name: String,
-    pub database_user: String,
-    pub database_password: String,
-    pub table_include_list: String,
-    pub topic_prefix: String,
-    pub snapshot_mode: String,
-    pub poll_interval_ms: u64,
-
-    // Performance optimizations
-    pub max_batch_size: i32,
-    pub max_queue_size: i32,
-    pub heartbeat_interval_ms: u64,
-    pub publication_autocreate_mode: String,
-    pub slot_drop_on_stop: bool,
-    pub include_unchanged_toasts: bool,
-    pub binary_handling_mode: String,
-    pub decimal_handling_mode: String,
-    pub time_precision_mode: String,
-
-    // Reliability configurations
-    pub slot_retry_delay_ms: u64,
-    pub max_retries: i32,
-    pub retriable_restart_wait_ms: u64,
-    pub flush_lsn_threshold: i64,
-    pub status_update_interval_ms: u64,
-
-    // Monitoring and observability
-    pub provide_transaction_metadata: bool,
-    pub tombstones_on_delete: bool,
-    pub message_key_columns: Option<String>,
+struct ProjectionCacheEntry {
+    balance: Decimal,
+    owner_name: String,
+    is_active: bool,
+    version: u64,
+    cached_at: Instant,
+    last_event_id: Option<Uuid>, // For duplicate detection
 }
 
-impl Default for OptimizedDebeziumConfig {
-    fn default() -> Self {
-        Self {
-            connector_name: "banking-es-connector".to_string(),
-            database_host: "localhost".to_string(),
-            database_port: 5432,
-            database_name: "banking_es".to_string(),
-            database_user: "postgres".to_string(),
-            database_password: "Francisco1".to_string(),
-            table_include_list: "public.kafka_outbox_cdc".to_string(),
-            topic_prefix: "banking-es".to_string(),
-            snapshot_mode: "initial".to_string(),
-            poll_interval_ms: 50, // Reduced for better latency
-
-            // Performance optimizations
-            max_batch_size: 2048,
-            max_queue_size: 8192,
-            heartbeat_interval_ms: 30000,
-            publication_autocreate_mode: "filtered".to_string(),
-            slot_drop_on_stop: false, // Keep slot for reliability
-            include_unchanged_toasts: false,
-            binary_handling_mode: "base64".to_string(),
-            decimal_handling_mode: "string".to_string(),
-            time_precision_mode: "adaptive".to_string(),
-
-            // Reliability configurations
-            slot_retry_delay_ms: 10000,
-            max_retries: 3,
-            retriable_restart_wait_ms: 10000,
-            flush_lsn_threshold: 1024 * 1024, // 1MB
-            status_update_interval_ms: 10000,
-
-            // Monitoring and observability
-            provide_transaction_metadata: true,
-            tombstones_on_delete: false,
-            message_key_columns: Some("aggregate_id".to_string()),
-        }
-    }
-}
-
-/// Optimized CDC-based outbox repository with connection pooling and batch operations
-#[derive(Clone)]
-pub struct OptimizedCDCOutboxRepository {
-    pool: sqlx::PgPool,
-    write_semaphore: Arc<Semaphore>, // Limit concurrent writes
-    batch_cache: Arc<RwLock<HashMap<Uuid, CDCOutboxMessage>>>, // Cache for batching
-    batch_size: usize,
-    batch_timeout: Duration,
-}
-
-impl OptimizedCDCOutboxRepository {
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self {
-            pool,
-            write_semaphore: Arc::new(Semaphore::new(10)), // Max 10 concurrent writes
-            batch_cache: Arc::new(RwLock::new(HashMap::new())),
-            batch_size: 100,
-            batch_timeout: Duration::from_millis(50),
-        }
+impl ProjectionCacheEntry {
+    fn is_expired(&self, ttl: Duration) -> bool {
+        self.cached_at.elapsed() > ttl
     }
 
-    /// Create optimized outbox table with better indexing and partitioning
-    pub async fn create_optimized_cdc_outbox_table(&self) -> Result<()> {
-        // Create the main table with optimized structure
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS kafka_outbox_cdc (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                aggregate_id UUID NOT NULL,
-                event_id UUID NOT NULL UNIQUE,
-                event_type VARCHAR(255) NOT NULL,
-                payload BYTEA NOT NULL,
-                topic VARCHAR(255) NOT NULL,
-                metadata JSONB,
-                partition_key VARCHAR(255),
-                schema_version INTEGER DEFAULT 1,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Create optimized indexes
-        let indexes = vec![
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_cdc_created_at_btree ON kafka_outbox_cdc USING btree(created_at)",
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_cdc_aggregate_id_hash ON kafka_outbox_cdc USING hash(aggregate_id)",
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_cdc_event_type_hash ON kafka_outbox_cdc USING hash(event_type)",
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_cdc_topic_hash ON kafka_outbox_cdc USING hash(topic)",
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_cdc_partition_key ON kafka_outbox_cdc(partition_key) WHERE partition_key IS NOT NULL",
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_cdc_composite ON kafka_outbox_cdc(aggregate_id, created_at DESC)",
-        ];
-
-        for index_sql in indexes {
-            if let Err(e) = sqlx::query(index_sql).execute(&self.pool).await {
-                warn!("Failed to create index: {} - {}", index_sql, e);
+    fn apply_event(&mut self, event: &crate::domain::AccountEvent) -> Result<()> {
+        // Business logic validation
+        match event {
+            crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
+                if *amount <= Decimal::ZERO {
+                    return Err(anyhow::anyhow!("Deposit amount must be positive"));
+                }
+                if self.balance + *amount > Decimal::from_str("999999999.99").unwrap() {
+                    return Err(anyhow::anyhow!("Balance would exceed maximum allowed"));
+                }
+                self.balance += *amount;
+                self.version += 1;
+            }
+            crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
+                if *amount <= Decimal::ZERO {
+                    return Err(anyhow::anyhow!("Withdrawal amount must be positive"));
+                }
+                if self.balance < *amount {
+                    return Err(anyhow::anyhow!("Insufficient funds for withdrawal"));
+                }
+                self.balance -= *amount;
+                self.version += 1;
+            }
+            crate::domain::AccountEvent::AccountCreated {
+                owner_name,
+                initial_balance,
+                ..
+            } => {
+                if initial_balance < &Decimal::ZERO {
+                    return Err(anyhow::anyhow!("Initial balance cannot be negative"));
+                }
+                self.owner_name = owner_name.clone();
+                self.balance = *initial_balance;
+                self.is_active = true;
+                self.version += 1;
+            }
+            crate::domain::AccountEvent::AccountClosed { .. } => {
+                if !self.is_active {
+                    return Err(anyhow::anyhow!("Account is already closed"));
+                }
+                self.is_active = false;
+                self.version += 1;
             }
         }
-
-        // Enable logical replication with optimized settings
-        sqlx::query("ALTER TABLE kafka_outbox_cdc REPLICA IDENTITY FULL")
-            .execute(&self.pool)
-            .await?;
-
-        // Create partition function for better performance (optional)
-        sqlx::query(
-            r#"
-            CREATE OR REPLACE FUNCTION kafka_outbox_cdc_partition_by_day()
-            RETURNS trigger AS $$
-            BEGIN
-                -- Future: Add partitioning logic here if needed
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql;
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        info!("Optimized CDC outbox table created successfully");
         Ok(())
     }
+}
 
-    /// Generate optimized Debezium connector configuration
-    pub fn generate_optimized_debezium_config(
-        &self,
-        config: &OptimizedDebeziumConfig,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "name": config.connector_name,
-            "config": {
-                "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+// Optimized batch processing structure
+#[derive(Debug)]
+struct EventBatch {
+    events: Vec<ProcessableEvent>,
+    batch_id: Uuid,
+    created_at: Instant,
+}
 
-                // Database connection settings
-                "database.hostname": config.database_host,
-                "database.port": config.database_port,
-                "database.user": config.database_user,
-                "database.password": config.database_password,
-                "database.dbname": config.database_name,
-                "database.server.name": "banking_es_server",
+#[derive(Debug, Clone)]
+struct ProcessableEvent {
+    event_id: Uuid,
+    aggregate_id: Uuid,
+    event_type: String,
+    payload: Vec<u8>,
+    partition_key: Option<String>,
+    domain_event: Option<crate::domain::AccountEvent>, // Pre-deserialized for performance
+}
 
-                // Table and topic configuration
-                "table.include.list": config.table_include_list,
-                "topic.prefix": config.topic_prefix,
-                "message.key.columns": config.message_key_columns,
+impl ProcessableEvent {
+    fn new(
+        event_id: Uuid,
+        aggregate_id: Uuid,
+        event_type: String,
+        payload: Vec<u8>,
+        partition_key: Option<String>,
+    ) -> Result<Self> {
+        // Pre-deserialize domain event for better performance
+        let domain_event = bincode::deserialize(&payload)?;
 
-                // Snapshot configuration
-                "snapshot.mode": config.snapshot_mode,
-                "snapshot.include.collection.list": config.table_include_list,
-                "snapshot.lock.timeout.ms": 10000,
-
-                // Performance optimizations
-                "poll.interval.ms": config.poll_interval_ms,
-                "max.batch.size": config.max_batch_size,
-                "max.queue.size": config.max_queue_size,
-                "provide.transaction.metadata": config.provide_transaction_metadata,
-
-                // Replication slot configuration
-                "publication.autocreate.mode": config.publication_autocreate_mode,
-                "slot.name": "banking_outbox_slot_v2",
-                "slot.drop.on.stop": config.slot_drop_on_stop,
-                "slot.retry.delay.ms": config.slot_retry_delay_ms,
-                "slot.max.retries": config.max_retries,
-                "plugin.name": "pgoutput",
-
-                // Data type handling
-                "binary.handling.mode": config.binary_handling_mode,
-                "decimal.handling.mode": config.decimal_handling_mode,
-                "time.precision.mode": config.time_precision_mode,
-                "include.unchanged.toasts": config.include_unchanged_toasts,
-
-                // Reliability settings
-                "retriable.restart.connector.wait.ms": config.retriable_restart_wait_ms,
-                "heartbeat.interval.ms": config.heartbeat_interval_ms,
-                "status.update.interval.ms": config.status_update_interval_ms,
-                "flush.lsn.threshold": config.flush_lsn_threshold,
-
-                // Kafka Connect converters
-                "key.converter": "org.apache.kafka.connect.storage.StringConverter",
-                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-                "value.converter.schemas.enable": false,
-                "header.converter": "org.apache.kafka.connect.storage.StringConverter",
-
-                // Transformations
-                "transforms": "unwrap,addHeaders,router",
-                "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
-                "transforms.unwrap.drop.tombstones": config.tombstones_on_delete,
-                "transforms.unwrap.delete.handling.mode": "rewrite",
-                "transforms.unwrap.operation.header": true,
-
-                // Add custom headers for better routing
-                "transforms.addHeaders.type": "org.apache.kafka.connect.transforms.InsertHeader",
-                "transforms.addHeaders.header.aggregate_type": "account",
-                "transforms.addHeaders.header.source_system": "banking-es",
-
-                // Optional: Route to different topics based on event type
-                "transforms.router.type": "org.apache.kafka.connect.transforms.RegexRouter",
-                "transforms.router.regex": "([^.]+)\\.([^.]+)\\.([^.]+)",
-                "transforms.router.replacement": "$1.$2.$3",
-
-                // Monitoring and metrics
-                "errors.tolerance": "none",
-                "errors.deadletterqueue.topic.name": "banking-es-dlq",
-                "errors.deadletterqueue.context.headers.enable": true,
-                "errors.log.enable": true,
-                "errors.log.include.messages": true,
-
-                // Security (if needed)
-                "database.sslmode": "prefer",
-                "database.sslcert": "",
-                "database.sslkey": "",
-                "database.sslrootcert": "",
-
-                // Additional optimizations
-                "skipped.operations": "none",
-                "tombstones.on.delete": config.tombstones_on_delete,
-                "column.include.list": format!("{}.id,{}.aggregate_id,{}.event_id,{}.event_type,{}.payload,{}.topic,{}.metadata,{}.partition_key,{}.schema_version,{}.created_at,{}.updated_at",
-                    config.table_include_list, config.table_include_list, config.table_include_list, config.table_include_list,
-                    config.table_include_list, config.table_include_list, config.table_include_list, config.table_include_list,
-                    config.table_include_list, config.table_include_list, config.table_include_list),
-
-                // Signal table for controlling connector
-                "signal.data.collection": "public.debezium_signal",
-                "signal.enabled.channels": "source,kafka",
-
-                // Custom configuration for banking domain
-                "topic.creation.default.replication.factor": 3,
-                "topic.creation.default.partitions": 6,
-                "topic.creation.default.cleanup.policy": "delete",
-                "topic.creation.default.retention.ms": 604800000, // 7 days
-                "topic.creation.default.segment.ms": 86400000, // 1 day
-                "topic.creation.default.compression.type": "snappy"
-            }
+        Ok(Self {
+            event_id,
+            aggregate_id,
+            event_type,
+            payload,
+            partition_key,
+            domain_event: Some(domain_event),
         })
     }
 
-    /// Batch insert with optimized transaction handling
-    pub async fn batch_insert_messages(&self, messages: Vec<CDCOutboxMessage>) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let _permit = self.write_semaphore.acquire().await?;
-        let mut tx = self.pool.begin().await?;
-
-        // Use COPY for better performance with large batches
-        if messages.len() > 50 {
-            let mut copy_writer = tx.copy_in_raw(
-                "COPY kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, partition_key, schema_version, created_at, updated_at) FROM STDIN WITH (FORMAT CSV)"
-            ).await?;
-
-            for msg in messages {
-                let partition_key = msg
-                    .partition_key
-                    .unwrap_or_else(|| msg.aggregate_id.to_string());
-                let schema_version = msg.schema_version.unwrap_or(1);
-                let metadata_str = msg
-                    .metadata
-                    .map(|m| m.to_string())
-                    .unwrap_or_else(|| "null".to_string());
-
-                let row = format!(
-                    "{},{},{},{},{},{},{},{},{}\n",
-                    msg.aggregate_id,
-                    msg.event_id,
-                    msg.event_type,
-                    base64::encode(&[]), // Placeholder for payload
-                    msg.topic,
-                    metadata_str,
-                    partition_key,
-                    schema_version,
-                    msg.created_at.to_rfc3339(),
-                    msg.updated_at.to_rfc3339()
-                );
-                copy_writer.send(row.as_bytes()).await?;
-            }
-
-            copy_writer.finish().await?;
-        } else {
-            // Use regular INSERT for smaller batches
-            for msg in messages {
-                let partition_key = msg
-                    .partition_key
-                    .unwrap_or_else(|| msg.aggregate_id.to_string());
-                let schema_version = msg.schema_version.unwrap_or(1);
-
-                sqlx::query!(
-                    r#"
-                    INSERT INTO kafka_outbox_cdc
-                        (aggregate_id, event_id, event_type, payload, topic, metadata, partition_key, schema_version, created_at, updated_at)
-                    VALUES
-                        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                    "#,
-                    msg.aggregate_id,
-                    msg.event_id,
-                    msg.event_type,
-                    vec![0u8], // Placeholder payload
-                    msg.topic,
-                    msg.metadata,
-                    partition_key,
-                    schema_version,
-                    msg.created_at,
-                    msg.updated_at
-                )
-                .execute(&mut *tx)
-                .await?;
-            }
-        }
-
-        tx.commit().await?;
-        Ok(())
+    fn get_domain_event(&self) -> Result<&crate::domain::AccountEvent> {
+        self.domain_event
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Domain event not deserialized"))
     }
 }
 
-/// Optimized CDC Event Processor with better performance and reliability
-pub struct OptimizedCDCEventProcessor {
-    kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
-    cache_service: Arc<dyn CacheServiceTrait>,
-    projection_store: Arc<dyn ProjectionStoreTrait>,
-    metrics: Arc<OptimizedCDCMetrics>,
-
-    // Performance optimizations
-    processing_semaphore: Arc<Semaphore>,
-    batch_processor: Arc<RwLock<Vec<serde_json::Value>>>,
-    batch_size: usize,
-    batch_timeout: Duration,
-
-    // Circuit breaker for reliability
-    circuit_breaker: Arc<RwLock<CircuitBreakerState>>,
-
-    // Projection cache to reduce database hits
-    projection_cache: Arc<RwLock<HashMap<Uuid, CachedProjection>>>,
-    cache_ttl: Duration,
-}
-
+// High-performance metrics with atomic operations and business metrics
 #[derive(Debug, Default)]
 pub struct OptimizedCDCMetrics {
     pub events_processed: std::sync::atomic::AtomicU64,
     pub events_failed: std::sync::atomic::AtomicU64,
-    pub events_batched: std::sync::atomic::AtomicU64,
-    pub processing_latency_ms: std::sync::atomic::AtomicU64,
-    pub total_latency_ms: std::sync::atomic::AtomicU64,
-    pub cache_invalidations: std::sync::atomic::AtomicU64,
-    pub projection_updates: std::sync::atomic::AtomicU64,
+    pub batches_processed: std::sync::atomic::AtomicU64,
+    pub avg_processing_latency_ms: std::sync::atomic::AtomicU64,
     pub projection_cache_hits: std::sync::atomic::AtomicU64,
     pub projection_cache_misses: std::sync::atomic::AtomicU64,
     pub circuit_breaker_trips: std::sync::atomic::AtomicU64,
-    pub batch_processing_time_ms: std::sync::atomic::AtomicU64,
+    pub memory_usage_bytes: std::sync::atomic::AtomicU64,
+    pub active_goroutines: std::sync::atomic::AtomicU64,
+    pub business_validation_failures: std::sync::atomic::AtomicU64,
+    pub duplicate_events_skipped: std::sync::atomic::AtomicU64,
+    pub projection_update_failures: std::sync::atomic::AtomicU64,
+    pub cache_invalidation_failures: std::sync::atomic::AtomicU64,
 }
 
-#[derive(Debug, Clone)]
-struct CachedProjection {
-    projection: crate::infrastructure::projections::AccountProjection,
-    cached_at: Instant,
-    version: u64,
+impl OptimizedCDCMetrics {
+    pub fn record_processing_time(&self, duration_ms: u64) {
+        // Simple exponential moving average
+        let current = self
+            .avg_processing_latency_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let new_avg = if current == 0 {
+            duration_ms
+        } else {
+            // Weight: 90% historical, 10% new
+            (current * 9 + duration_ms) / 10
+        };
+        self.avg_processing_latency_ms
+            .store(new_avg, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_business_validation_failure(&self) {
+        self.business_validation_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_duplicate_skip(&self) {
+        self.duplicate_events_skipped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
+// Efficient circuit breaker with exponential backoff
 #[derive(Debug, Clone)]
 enum CircuitBreakerState {
     Closed,
-    Open { until: Instant },
-    HalfOpen,
+    Open { until: Instant, failure_count: u32 },
+    HalfOpen { test_requests: u32 },
 }
 
 impl Default for CircuitBreakerState {
@@ -441,378 +204,759 @@ impl Default for CircuitBreakerState {
     }
 }
 
-impl OptimizedCDCEventProcessor {
+struct CircuitBreaker {
+    state: Arc<RwLock<CircuitBreakerState>>,
+    failure_threshold: u32,
+    recovery_timeout: Duration,
+    max_test_requests: u32,
+}
+
+impl CircuitBreaker {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(RwLock::new(CircuitBreakerState::Closed)),
+            failure_threshold: 5,
+            recovery_timeout: Duration::from_secs(30),
+            max_test_requests: 3,
+        }
+    }
+
+    async fn can_execute(&self) -> bool {
+        let state = self.state.read().await;
+        match *state {
+            CircuitBreakerState::Closed => true,
+            CircuitBreakerState::Open { until, .. } => Instant::now() >= until,
+            CircuitBreakerState::HalfOpen { test_requests } => {
+                test_requests < self.max_test_requests
+            }
+        }
+    }
+
+    async fn on_success(&self) {
+        let mut state = self.state.write().await;
+        *state = CircuitBreakerState::Closed;
+    }
+
+    async fn on_failure(&self) {
+        let mut state = self.state.write().await;
+        match *state {
+            CircuitBreakerState::Closed => {
+                *state = CircuitBreakerState::Open {
+                    until: Instant::now() + self.recovery_timeout,
+                    failure_count: 1,
+                };
+            }
+            CircuitBreakerState::Open { failure_count, .. } => {
+                let backoff = Duration::from_secs(
+                    (self.recovery_timeout.as_secs() * 2_u64.pow(failure_count.min(8))).min(300), // Max 5 minutes
+                );
+                *state = CircuitBreakerState::Open {
+                    until: Instant::now() + backoff,
+                    failure_count: failure_count + 1,
+                };
+            }
+            CircuitBreakerState::HalfOpen { .. } => {
+                *state = CircuitBreakerState::Open {
+                    until: Instant::now() + self.recovery_timeout,
+                    failure_count: 1,
+                };
+            }
+        }
+    }
+
+    async fn on_attempt(&self) {
+        let mut state = self.state.write().await;
+        if let CircuitBreakerState::Open { until, .. } = *state {
+            if Instant::now() >= until {
+                *state = CircuitBreakerState::HalfOpen { test_requests: 1 };
+            }
+        } else if let CircuitBreakerState::HalfOpen { test_requests } = *state {
+            *state = CircuitBreakerState::HalfOpen {
+                test_requests: test_requests + 1,
+            };
+        }
+    }
+}
+
+// Memory-efficient LRU cache for projections with business validation
+struct ProjectionCache {
+    cache: HashMap<Uuid, ProjectionCacheEntry>,
+    access_order: std::collections::VecDeque<Uuid>,
+    max_size: usize,
+    ttl: Duration,
+    duplicate_detection: DashMap<Uuid, Uuid>, // event_id -> aggregate_id for duplicate detection
+}
+
+impl ProjectionCache {
+    fn new(max_size: usize, ttl: Duration) -> Self {
+        Self {
+            cache: HashMap::with_capacity(max_size),
+            access_order: std::collections::VecDeque::with_capacity(max_size),
+            max_size,
+            ttl,
+            duplicate_detection: DashMap::new(),
+        }
+    }
+
+    fn get(&mut self, key: &Uuid) -> Option<&ProjectionCacheEntry> {
+        if let Some(entry) = self.cache.get(key) {
+            if !entry.is_expired(self.ttl) {
+                // Move to front for LRU
+                self.access_order.retain(|&x| x != *key);
+                self.access_order.push_front(*key);
+                return Some(entry);
+            } else {
+                // Mark for removal
+                self.access_order.retain(|&x| x != *key);
+                return None;
+            }
+        }
+        None
+    }
+
+    fn remove_expired(&mut self, key: &Uuid) {
+        self.cache.remove(key);
+    }
+
+    fn put(&mut self, key: Uuid, entry: ProjectionCacheEntry) {
+        if self.cache.len() >= self.max_size {
+            // Remove LRU item
+            if let Some(lru_key) = self.access_order.pop_back() {
+                self.cache.remove(&lru_key);
+            }
+        }
+
+        self.cache.insert(key, entry);
+        self.access_order.push_front(key);
+    }
+
+    fn invalidate(&mut self, key: &Uuid) {
+        self.cache.remove(key);
+        self.access_order.retain(|&x| x != *key);
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.cache.len() * std::mem::size_of::<ProjectionCacheEntry>()
+    }
+
+    fn is_duplicate_event(&self, event_id: &Uuid, aggregate_id: &Uuid) -> bool {
+        if let Some(existing_aggregate_id) = self.duplicate_detection.get(event_id) {
+            existing_aggregate_id.key() == aggregate_id
+        } else {
+            self.duplicate_detection.insert(*event_id, *aggregate_id);
+            false
+        }
+    }
+
+    fn cleanup_duplicates(&mut self) {
+        // Clean up old duplicate detection entries (older than 1 hour)
+        let cutoff = Instant::now() - Duration::from_secs(3600);
+        // Note: DashMap doesn't have retain, so we'd need to implement this differently
+        // For now, we'll let it grow and clean up periodically
+    }
+}
+
+// Ultra-optimized CDC Event Processor with business logic validation
+pub struct UltraOptimizedCDCEventProcessor {
+    kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
+    cache_service: Arc<dyn CacheServiceTrait>,
+    projection_store: Arc<dyn ProjectionStoreTrait>,
+    metrics: Arc<OptimizedCDCMetrics>,
+
+    // High-performance processing
+    processing_semaphore: Arc<Semaphore>,
+    batch_queue: Arc<Mutex<Vec<ProcessableEvent>>>,
+    batch_size: usize,
+    batch_timeout: Duration,
+
+    // Circuit breaker
+    circuit_breaker: CircuitBreaker,
+
+    // Memory-efficient projection cache
+    projection_cache: Arc<Mutex<ProjectionCache>>,
+
+    // Batch processing coordination
+    batch_processor_handle: Option<tokio::task::JoinHandle<()>>,
+    shutdown_tx: Option<mpsc::Sender<()>>,
+
+    // Business logic configuration
+    business_config: BusinessLogicConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct BusinessLogicConfig {
+    pub enable_validation: bool,
+    pub max_balance: Decimal,
+    pub min_balance: Decimal,
+    pub max_transaction_amount: Decimal,
+    pub enable_duplicate_detection: bool,
+    pub cache_invalidation_delay_ms: u64,
+    pub batch_processing_enabled: bool,
+}
+
+impl Default for BusinessLogicConfig {
+    fn default() -> Self {
+        Self {
+            enable_validation: true,
+            max_balance: Decimal::from_str("999999999.99").unwrap(),
+            min_balance: Decimal::ZERO,
+            max_transaction_amount: Decimal::from_str("1000000.00").unwrap(),
+            enable_duplicate_detection: true,
+            cache_invalidation_delay_ms: 10, // Reduced from 50ms
+            batch_processing_enabled: true,
+        }
+    }
+}
+
+impl UltraOptimizedCDCEventProcessor {
     pub fn new(
         kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
         cache_service: Arc<dyn CacheServiceTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
+        business_config: Option<BusinessLogicConfig>,
     ) -> Self {
+        let projection_cache = Arc::new(Mutex::new(ProjectionCache::new(
+            10000,                    // Max 10k cached projections
+            Duration::from_secs(300), // 5 minute TTL
+        )));
+
         Self {
             kafka_producer,
             cache_service,
             projection_store,
             metrics: Arc::new(OptimizedCDCMetrics::default()),
-            processing_semaphore: Arc::new(Semaphore::new(50)), // Max 50 concurrent events
-            batch_processor: Arc::new(RwLock::new(Vec::new())),
-            batch_size: 10,
-            batch_timeout: Duration::from_millis(100),
-            circuit_breaker: Arc::new(RwLock::new(CircuitBreakerState::Closed)),
-            projection_cache: Arc::new(RwLock::new(HashMap::new())),
-            cache_ttl: Duration::from_secs(300), // 5 minutes
+            processing_semaphore: Arc::new(Semaphore::new(100)), // Increased concurrency
+            batch_queue: Arc::new(Mutex::new(Vec::with_capacity(1000))),
+            batch_size: 50,                           // Optimized batch size
+            batch_timeout: Duration::from_millis(10), // Aggressive batching
+            circuit_breaker: CircuitBreaker::new(),
+            projection_cache,
+            batch_processor_handle: None,
+            shutdown_tx: None,
+            business_config: business_config.unwrap_or_default(),
         }
     }
 
-    /// Process CDC event with optimized batching and caching
-    pub async fn process_cdc_event_optimized(&self, cdc_event: serde_json::Value) -> Result<()> {
+    pub async fn start_batch_processor(&mut self) -> Result<()> {
+        if !self.business_config.batch_processing_enabled {
+            return Ok(());
+        }
+
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+        self.shutdown_tx = Some(shutdown_tx);
+
+        let batch_queue = Arc::clone(&self.batch_queue);
+        let projection_store = Arc::clone(&self.projection_store);
+        let projection_cache = Arc::clone(&self.projection_cache);
+        let metrics = Arc::clone(&self.metrics);
+        let batch_size = self.batch_size;
+        let batch_timeout = self.batch_timeout;
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(batch_timeout);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Err(e) = Self::process_batch(
+                            &batch_queue,
+                            &projection_store,
+                            &projection_cache,
+                            &metrics,
+                            batch_size,
+                        ).await {
+                            error!("Batch processing failed: {}", e);
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        info!("Batch processor shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+
+        self.batch_processor_handle = Some(handle);
+        Ok(())
+    }
+
+    /// Ultra-fast event processing with business logic validation
+    #[instrument(skip(self, cdc_event))]
+    pub async fn process_cdc_event_ultra_fast(&self, cdc_event: serde_json::Value) -> Result<()> {
         let start_time = Instant::now();
 
-        // Check circuit breaker
-        if self.is_circuit_breaker_open().await {
+        // Circuit breaker check
+        if !self.circuit_breaker.can_execute().await {
             return Err(anyhow::anyhow!("Circuit breaker is open"));
         }
 
-        let _permit = self.processing_semaphore.acquire().await?;
+        self.circuit_breaker.on_attempt().await;
 
-        // Extract outbox message
-        let outbox_message_opt = self.extract_outbox_message_optimized(cdc_event)?;
-        if outbox_message_opt.is_none() {
-            return Ok(());
-        }
-        let outbox_message = outbox_message_opt.unwrap();
-
-        // Deserialize domain event
-        let domain_event: crate::domain::AccountEvent =
-            bincode::deserialize(&outbox_message.payload[..])?;
-
-        // Process with optimized projection updates
-        match self
-            .process_event_with_caching(&domain_event, outbox_message.aggregate_id)
-            .await
-        {
-            Ok(_) => {
-                self.reset_circuit_breaker().await;
-
-                // Optimized cache invalidation with debouncing
-                self.schedule_cache_invalidation(outbox_message.aggregate_id)
-                    .await;
-
-                let latency = start_time.elapsed().as_millis() as u64;
-                self.metrics
-                    .processing_latency_ms
-                    .fetch_add(latency, std::sync::atomic::Ordering::Relaxed);
-                self.metrics
-                    .events_processed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                debug!(
-                    "CDC event processed successfully: {} ({}ms)",
-                    outbox_message.event_id, latency
-                );
-                Ok(())
-            }
-            Err(e) => {
-                self.trip_circuit_breaker().await;
-                self.metrics
-                    .events_failed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Err(e)
-            }
-        }
-    }
-
-    /// Process event with projection caching
-    async fn process_event_with_caching(
-        &self,
-        event: &crate::domain::AccountEvent,
-        account_id: Uuid,
-    ) -> Result<()> {
-        let mut cache = self.projection_cache.write().await;
-        let now = Instant::now();
-
-        // Check cache first
-        let cached_projection = cache.get(&account_id).cloned();
-        drop(cache);
-
-        let mut projection = if let Some(cached) = cached_projection {
-            if now.duration_since(cached.cached_at) < self.cache_ttl {
-                self.metrics
-                    .projection_cache_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                cached.projection
-            } else {
-                self.metrics
-                    .projection_cache_misses
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.load_projection_from_db(account_id).await?
-            }
-        } else {
-            self.metrics
-                .projection_cache_misses
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.load_projection_from_db(account_id).await?
+        // Extract event with zero-copy deserialization where possible
+        let processable_event = match self.extract_event_zero_copy(&cdc_event)? {
+            Some(event) => event,
+            None => return Ok(()), // Skip tombstone/delete events
         };
 
-        // Apply event to projection
-        self.apply_event_to_projection(&mut projection, event)?;
+        // Business logic validation
+        if self.business_config.enable_validation {
+            if let Err(e) = self.validate_business_logic(&processable_event).await {
+                self.metrics.record_business_validation_failure();
+                error!(
+                    "Business validation failed for event {}: {}",
+                    processable_event.event_id, e
+                );
+                return Err(e);
+            }
+        }
 
-        // Update projection in database
-        self.projection_store
-            .upsert_accounts_batch(vec![projection.clone()])
-            .await?;
+        // Duplicate detection
+        if self.business_config.enable_duplicate_detection {
+            let mut cache_guard = self.projection_cache.lock().await;
+            if cache_guard
+                .is_duplicate_event(&processable_event.event_id, &processable_event.aggregate_id)
+            {
+                self.metrics.record_duplicate_skip();
+                debug!("Skipping duplicate event: {}", processable_event.event_id);
+                return Ok(());
+            }
+        }
 
-        // Update cache
-        let mut cache = self.projection_cache.write().await;
-        cache.insert(
-            account_id,
-            CachedProjection {
-                projection,
-                cached_at: now,
-                version: cache.get(&account_id).map(|c| c.version + 1).unwrap_or(1),
-            },
-        );
+        // Acquire processing permit
+        let _permit = self.processing_semaphore.acquire().await?;
 
+        // Add to batch queue for processing
+        {
+            let mut queue = self.batch_queue.lock().await;
+            queue.push(processable_event);
+
+            // Trigger immediate batch processing if queue is full
+            if queue.len() >= self.batch_size {
+                drop(queue); // Release lock before processing
+                self.process_current_batch().await?;
+            }
+        }
+
+        // Record metrics
+        let processing_time = start_time.elapsed().as_millis() as u64;
+        self.metrics.record_processing_time(processing_time);
         self.metrics
-            .projection_updates
+            .events_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        self.circuit_breaker.on_success().await;
         Ok(())
     }
 
-    async fn load_projection_from_db(
-        &self,
-        account_id: Uuid,
-    ) -> Result<crate::infrastructure::projections::AccountProjection> {
-        if let Some(projection) = self.projection_store.get_account(account_id).await? {
-            Ok(projection)
-        } else {
-            // Create new projection
-            Ok(crate::infrastructure::projections::AccountProjection {
-                id: account_id,
-                owner_name: "".to_string(),
-                balance: Decimal::ZERO,
-                is_active: false,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
-        }
-    }
+    /// Business logic validation
+    async fn validate_business_logic(&self, event: &ProcessableEvent) -> Result<()> {
+        let domain_event = event.get_domain_event()?;
 
-    fn apply_event_to_projection(
-        &self,
-        projection: &mut crate::infrastructure::projections::AccountProjection,
-        event: &crate::domain::AccountEvent,
-    ) -> Result<()> {
-        match event {
+        match domain_event {
             crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
-                projection.balance += *amount;
-                projection.updated_at = Utc::now();
+                if *amount <= Decimal::ZERO {
+                    return Err(anyhow::anyhow!("Deposit amount must be positive"));
+                }
+                if *amount > self.business_config.max_transaction_amount {
+                    return Err(anyhow::anyhow!("Deposit amount exceeds maximum allowed"));
+                }
             }
             crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
-                projection.balance -= *amount;
-                projection.updated_at = Utc::now();
+                if *amount <= Decimal::ZERO {
+                    return Err(anyhow::anyhow!("Withdrawal amount must be positive"));
+                }
+                if *amount > self.business_config.max_transaction_amount {
+                    return Err(anyhow::anyhow!("Withdrawal amount exceeds maximum allowed"));
+                }
             }
             crate::domain::AccountEvent::AccountCreated {
-                owner_name,
-                initial_balance,
-                ..
+                initial_balance, ..
             } => {
-                projection.owner_name = owner_name.clone();
-                projection.balance = *initial_balance;
-                projection.is_active = true;
-                projection.updated_at = Utc::now();
+                if *initial_balance < self.business_config.min_balance {
+                    return Err(anyhow::anyhow!("Initial balance cannot be negative"));
+                }
+                if *initial_balance > self.business_config.max_balance {
+                    return Err(anyhow::anyhow!("Initial balance exceeds maximum allowed"));
+                }
             }
             crate::domain::AccountEvent::AccountClosed { .. } => {
-                projection.is_active = false;
-                projection.updated_at = Utc::now();
+                // No additional validation needed for account closure
             }
         }
         Ok(())
     }
 
-    /// Optimized cache invalidation with debouncing
-    async fn schedule_cache_invalidation(&self, account_id: Uuid) {
-        let cache_service = self.cache_service.clone();
-        let metrics = self.metrics.clone();
-
-        // Use a small delay to batch cache invalidations
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            if let Err(e) = cache_service.invalidate_account(account_id).await {
-                error!(
-                    "Failed to invalidate cache for account {}: {}",
-                    account_id, e
-                );
-            } else {
-                metrics
-                    .cache_invalidations
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        });
+    /// Process current batch immediately
+    async fn process_current_batch(&self) -> Result<()> {
+        Self::process_batch(
+            &self.batch_queue,
+            &self.projection_store,
+            &self.projection_cache,
+            &self.metrics,
+            self.batch_size,
+        )
+        .await
     }
 
-    /// Enhanced message extraction with better error handling
-    fn extract_outbox_message_optimized(
+    /// Optimized batch processing with bulk operations and business logic
+    async fn process_batch(
+        batch_queue: &Arc<Mutex<Vec<ProcessableEvent>>>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        projection_cache: &Arc<Mutex<ProjectionCache>>,
+        metrics: &Arc<OptimizedCDCMetrics>,
+        batch_size: usize,
+    ) -> Result<()> {
+        let events = {
+            let mut queue = batch_queue.lock().await;
+            if queue.is_empty() {
+                return Ok(());
+            }
+            let drain_size = queue.len().min(batch_size);
+            queue.drain(..drain_size).collect::<Vec<_>>()
+        };
+
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let batch_start = Instant::now();
+        let events_count = events.len();
+
+        // Group events by aggregate_id for efficient processing
+        let mut events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>> = HashMap::new();
+        for event in events {
+            events_by_aggregate
+                .entry(event.aggregate_id)
+                .or_default()
+                .push(event);
+        }
+
+        // Process each aggregate's events
+        let mut updated_projections = Vec::new();
+        let mut cache_guard = projection_cache.lock().await;
+
+        for (aggregate_id, aggregate_events) in events_by_aggregate {
+            let mut projection = Self::get_or_load_projection(
+                &mut cache_guard,
+                projection_store,
+                aggregate_id,
+                metrics,
+            )
+            .await?;
+
+            // Apply all events for this aggregate with business validation
+            for event in aggregate_events {
+                if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
+                    error!(
+                        "Failed to apply event {} to projection: {}",
+                        event.event_id, e
+                    );
+                    metrics
+                        .projection_update_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue; // Skip this event but continue processing others
+                }
+            }
+
+            // Update cache
+            cache_guard.put(aggregate_id, projection.clone());
+            updated_projections.push(Self::projection_cache_to_db_projection(
+                &projection,
+                aggregate_id,
+            ));
+        }
+
+        drop(cache_guard);
+
+        // Bulk update projections in database
+        if !updated_projections.is_empty() {
+            if let Err(e) = projection_store
+                .upsert_accounts_batch(updated_projections)
+                .await
+            {
+                error!("Failed to bulk update projections: {}", e);
+                metrics
+                    .projection_update_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(e);
+            }
+        }
+
+        // Update metrics
+        let batch_time = batch_start.elapsed().as_millis() as u64;
+        metrics
+            .batches_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        debug!(
+            "Processed batch of {} events in {}ms",
+            events_count, batch_time
+        );
+
+        Ok(())
+    }
+
+    /// Get projection from cache or load from database
+    async fn get_or_load_projection(
+        cache: &mut ProjectionCache,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        aggregate_id: Uuid,
+        metrics: &Arc<OptimizedCDCMetrics>,
+    ) -> Result<ProjectionCacheEntry> {
+        if let Some(cached) = cache.get(&aggregate_id) {
+            metrics
+                .projection_cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(cached.clone());
+        }
+
+        metrics
+            .projection_cache_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Load from database
+        let db_projection = projection_store.get_account(aggregate_id).await?;
+
+        let cache_entry = if let Some(proj) = db_projection {
+            ProjectionCacheEntry {
+                balance: proj.balance,
+                owner_name: proj.owner_name,
+                is_active: proj.is_active,
+                version: 1,
+                cached_at: Instant::now(),
+                last_event_id: None,
+            }
+        } else {
+            // New projection
+            ProjectionCacheEntry {
+                balance: Decimal::ZERO,
+                owner_name: String::new(),
+                is_active: false,
+                version: 1,
+                cached_at: Instant::now(),
+                last_event_id: None,
+            }
+        };
+
+        cache.put(aggregate_id, cache_entry.clone());
+        Ok(cache_entry)
+    }
+
+    /// Convert cache entry to database projection
+    fn projection_cache_to_db_projection(
+        cache_entry: &ProjectionCacheEntry,
+        aggregate_id: Uuid,
+    ) -> crate::infrastructure::projections::AccountProjection {
+        crate::infrastructure::projections::AccountProjection {
+            id: aggregate_id,
+            owner_name: cache_entry.owner_name.clone(),
+            balance: cache_entry.balance,
+            is_active: cache_entry.is_active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// Apply event to projection with business validation
+    fn apply_event_to_projection(
+        projection: &mut ProjectionCacheEntry,
+        event: &ProcessableEvent,
+    ) -> Result<()> {
+        let domain_event = event.get_domain_event()?;
+
+        // Apply business logic validation and update
+        projection.apply_event(domain_event)?;
+
+        // Update last event ID for duplicate detection
+        projection.last_event_id = Some(event.event_id);
+
+        Ok(())
+    }
+
+    /// Extract event with minimal allocations
+    fn extract_event_zero_copy(
         &self,
-        cdc_event: serde_json::Value,
-    ) -> Result<Option<CDCOutboxMessageWithPayload>> {
+        cdc_event: &serde_json::Value,
+    ) -> Result<Option<ProcessableEvent>> {
         let payload = cdc_event
             .get("payload")
-            .ok_or_else(|| anyhow::anyhow!("CDC event missing payload field"))?;
+            .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
 
         let after = payload.get("after");
         if after.is_none() || after == Some(&serde_json::Value::Null) {
-            debug!("CDC event is a delete/tombstone, skipping");
-            return Ok(None);
+            return Ok(None); // Skip tombstone
         }
 
         let after_data = after.unwrap();
+
+        // Extract required fields with minimal string allocations
+        let event_id = after_data
+            .get("event_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| anyhow::anyhow!("Invalid event_id"))?;
+
+        let aggregate_id = after_data
+            .get("aggregate_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| anyhow::anyhow!("Invalid aggregate_id"))?;
+
+        let event_type = after_data
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing event_type"))?
+            .to_string();
+
         let payload_str = after_data
             .get("payload")
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing payload field in CDC event"))?;
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
 
-        let payload_bytes = base64::decode(payload_str)
-            .map_err(|e| anyhow::anyhow!("Failed to decode base64 payload: {}", e))?;
+        let payload_bytes = base64::decode(payload_str)?;
 
-        let outbox_message: CDCOutboxMessage = serde_json::from_value(after_data.clone())
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize CDC message: {}", e))?;
+        let partition_key = after_data
+            .get("partition_key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-        Ok(Some(CDCOutboxMessageWithPayload {
-            id: outbox_message.id,
-            aggregate_id: outbox_message.aggregate_id,
-            event_id: outbox_message.event_id,
-            event_type: outbox_message.event_type,
-            payload: payload_bytes,
-            topic: outbox_message.topic,
-            metadata: outbox_message.metadata,
-            created_at: outbox_message.created_at,
-            updated_at: outbox_message.updated_at,
-        }))
+        ProcessableEvent::new(
+            event_id,
+            aggregate_id,
+            event_type,
+            payload_bytes,
+            partition_key,
+        )
+        .map(Some)
     }
 
-    /// Circuit breaker implementation
-    async fn is_circuit_breaker_open(&self) -> bool {
-        let state = self.circuit_breaker.read().await;
-        match *state {
-            CircuitBreakerState::Open { until } => Instant::now() < until,
-            _ => false,
-        }
-    }
+    /// Get comprehensive metrics
+    pub async fn get_metrics(&self) -> OptimizedCDCMetrics {
+        let cache_guard = self.projection_cache.lock().await;
+        let memory_usage = cache_guard.memory_usage();
+        drop(cache_guard);
 
-    async fn trip_circuit_breaker(&self) {
-        let mut state = self.circuit_breaker.write().await;
-        *state = CircuitBreakerState::Open {
-            until: Instant::now() + Duration::from_secs(30),
-        };
         self.metrics
-            .circuit_breaker_trips
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        warn!("Circuit breaker tripped for CDC event processor");
-    }
+            .memory_usage_bytes
+            .store(memory_usage as u64, std::sync::atomic::Ordering::Relaxed);
 
-    async fn reset_circuit_breaker(&self) {
-        let mut state = self.circuit_breaker.write().await;
-        if matches!(*state, CircuitBreakerState::Open { .. }) {
-            *state = CircuitBreakerState::Closed;
-            info!("Circuit breaker reset for CDC event processor");
+        // Create a copy of metrics for external use
+        OptimizedCDCMetrics {
+            events_processed: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .events_processed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            events_failed: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .events_failed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            batches_processed: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .batches_processed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            avg_processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .avg_processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            projection_cache_hits: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .projection_cache_hits
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            projection_cache_misses: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .projection_cache_misses
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            circuit_breaker_trips: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .circuit_breaker_trips
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            memory_usage_bytes: std::sync::atomic::AtomicU64::new(memory_usage as u64),
+            active_goroutines: std::sync::atomic::AtomicU64::new(0),
+            business_validation_failures: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .business_validation_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            duplicate_events_skipped: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .duplicate_events_skipped
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            projection_update_failures: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .projection_update_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            cache_invalidation_failures: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .cache_invalidation_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
         }
     }
 
-    pub fn get_metrics(&self) -> &OptimizedCDCMetrics {
-        &self.metrics
+    /// Graceful shutdown
+    pub async fn shutdown(&mut self) -> Result<()> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(()).await;
+        }
+
+        if let Some(handle) = self.batch_processor_handle.take() {
+            handle.await?;
+        }
+
+        // Process any remaining events
+        self.process_current_batch().await?;
+
+        info!("CDC Event Processor shutdown complete");
+        Ok(())
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CDCOutboxMessageWithPayload {
-    pub id: Uuid,
-    pub aggregate_id: Uuid,
-    pub event_id: Uuid,
-    pub event_type: String,
-    pub payload: Vec<u8>,
-    pub topic: String,
-    pub metadata: Option<serde_json::Value>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
+// Memory monitoring utilities
+impl UltraOptimizedCDCEventProcessor {
+    pub async fn get_memory_usage(&self) -> usize {
+        let cache_guard = self.projection_cache.lock().await;
+        let cache_memory = cache_guard.memory_usage();
 
-/// Implementation of the existing OutboxRepositoryTrait for CDC with optimizations
-#[async_trait]
-impl crate::infrastructure::outbox::OutboxRepositoryTrait for OptimizedCDCOutboxRepository {
-    async fn add_pending_messages(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
-    ) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
+        let queue_guard = self.batch_queue.lock().await;
+        let queue_memory = queue_guard.len() * std::mem::size_of::<ProcessableEvent>();
+
+        cache_memory + queue_memory
+    }
+
+    pub async fn clear_expired_cache_entries(&self) {
+        let mut cache_guard = self.projection_cache.lock().await;
+        let ttl = Duration::from_secs(300);
+
+        let expired_keys: Vec<Uuid> = cache_guard
+            .cache
+            .iter()
+            .filter(|(_, entry)| entry.is_expired(ttl))
+            .map(|(k, _)| *k)
+            .collect();
+
+        for key in expired_keys {
+            cache_guard.invalidate(&key);
         }
 
-        // Convert to CDC messages with sequence numbers
-        let mut cdc_messages = Vec::with_capacity(messages.len());
-        for msg in messages {
-            let sequence = self.get_next_sequence().await?;
-            cdc_messages.push(CDCOutboxMessage {
-                id: Uuid::new_v4(),
-                aggregate_id: msg.aggregate_id,
-                event_id: msg.event_id,
-                event_type: msg.event_type,
-                topic: msg.topic,
-                metadata: msg.metadata,
-                sequence_number: sequence,
-                correlation_id: None, // Could be derived from metadata
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            });
-        }
-
-        // Use batch insert for better performance
-        self.batch_insert_outbox_messages(tx, cdc_messages).await?;
-
-        Ok(())
+        // Clean up duplicate detection
+        cache_guard.cleanup_duplicates();
     }
 
-    // Keep existing interface methods as no-ops for CDC
-    async fn fetch_and_lock_pending_messages(
-        &self,
-        _limit: i64,
-    ) -> Result<Vec<crate::infrastructure::outbox::PersistedOutboxMessage>> {
-        Ok(Vec::new())
+    /// Get business logic configuration
+    pub fn get_business_config(&self) -> &BusinessLogicConfig {
+        &self.business_config
     }
 
-    async fn mark_as_processed(&self, _outbox_message_id: Uuid) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete_processed_batch(&self, _outbox_message_ids: &[Uuid]) -> Result<usize> {
-        Ok(0)
-    }
-
-    async fn record_failed_attempt(
-        &self,
-        _outbox_message_id: Uuid,
-        _max_retries: i32,
-        _error_message: Option<String>,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn mark_as_failed(
-        &self,
-        _outbox_message_id: Uuid,
-        _error_message: Option<String>,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn find_stuck_processing_messages(
-        &self,
-        _stuck_threshold: Duration,
-        _limit: i32,
-    ) -> Result<Vec<crate::infrastructure::outbox::PersistedOutboxMessage>> {
-        Ok(Vec::new())
-    }
-
-    async fn reset_stuck_messages(&self, _outbox_message_ids: &[Uuid]) -> Result<usize> {
-        Ok(0)
+    /// Update business logic configuration
+    pub fn update_business_config(&mut self, config: BusinessLogicConfig) {
+        self.business_config = config;
     }
 }

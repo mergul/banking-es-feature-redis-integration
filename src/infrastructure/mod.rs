@@ -1,6 +1,10 @@
 pub mod auth;
 pub mod cache_service;
 pub mod cdc_debezium; // Added CDC module
+pub mod cdc_event_processor;
+pub mod cdc_integration_helper;
+pub mod cdc_producer;
+pub mod cdc_service_manager;
 pub mod config;
 pub mod connection_pool_monitor;
 pub mod deadlock_detector;

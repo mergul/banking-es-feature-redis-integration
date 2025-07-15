@@ -1,4 +1,7 @@
 use crate::infrastructure::cache_service::CacheServiceTrait;
+use crate::infrastructure::cdc_debezium::{
+    CDCConsumer, CDCEventProcessor, CDCOutboxRepository, DebeziumConfig,
+};
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
@@ -45,6 +48,7 @@ pub enum ServiceState {
     Starting,
     Running,
     Stopping,
+    Migrating,
     Failed(String),
 }
 
@@ -110,6 +114,9 @@ pub struct EnhancedCDCMetrics {
     pub consecutive_failures: std::sync::atomic::AtomicU64,
     pub last_error_time: std::sync::atomic::AtomicU64,
     pub error_rate: std::sync::atomic::AtomicU64,
+
+    // Integration helper status
+    pub integration_helper_initialized: std::sync::atomic::AtomicBool,
 }
 
 impl CDCServiceManager {
@@ -132,8 +139,7 @@ impl CDCServiceManager {
             kafka_producer,
             cache_service,
             projection_store,
-            metrics.clone(),
-            optimization_config.clone(),
+            None,
         ));
 
         Ok(Self {
@@ -333,7 +339,7 @@ impl CDCServiceManager {
         let optimization_config = self.optimization_config.clone();
 
         let handle = tokio::spawn(async move {
-            let mut batch_buffer = Vec::new();
+            let mut batch_buffer: Vec<serde_json::Value> = Vec::new();
             let mut last_flush = std::time::Instant::now();
 
             loop {
@@ -470,13 +476,15 @@ impl CDCServiceManager {
                         let current_processed = metrics.events_processed.load(std::sync::atomic::Ordering::Relaxed);
                         let elapsed = last_time.elapsed();
 
-                        if elapsed.as_secs() > 0 {
-                            let throughput = ((current_processed - last_processed) as f64 / elapsed.as_secs() as f64) as u64;
-                            metrics.throughput_per_second.store(throughput, std::sync::atomic::Ordering::Relaxed);
+                        let throughput = if elapsed.as_secs() > 0 {
+                            ((current_processed - last_processed) as f64 / elapsed.as_secs() as f64) as u64
+                        } else {
+                            0
+                        };
+                        metrics.throughput_per_second.store(throughput, std::sync::atomic::Ordering::Relaxed);
 
-                            last_processed = current_processed;
-                            last_time = std::time::Instant::now();
-                        }
+                        last_processed = current_processed;
+                        last_time = std::time::Instant::now();
 
                         // Calculate error rate
                         let failed = metrics.events_failed.load(std::sync::atomic::Ordering::Relaxed);
