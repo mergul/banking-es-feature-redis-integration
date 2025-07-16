@@ -477,10 +477,7 @@ impl KafkaConsumer {
                 config.consumer_session_timeout_ms.to_string(),
             )
             .set("heartbeat.interval.ms", "3000")
-            .set(
-                "partition.assignment.strategy",
-                "org.apache.kafka.clients.consumer.RangeAssignor",
-            )
+            .set("partition.assignment.strategy", "cooperative-sticky")
             .create_with_context(context)?;
 
         tracing::info!("KafkaConsumer: ✅ Consumer created successfully");

@@ -1,0 +1,622 @@
+2025-07-16T09:12:24.843414Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:24.843566Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1: Consumer error: Empty message payload
+2025-07-16T09:12:25.361644Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:25.361884Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #4: Consumer error: Empty message payload
+2025-07-16T09:12:25.904827Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:25.905241Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #8: Consumer error: Empty message payload
+2025-07-16T09:12:26.423793Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:26.423993Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #11: Consumer error: Empty message payload
+2025-07-16T09:12:26.955601Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:26.955732Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #17: Consumer error: Empty message payload
+2025-07-16T09:12:27.486905Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:27.487037Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #22: Consumer error: Empty message payload
+2025-07-16T09:12:28.006030Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:28.006275Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #25: Consumer error: Empty message payload
+2025-07-16T09:12:28.599165Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:28.599284Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #39: Consumer error: Empty message payload
+2025-07-16T09:12:29.134427Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:29.134811Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #42: Consumer error: Empty message payload
+2025-07-16T09:12:29.662745Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:29.663018Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #45: Consumer error: Empty message payload
+2025-07-16T09:12:30.235714Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:30.235822Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #53: Consumer error: Empty message payload
+2025-07-16T09:12:30.757105Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:30.757456Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #56: Consumer error: Empty message payload
+2025-07-16T09:12:31.293068Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:31.293277Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #61: Consumer error: Empty message payload
+2025-07-16T09:12:31.812698Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:31.812981Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #64: Consumer error: Empty message payload
+2025-07-16T09:12:32.323948Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:32.324077Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #67: Consumer error: Empty message payload
+2025-07-16T09:12:32.851707Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:32.852093Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #71: Consumer error: Empty message payload
+2025-07-16T09:12:33.366486Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:33.366610Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #75: Consumer error: Empty message payload
+2025-07-16T09:12:33.877627Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:33.878067Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #77: Consumer error: Empty message payload
+2025-07-16T09:12:34.394816Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:34.394916Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #82: Consumer error: Empty message payload
+2025-07-16T09:12:34.917357Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:34.917486Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #88: Consumer error: Empty message payload
+2025-07-16T09:12:35.588796Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:35.588887Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #96: Consumer error: Empty message payload
+2025-07-16T09:12:36.096832Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:36.096950Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #98: Consumer error: Empty message payload
+2025-07-16T09:12:36.606690Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:36.606778Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #101: Consumer error: Empty message payload
+2025-07-16T09:12:37.134705Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:37.134823Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #108: Consumer error: Empty message payload
+2025-07-16T09:12:37.665092Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:37.665525Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #112: Consumer error: Empty message payload
+2025-07-16T09:12:38.202093Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:38.202327Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #117: Consumer error: Empty message payload
+2025-07-16T09:12:38.718635Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:38.718755Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #122: Consumer error: Empty message payload
+2025-07-16T09:12:39.248152Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:39.248576Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #126: Consumer error: Empty message payload
+2025-07-16T09:12:39.756669Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:39.756799Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #128: Consumer error: Empty message payload
+2025-07-16T09:12:40.275082Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:40.275505Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #131: Consumer error: Empty message payload
+2025-07-16T09:12:40.785435Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:40.785817Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #133: Consumer error: Empty message payload
+2025-07-16T09:12:41.295310Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:41.295387Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #137: Consumer error: Empty message payload
+2025-07-16T09:12:41.801596Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:41.801677Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #140: Consumer error: Empty message payload
+2025-07-16T09:12:42.311653Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:42.311746Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #144: Consumer error: Empty message payload
+2025-07-16T09:12:42.820064Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:42.820162Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #148: Consumer error: Empty message payload
+2025-07-16T09:12:43.329483Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:43.329626Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #152: Consumer error: Empty message payload
+2025-07-16T09:12:43.836937Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:43.837067Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #155: Consumer error: Empty message payload
+2025-07-16T09:12:44.342932Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:44.343056Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #157: Consumer error: Empty message payload
+2025-07-16T09:12:44.848985Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:44.849163Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #160: Consumer error: Empty message payload
+2025-07-16T09:12:45.367059Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:45.367166Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #167: Consumer error: Empty message payload
+2025-07-16T09:12:45.871602Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:45.871710Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #169: Consumer error: Empty message payload
+2025-07-16T09:12:46.380761Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:46.380867Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #172: Consumer error: Empty message payload
+2025-07-16T09:12:46.886685Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:46.886794Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #175: Consumer error: Empty message payload
+2025-07-16T09:12:47.403190Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:47.403544Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #178: Consumer error: Empty message payload
+2025-07-16T09:12:47.930680Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:47.930827Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #181: Consumer error: Empty message payload
+2025-07-16T09:12:48.457781Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:48.458345Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #184: Consumer error: Empty message payload
+2025-07-16T09:12:48.970705Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:48.971099Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #186: Consumer error: Empty message payload
+2025-07-16T09:12:49.474546Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:49.474636Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #188: Consumer error: Empty message payload
+2025-07-16T09:12:50.021782Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:50.021873Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #193: Consumer error: Empty message payload
+2025-07-16T09:12:50.562242Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:50.562543Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #197: Consumer error: Empty message payload
+2025-07-16T09:12:51.252248Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:51.252537Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #201: Consumer error: Empty message payload
+2025-07-16T09:12:51.768117Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:51.768842Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #204: Consumer error: Empty message payload
+2025-07-16T09:12:52.293896Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:52.294008Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #208: Consumer error: Empty message payload
+2025-07-16T09:12:52.879579Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:52.880059Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #211: Consumer error: Empty message payload
+2025-07-16T09:12:53.396072Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:53.396490Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #213: Consumer error: Empty message payload
+2025-07-16T09:12:53.937375Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:53.937527Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #216: Consumer error: Empty message payload
+2025-07-16T09:12:54.519941Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:54.520136Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #222: Consumer error: Empty message payload
+2025-07-16T09:12:55.045691Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:55.045787Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #224: Consumer error: Empty message payload
+2025-07-16T09:12:55.580702Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:55.580888Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #227: Consumer error: Empty message payload
+2025-07-16T09:12:56.168731Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:56.168874Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #233: Consumer error: Empty message payload
+2025-07-16T09:12:56.683372Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:56.683531Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #235: Consumer error: Empty message payload
+2025-07-16T09:12:57.191520Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:57.191681Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #237: Consumer error: Empty message payload
+2025-07-16T09:12:57.708369Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:57.708623Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #239: Consumer error: Empty message payload
+2025-07-16T09:12:58.268365Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:58.268504Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #247: Consumer error: Empty message payload
+2025-07-16T09:12:58.817417Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:58.817579Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #250: Consumer error: Empty message payload
+2025-07-16T09:12:59.428781Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:12:59.428917Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #257: Consumer error: Empty message payload
+2025-07-16T09:13:00.028957Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:00.029091Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #261: Consumer error: Empty message payload
+2025-07-16T09:13:00.548367Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:00.548771Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #263: Consumer error: Empty message payload
+2025-07-16T09:13:01.066700Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:01.090565Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #266: Consumer error: Empty message payload
+2025-07-16T09:13:01.683584Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:01.683720Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #271: Consumer error: Empty message payload
+2025-07-16T09:13:02.211938Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:02.212209Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #274: Consumer error: Empty message payload
+2025-07-16T09:13:02.748092Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:02.748445Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #277: Consumer error: Empty message payload
+2025-07-16T09:13:03.728258Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:03.728576Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #280: Consumer error: Empty message payload
+2025-07-16T09:13:04.242694Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:04.243168Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #282: Consumer error: Empty message payload
+2025-07-16T09:13:04.791833Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:04.791953Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #287: Consumer error: Empty message payload
+2025-07-16T09:13:05.366324Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:05.366436Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #292: Consumer error: Empty message payload
+2025-07-16T09:13:05.877096Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:05.877242Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #295: Consumer error: Empty message payload
+2025-07-16T09:13:06.413857Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:06.414263Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #298: Consumer error: Empty message payload
+2025-07-16T09:13:07.040342Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:07.040487Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #304: Consumer error: Empty message payload
+2025-07-16T09:13:09.338297Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:09.338492Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #316: Consumer error: Empty message payload
+2025-07-16T09:13:09.849391Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:09.849803Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #318: Consumer error: Empty message payload
+2025-07-16T09:13:10.468873Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:10.469308Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #320: Consumer error: Empty message payload
+2025-07-16T09:13:11.026512Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:11.027046Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #322: Consumer error: Empty message payload
+2025-07-16T09:13:11.541994Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:11.542437Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #324: Consumer error: Empty message payload
+2025-07-16T09:13:12.071946Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:12.072398Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #327: Consumer error: Empty message payload
+2025-07-16T09:13:12.642398Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:12.642683Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #331: Consumer error: Empty message payload
+2025-07-16T09:13:13.214421Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:13.214946Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #335: Consumer error: Empty message payload
+2025-07-16T09:13:13.873076Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:13.873377Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #346: Consumer error: Empty message payload
+2025-07-16T09:13:14.397525Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:14.397929Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #349: Consumer error: Empty message payload
+2025-07-16T09:13:14.936551Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:14.937072Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #351: Consumer error: Empty message payload
+2025-07-16T09:13:15.460291Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:15.460803Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #353: Consumer error: Empty message payload
+2025-07-16T09:13:15.994191Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:15.994802Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #355: Consumer error: Empty message payload
+2025-07-16T09:13:16.538800Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:16.539156Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #358: Consumer error: Empty message payload
+2025-07-16T09:13:17.101964Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:17.105637Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #361: Consumer error: Empty message payload
+2025-07-16T09:13:17.679159Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:17.679938Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #365: Consumer error: Empty message payload
+2025-07-16T09:13:18.229760Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:18.230285Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #368: Consumer error: Empty message payload
+2025-07-16T09:13:18.756961Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:18.757042Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #371: Consumer error: Empty message payload
+2025-07-16T09:13:19.268822Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:19.268921Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #375: Consumer error: Empty message payload
+2025-07-16T09:13:19.780677Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:19.780798Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #379: Consumer error: Empty message payload
+2025-07-16T09:13:20.331859Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:20.331993Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #386: Consumer error: Empty message payload
+2025-07-16T09:13:20.891727Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:20.891916Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #392: Consumer error: Empty message payload
+2025-07-16T09:13:21.401551Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:21.401946Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #394: Consumer error: Empty message payload
+2025-07-16T09:13:21.936559Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:21.936716Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #399: Consumer error: Empty message payload
+2025-07-16T09:13:22.455104Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:22.455255Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #401: Consumer error: Empty message payload
+2025-07-16T09:13:23.004372Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:23.004471Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #405: Consumer error: Empty message payload
+2025-07-16T09:13:23.662930Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:23.663059Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #412: Consumer error: Empty message payload
+2025-07-16T09:13:24.194127Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:24.194388Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #415: Consumer error: Empty message payload
+2025-07-16T09:13:24.796636Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:24.796960Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #420: Consumer error: Empty message payload
+2025-07-16T09:13:25.467952Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:25.468159Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #429: Consumer error: Empty message payload
+2025-07-16T09:13:26.015872Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:26.016633Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #433: Consumer error: Empty message payload
+2025-07-16T09:13:27.201252Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:27.212623Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #437: Consumer error: Empty message payload
+2025-07-16T09:13:27.733617Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:27.733782Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #440: Consumer error: Empty message payload
+2025-07-16T09:13:28.273082Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:28.273481Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #443: Consumer error: Empty message payload
+2025-07-16T09:13:28.798810Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:28.799170Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #446: Consumer error: Empty message payload
+2025-07-16T09:13:31.101927Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:31.102048Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #453: Consumer error: Empty message payload
+2025-07-16T09:13:31.610075Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:31.610208Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #455: Consumer error: Empty message payload
+2025-07-16T09:13:32.144442Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:32.144847Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #457: Consumer error: Empty message payload
+2025-07-16T09:13:32.749433Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:32.749863Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #459: Consumer error: Empty message payload
+2025-07-16T09:13:33.321744Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:33.322566Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #464: Consumer error: Empty message payload
+2025-07-16T09:13:34.050330Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:34.050430Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #467: Consumer error: Empty message payload
+2025-07-16T09:13:34.573673Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:34.574094Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #470: Consumer error: Empty message payload
+2025-07-16T09:13:35.087706Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:35.087803Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #475: Consumer error: Empty message payload
+2025-07-16T09:13:35.599622Z ERROR ThreadId(04) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:35.599935Z ERROR ThreadId(04) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #477: Consumer error: Empty message payload
+2025-07-16T09:13:36.147710Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:36.147862Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #483: Consumer error: Empty message payload
+2025-07-16T09:13:36.657719Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:36.658120Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #485: Consumer error: Empty message payload
+2025-07-16T09:13:37.211270Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:37.211776Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #489: Consumer error: Empty message payload
+2025-07-16T09:13:40.285520Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:40.285896Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #493: Consumer error: Empty message payload
+2025-07-16T09:13:40.797920Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:40.798300Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #495: Consumer error: Empty message payload
+2025-07-16T09:13:42.173712Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:42.173942Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #501: Consumer error: Empty message payload
+2025-07-16T09:13:43.832325Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:43.832447Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #504: Consumer error: Empty message payload
+2025-07-16T09:13:44.369337Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:44.369493Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #507: Consumer error: Empty message payload
+2025-07-16T09:13:44.873506Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:44.873640Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #509: Consumer error: Empty message payload
+2025-07-16T09:13:45.386097Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:45.386191Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #514: Consumer error: Empty message payload
+2025-07-16T09:13:46.171520Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:46.171686Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #519: Consumer error: Empty message payload
+2025-07-16T09:13:46.699993Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:46.700402Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #522: Consumer error: Empty message payload
+2025-07-16T09:13:47.207461Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:47.207577Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #524: Consumer error: Empty message payload
+2025-07-16T09:13:47.732492Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:47.732812Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #527: Consumer error: Empty message payload
+2025-07-16T09:13:48.242545Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:48.242642Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #531: Consumer error: Empty message payload
+2025-07-16T09:13:48.751303Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:48.751682Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #533: Consumer error: Empty message payload
+2025-07-16T09:13:49.282554Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:49.282956Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #537: Consumer error: Empty message payload
+2025-07-16T09:13:49.817484Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:49.817708Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #541: Consumer error: Empty message payload
+2025-07-16T09:13:50.390688Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:50.391165Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #548: Consumer error: Empty message payload
+2025-07-16T09:13:50.920914Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:50.921328Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #552: Consumer error: Empty message payload
+2025-07-16T09:13:51.456382Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:51.456700Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #556: Consumer error: Empty message payload
+2025-07-16T09:13:52.029518Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:52.029917Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #564: Consumer error: Empty message payload
+2025-07-16T09:13:52.544486Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:52.544889Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #566: Consumer error: Empty message payload
+2025-07-16T09:13:54.683320Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:54.683545Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #574: Consumer error: Empty message payload
+2025-07-16T09:13:56.930435Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:56.930515Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #582: Consumer error: Empty message payload
+2025-07-16T09:13:57.455647Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:57.455776Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #586: Consumer error: Empty message payload
+2025-07-16T09:13:57.963140Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:57.963262Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #589: Consumer error: Empty message payload
+2025-07-16T09:13:58.589497Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:58.589938Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #592: Consumer error: Empty message payload
+2025-07-16T09:13:59.359181Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:59.359586Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #601: Consumer error: Empty message payload
+2025-07-16T09:13:59.998796Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:13:59.998938Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #607: Consumer error: Empty message payload
+2025-07-16T09:14:00.548436Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:00.548637Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #612: Consumer error: Empty message payload
+2025-07-16T09:14:01.102241Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:01.102397Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #617: Consumer error: Empty message payload
+2025-07-16T09:14:01.628828Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:01.629111Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #620: Consumer error: Empty message payload
+2025-07-16T09:14:02.164850Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:02.165258Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #623: Consumer error: Empty message payload
+2025-07-16T09:14:02.688935Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:02.689369Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #626: Consumer error: Empty message payload
+2025-07-16T09:14:03.210148Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:03.210505Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #629: Consumer error: Empty message payload
+2025-07-16T09:14:03.720261Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:03.720694Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #631: Consumer error: Empty message payload
+2025-07-16T09:14:04.231934Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:04.232315Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #633: Consumer error: Empty message payload
+2025-07-16T09:14:04.779095Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:04.779381Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #637: Consumer error: Empty message payload
+2025-07-16T09:14:05.315143Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:05.315304Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #641: Consumer error: Empty message payload
+2025-07-16T09:14:07.069457Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:07.069541Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #646: Consumer error: Empty message payload
+2025-07-16T09:14:07.579798Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:07.580166Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #648: Consumer error: Empty message payload
+2025-07-16T09:14:08.121042Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:08.121248Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #653: Consumer error: Empty message payload
+2025-07-16T09:14:08.637757Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:08.637863Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #656: Consumer error: Empty message payload
+2025-07-16T09:14:09.158385Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:09.158692Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #661: Consumer error: Empty message payload
+2025-07-16T09:14:09.686943Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:09.687157Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #667: Consumer error: Empty message payload
+2025-07-16T09:14:10.205943Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:10.206048Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #672: Consumer error: Empty message payload
+2025-07-16T09:14:10.751052Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:10.751370Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #676: Consumer error: Empty message payload
+2025-07-16T09:14:11.282004Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:11.282094Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #683: Consumer error: Empty message payload
+2025-07-16T09:14:11.841686Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:11.842481Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #690: Consumer error: Empty message payload
+2025-07-16T09:14:12.476192Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:12.476644Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #698: Consumer error: Empty message payload
+2025-07-16T09:14:12.999574Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:12.999667Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #705: Consumer error: Empty message payload
+2025-07-16T09:14:13.518645Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:13.518722Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #709: Consumer error: Empty message payload
+2025-07-16T09:14:14.024600Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:14.024734Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #712: Consumer error: Empty message payload
+2025-07-16T09:14:14.529426Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:14.529546Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #714: Consumer error: Empty message payload
+2025-07-16T09:14:15.060434Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:15.060543Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #719: Consumer error: Empty message payload
+2025-07-16T09:14:15.597718Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:15.598168Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #726: Consumer error: Empty message payload
+2025-07-16T09:14:16.106468Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:16.106594Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #729: Consumer error: Empty message payload
+2025-07-16T09:14:16.668361Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:16.668530Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #737: Consumer error: Empty message payload
+2025-07-16T09:14:17.178063Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:17.178454Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #739: Consumer error: Empty message payload
+2025-07-16T09:14:17.708597Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:17.708841Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #743: Consumer error: Empty message payload
+2025-07-16T09:14:18.257306Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:18.257410Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #746: Consumer error: Empty message payload
+2025-07-16T09:14:18.793012Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:18.793141Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #751: Consumer error: Empty message payload
+2025-07-16T09:14:19.332779Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:19.332964Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #756: Consumer error: Empty message payload
+2025-07-16T09:14:19.864666Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:19.865073Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #760: Consumer error: Empty message payload
+2025-07-16T09:14:20.400666Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:20.401057Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #764: Consumer error: Empty message payload
+2025-07-16T09:14:20.908837Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:20.908952Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #767: Consumer error: Empty message payload
+2025-07-16T09:14:21.428612Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:21.432367Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #770: Consumer error: Empty message payload
+2025-07-16T09:14:21.974741Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:21.975050Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #774: Consumer error: Empty message payload
+2025-07-16T09:14:22.539481Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:22.539637Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #783: Consumer error: Empty message payload
+2025-07-16T09:14:23.084861Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:23.084986Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #786: Consumer error: Empty message payload
+2025-07-16T09:14:23.599306Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:23.599446Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #790: Consumer error: Empty message payload
+2025-07-16T09:14:24.114448Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:24.114558Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #795: Consumer error: Empty message payload
+2025-07-16T09:14:24.645817Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:24.645894Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #800: Consumer error: Empty message payload
+2025-07-16T09:14:25.156503Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:25.156601Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #804: Consumer error: Empty message payload
+2025-07-16T09:14:25.684654Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:25.684772Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #811: Consumer error: Empty message payload
+2025-07-16T09:14:26.212591Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:26.212740Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #816: Consumer error: Empty message payload
+2025-07-16T09:14:26.736873Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:26.737080Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #819: Consumer error: Empty message payload
+2025-07-16T09:14:27.262586Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:27.263054Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #823: Consumer error: Empty message payload
+2025-07-16T09:14:27.784922Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:27.785188Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #826: Consumer error: Empty message payload
+2025-07-16T09:14:28.340168Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:28.340310Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #831: Consumer error: Empty message payload
+2025-07-16T09:14:28.856090Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:28.856343Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #835: Consumer error: Empty message payload
+2025-07-16T09:14:29.381913Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:29.382016Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #840: Consumer error: Empty message payload
+2025-07-16T09:14:29.891689Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:29.891833Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #843: Consumer error: Empty message payload
+2025-07-16T09:14:30.398678Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:30.398793Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #846: Consumer error: Empty message payload
+2025-07-16T09:14:30.919068Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:30.919250Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #850: Consumer error: Empty message payload
+2025-07-16T09:14:31.433751Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:31.433878Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #855: Consumer error: Empty message payload
+2025-07-16T09:14:31.964987Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:31.965216Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #858: Consumer error: Empty message payload
+2025-07-16T09:14:32.506895Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:32.507094Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #863: Consumer error: Empty message payload
+2025-07-16T09:14:33.011073Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:33.011174Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #865: Consumer error: Empty message payload
+2025-07-16T09:14:33.702162Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:33.702309Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #875: Consumer error: Empty message payload
+2025-07-16T09:14:34.343286Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:34.343438Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #878: Consumer error: Empty message payload
+2025-07-16T09:14:34.866597Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:34.866916Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #881: Consumer error: Empty message payload
+2025-07-16T09:14:35.369738Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:35.369827Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #883: Consumer error: Empty message payload
+2025-07-16T09:14:35.912983Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:35.913096Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #889: Consumer error: Empty message payload
+2025-07-16T09:14:36.423189Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:36.423330Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #892: Consumer error: Empty message payload
+2025-07-16T09:14:36.932995Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:36.933112Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #895: Consumer error: Empty message payload
+2025-07-16T09:14:37.450327Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:37.450446Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #899: Consumer error: Empty message payload
+2025-07-16T09:14:37.960992Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:37.961115Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #903: Consumer error: Empty message payload
+2025-07-16T09:14:38.474550Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:38.474662Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #906: Consumer error: Empty message payload
+2025-07-16T09:14:38.984420Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:39.110908Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #909: Consumer error: Empty message payload
+2025-07-16T09:14:39.661626Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:39.661972Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #912: Consumer error: Empty message payload
+2025-07-16T09:14:40.338572Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:40.338880Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #921: Consumer error: Empty message payload
+2025-07-16T09:14:40.880170Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:40.880621Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #924: Consumer error: Empty message payload
+2025-07-16T09:14:41.400866Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:41.401016Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #927: Consumer error: Empty message payload
+2025-07-16T09:14:41.917793Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:41.918184Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #930: Consumer error: Empty message payload
+2025-07-16T09:14:42.456347Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:42.456791Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #934: Consumer error: Empty message payload
+2025-07-16T09:14:43.038628Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:43.038752Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #944: Consumer error: Empty message payload
+2025-07-16T09:14:43.566349Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:43.566761Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #948: Consumer error: Empty message payload
+2025-07-16T09:14:44.076069Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:44.076468Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #950: Consumer error: Empty message payload
+2025-07-16T09:14:44.592356Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:44.592761Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #952: Consumer error: Empty message payload
+2025-07-16T09:14:45.142230Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:45.142346Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #962: Consumer error: Empty message payload
+2025-07-16T09:14:45.662292Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:45.662573Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #965: Consumer error: Empty message payload
+2025-07-16T09:14:46.187815Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:46.188241Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #969: Consumer error: Empty message payload
+2025-07-16T09:14:46.705904Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:46.706276Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #971: Consumer error: Empty message payload
+2025-07-16T09:14:47.379153Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:47.379429Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #979: Consumer error: Empty message payload
+2025-07-16T09:14:47.906026Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:47.906297Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #983: Consumer error: Empty message payload
+2025-07-16T09:14:48.431619Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:48.431784Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #987: Consumer error: Empty message payload
+2025-07-16T09:14:48.962605Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:48.962939Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #990: Consumer error: Empty message payload
+2025-07-16T09:14:49.484592Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:49.484903Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #993: Consumer error: Empty message payload
+2025-07-16T09:14:50.000230Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:50.000354Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #997: Consumer error: Empty message payload
+2025-07-16T09:14:50.579894Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:50.580280Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1002: Consumer error: Empty message payload
+2025-07-16T09:14:51.110786Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:51.111076Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1006: Consumer error: Empty message payload
+2025-07-16T09:14:51.616290Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:51.616366Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1008: Consumer error: Empty message payload
+2025-07-16T09:14:52.139975Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:52.140083Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1015: Consumer error: Empty message payload
+2025-07-16T09:14:52.659290Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:52.659636Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1018: Consumer error: Empty message payload
+2025-07-16T09:14:53.163960Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:53.164042Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1020: Consumer error: Empty message payload
+2025-07-16T09:14:53.670373Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:53.670458Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1023: Consumer error: Empty message payload
+2025-07-16T09:14:54.202212Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:54.202376Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1028: Consumer error: Empty message payload
+2025-07-16T09:14:54.710845Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:54.710970Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1030: Consumer error: Empty message payload
+2025-07-16T09:14:55.226536Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:55.226648Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1035: Consumer error: Empty message payload
+2025-07-16T09:14:55.731262Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:55.731345Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1038: Consumer error: Empty message payload
+2025-07-16T09:14:56.234466Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:56.234556Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1040: Consumer error: Empty message payload
+2025-07-16T09:14:56.753165Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:56.753256Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1048: Consumer error: Empty message payload
+2025-07-16T09:14:58.012640Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:58.012750Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1058: Consumer error: Empty message payload
+2025-07-16T09:14:58.519927Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:58.520021Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1062: Consumer error: Empty message payload
+2025-07-16T09:14:59.027894Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:59.028001Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1065: Consumer error: Empty message payload
+2025-07-16T09:14:59.534188Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:14:59.534334Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1067: Consumer error: Empty message payload
+2025-07-16T09:15:00.043059Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:00.043183Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1070: Consumer error: Empty message payload
+2025-07-16T09:15:01.001966Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:01.002419Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1076: Consumer error: Empty message payload
+2025-07-16T09:15:01.509226Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:01.509344Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1079: Consumer error: Empty message payload
+2025-07-16T09:15:02.018599Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:02.018732Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1082: Consumer error: Empty message payload
+2025-07-16T09:15:02.560744Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:02.561149Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1087: Consumer error: Empty message payload
+2025-07-16T09:15:03.104358Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:03.104490Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1093: Consumer error: Empty message payload
+2025-07-16T09:15:03.633295Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:03.633502Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1097: Consumer error: Empty message payload
+2025-07-16T09:15:04.145151Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:04.145515Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1099: Consumer error: Empty message payload
+2025-07-16T09:15:04.672338Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:04.672810Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1102: Consumer error: Empty message payload
+2025-07-16T09:15:05.187830Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:05.188181Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1104: Consumer error: Empty message payload
+2025-07-16T09:15:05.708489Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:05.708888Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1107: Consumer error: Empty message payload
+2025-07-16T09:15:06.242635Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:06.242781Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1112: Consumer error: Empty message payload
+2025-07-16T09:15:06.776532Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:06.776719Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1117: Consumer error: Empty message payload
+2025-07-16T09:15:07.296800Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:07.297176Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1120: Consumer error: Empty message payload
+2025-07-16T09:15:07.807071Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:07.807519Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1122: Consumer error: Empty message payload
+2025-07-16T09:15:08.317073Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:08.317207Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1125: Consumer error: Empty message payload
+2025-07-16T09:15:08.829001Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:08.829120Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1128: Consumer error: Empty message payload
+2025-07-16T09:15:09.349585Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:09.349719Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1133: Consumer error: Empty message payload
+2025-07-16T09:15:09.914499Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:09.914596Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1146: Consumer error: Empty message payload
+2025-07-16T09:15:10.424717Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:10.425000Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1148: Consumer error: Empty message payload
+2025-07-16T09:15:10.940519Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:10.940648Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1153: Consumer error: Empty message payload
+2025-07-16T09:15:11.462679Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:11.462812Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1159: Consumer error: Empty message payload
+2025-07-16T09:15:12.005586Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:12.005758Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1165: Consumer error: Empty message payload
+2025-07-16T09:15:12.514882Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:12.514991Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1168: Consumer error: Empty message payload
+2025-07-16T09:15:13.030671Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:13.031079Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1169: Consumer error: Empty message payload
+2025-07-16T09:15:13.549840Z ERROR ThreadId(08) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:13.549976Z ERROR ThreadId(08) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1174: Consumer error: Empty message payload
+2025-07-16T09:15:14.091255Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:14.091462Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1180: Consumer error: Empty message payload
+2025-07-16T09:15:14.603396Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:14.603499Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1183: Consumer error: Empty message payload
+2025-07-16T09:15:15.125475Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:15.125782Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1186: Consumer error: Empty message payload
+2025-07-16T09:15:15.645341Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:15.645778Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1189: Consumer error: Empty message payload
+2025-07-16T09:15:16.201771Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:16.201889Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1192: Consumer error: Empty message payload
+2025-07-16T09:15:16.732145Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:16.732587Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1196: Consumer error: Empty message payload
+2025-07-16T09:15:17.242369Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:17.242533Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1199: Consumer error: Empty message payload
+2025-07-16T09:15:17.751810Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:17.751898Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1202: Consumer error: Empty message payload
+2025-07-16T09:15:18.281822Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:18.282171Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1207: Consumer error: Empty message payload
+2025-07-16T09:15:18.815622Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:18.815965Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1212: Consumer error: Empty message payload
+2025-07-16T09:15:19.334565Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:19.334800Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1216: Consumer error: Empty message payload
+2025-07-16T09:15:19.869900Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:19.870144Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1221: Consumer error: Empty message payload
+2025-07-16T09:15:20.389495Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:20.389623Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1227: Consumer error: Empty message payload
+2025-07-16T09:15:20.943091Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:20.943225Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1233: Consumer error: Empty message payload
+2025-07-16T09:15:21.450519Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:21.450606Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1236: Consumer error: Empty message payload
+2025-07-16T09:15:22.000917Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:22.001055Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1244: Consumer error: Empty message payload
+2025-07-16T09:15:22.535691Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:22.535892Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1249: Consumer error: Empty message payload
+2025-07-16T09:15:23.044272Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:23.044378Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1252: Consumer error: Empty message payload
+2025-07-16T09:15:23.568036Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:23.568455Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1255: Consumer error: Empty message payload
+2025-07-16T09:15:24.100662Z ERROR ThreadId(09) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:24.100825Z ERROR ThreadId(09) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1258: Consumer error: Empty message payload
+2025-07-16T09:15:24.642577Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:24.642858Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1262: Consumer error: Empty message payload
+2025-07-16T09:15:25.176828Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:25.176944Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1269: Consumer error: Empty message payload
+2025-07-16T09:15:25.696014Z ERROR ThreadId(02) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:25.696149Z ERROR ThreadId(02) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1272: Consumer error: Empty message payload
+2025-07-16T09:15:26.216826Z ERROR ThreadId(07) src/infrastructure/kafka_abstraction.rs:688: KafkaConsumer: poll_cdc_events_with_message - Empty message payload
+2025-07-16T09:15:26.216918Z ERROR ThreadId(07) src/infrastructure/cdc_debezium.rs:629: CDCConsumer: ❌ Error polling CDC message on poll #1276: Consumer error: Empty message payload
