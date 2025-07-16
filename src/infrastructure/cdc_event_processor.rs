@@ -1,4 +1,5 @@
 use crate::infrastructure::cache_service::CacheServiceTrait;
+use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
@@ -143,51 +144,6 @@ impl ProcessableEvent {
         self.domain_event
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Domain event not deserialized"))
-    }
-}
-
-// High-performance metrics with atomic operations and business metrics
-#[derive(Debug, Default)]
-pub struct OptimizedCDCMetrics {
-    pub events_processed: std::sync::atomic::AtomicU64,
-    pub events_failed: std::sync::atomic::AtomicU64,
-    pub batches_processed: std::sync::atomic::AtomicU64,
-    pub avg_processing_latency_ms: std::sync::atomic::AtomicU64,
-    pub projection_cache_hits: std::sync::atomic::AtomicU64,
-    pub projection_cache_misses: std::sync::atomic::AtomicU64,
-    pub circuit_breaker_trips: std::sync::atomic::AtomicU64,
-    pub memory_usage_bytes: std::sync::atomic::AtomicU64,
-    pub active_goroutines: std::sync::atomic::AtomicU64,
-    pub business_validation_failures: std::sync::atomic::AtomicU64,
-    pub duplicate_events_skipped: std::sync::atomic::AtomicU64,
-    pub projection_update_failures: std::sync::atomic::AtomicU64,
-    pub cache_invalidation_failures: std::sync::atomic::AtomicU64,
-}
-
-impl OptimizedCDCMetrics {
-    pub fn record_processing_time(&self, duration_ms: u64) {
-        // Simple exponential moving average
-        let current = self
-            .avg_processing_latency_ms
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let new_avg = if current == 0 {
-            duration_ms
-        } else {
-            // Weight: 90% historical, 10% new
-            (current * 9 + duration_ms) / 10
-        };
-        self.avg_processing_latency_ms
-            .store(new_avg, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn record_business_validation_failure(&self) {
-        self.business_validation_failures
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn record_duplicate_skip(&self) {
-        self.duplicate_events_skipped
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -388,7 +344,7 @@ pub struct UltraOptimizedCDCEventProcessor {
     retry_backoff_ms: u64,
     cache_service: Arc<dyn CacheServiceTrait>,
     projection_store: Arc<dyn ProjectionStoreTrait>,
-    metrics: Arc<OptimizedCDCMetrics>,
+    metrics: Arc<EnhancedCDCMetrics>,
 
     // High-performance processing
     processing_semaphore: Arc<Semaphore>,
@@ -463,11 +419,13 @@ impl UltraOptimizedCDCEventProcessor {
         kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
         cache_service: Arc<dyn CacheServiceTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
+        metrics: Arc<EnhancedCDCMetrics>, // <-- accept as parameter
         business_config: Option<BusinessLogicConfig>,
     ) -> Self {
+        // 1. Increase cache size and TTL
         let projection_cache = Arc::new(Mutex::new(ProjectionCache::new(
-            10000,                    // Max 10k cached projections
-            Duration::from_secs(300), // 5 minute TTL
+            50000,                     // Max 50k cached projections
+            Duration::from_secs(1800), // 30 minute TTL
         )));
         Self {
             kafka_producer: kafka_producer.clone(),
@@ -476,11 +434,11 @@ impl UltraOptimizedCDCEventProcessor {
             retry_backoff_ms: 100,
             cache_service,
             projection_store,
-            metrics: Arc::new(OptimizedCDCMetrics::default()),
+            metrics,                                             // <-- use the provided Arc
             processing_semaphore: Arc::new(Semaphore::new(100)), // Increased concurrency
             batch_queue: Arc::new(Mutex::new(Vec::with_capacity(1000))),
-            batch_size: 50,                           // Optimized batch size
-            batch_timeout: Duration::from_millis(10), // Aggressive batching
+            batch_size: 200,                         // Increased batch size
+            batch_timeout: Duration::from_millis(5), // Reduced batch timeout
             circuit_breaker: CircuitBreaker::new(),
             projection_cache,
             batch_processor_handle: None,
@@ -500,6 +458,7 @@ impl UltraOptimizedCDCEventProcessor {
         let batch_queue = Arc::clone(&self.batch_queue);
         let projection_store = Arc::clone(&self.projection_store);
         let projection_cache = Arc::clone(&self.projection_cache);
+        let cache_service = Arc::clone(&self.cache_service);
         let metrics = Arc::clone(&self.metrics);
         let batch_size = self.batch_size;
         let batch_timeout = self.batch_timeout;
@@ -513,6 +472,7 @@ impl UltraOptimizedCDCEventProcessor {
                             &batch_queue,
                             &projection_store,
                             &projection_cache,
+                            &cache_service,
                             &metrics,
                             batch_size,
                         ).await {
@@ -574,7 +534,9 @@ impl UltraOptimizedCDCEventProcessor {
             }
         }
         let processing_time = start_time.elapsed().as_millis() as u64;
-        self.metrics.record_processing_time(processing_time);
+        self.metrics
+            .processing_latency_ms
+            .fetch_add(processing_time, std::sync::atomic::Ordering::Relaxed);
         self.metrics
             .events_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -585,7 +547,9 @@ impl UltraOptimizedCDCEventProcessor {
         // Business logic validation
         if self.business_config.enable_validation {
             if let Err(e) = self.validate_business_logic(processable_event).await {
-                self.metrics.record_business_validation_failure();
+                self.metrics
+                    .events_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 error!(
                     "Business validation failed for event {}: {}",
                     processable_event.event_id, e
@@ -599,7 +563,9 @@ impl UltraOptimizedCDCEventProcessor {
             if cache_guard
                 .is_duplicate_event(&processable_event.event_id, &processable_event.aggregate_id)
             {
-                self.metrics.record_duplicate_skip();
+                self.metrics
+                    .consecutive_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 debug!("Skipping duplicate event: {}", processable_event.event_id);
                 return Ok(());
             }
@@ -660,6 +626,7 @@ impl UltraOptimizedCDCEventProcessor {
             &self.batch_queue,
             &self.projection_store,
             &self.projection_cache,
+            &self.cache_service,
             &self.metrics,
             self.batch_size,
         )
@@ -671,7 +638,8 @@ impl UltraOptimizedCDCEventProcessor {
         batch_queue: &Arc<Mutex<Vec<ProcessableEvent>>>,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         projection_cache: &Arc<Mutex<ProjectionCache>>,
-        metrics: &Arc<OptimizedCDCMetrics>,
+        cache_service: &Arc<dyn CacheServiceTrait>,
+        metrics: &Arc<EnhancedCDCMetrics>,
         batch_size: usize,
     ) -> Result<()> {
         let events = {
@@ -706,6 +674,7 @@ impl UltraOptimizedCDCEventProcessor {
         for (aggregate_id, aggregate_events) in events_by_aggregate {
             let mut projection = Self::get_or_load_projection(
                 &mut cache_guard,
+                cache_service,
                 projection_store,
                 aggregate_id,
                 metrics,
@@ -720,7 +689,7 @@ impl UltraOptimizedCDCEventProcessor {
                         event.event_id, e
                     );
                     metrics
-                        .projection_update_failures
+                        .events_failed
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue; // Skip this event but continue processing others
                 }
@@ -736,17 +705,52 @@ impl UltraOptimizedCDCEventProcessor {
 
         drop(cache_guard);
 
-        // Bulk update projections in database
+        // Bulk update projections in database in parallel chunks
         if !updated_projections.is_empty() {
-            if let Err(e) = projection_store
-                .upsert_accounts_batch(updated_projections)
-                .await
-            {
-                error!("Failed to bulk update projections: {}", e);
-                metrics
-                    .projection_update_failures
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Err(e);
+            const MAX_CONCURRENT_UPSERTS: usize = 4; // Tune as needed
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_UPSERTS));
+            let chunk_count = 8; // Number of parallel chunks
+            let chunk_size = (updated_projections.len() + chunk_count - 1) / chunk_count;
+            let mut tasks = Vec::new();
+            for chunk in updated_projections.chunks(chunk_size) {
+                let store = projection_store.clone();
+                let chunk_vec = chunk.to_vec();
+                let semaphore = semaphore.clone();
+                tasks.push(tokio::spawn(async move {
+                    let _permit = semaphore.acquire().await;
+                    store.upsert_accounts_batch(chunk_vec).await
+                }));
+            }
+            // Await all upsert tasks
+            let upsert_start = Instant::now();
+            let results = futures::future::join_all(tasks).await;
+            let upsert_time = upsert_start.elapsed().as_millis() as u64;
+            tracing::info!(
+                "Parallel upsert of {} projections in {}ms",
+                updated_projections.len(),
+                upsert_time
+            );
+            for res in results {
+                match res {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        error!("Failed to bulk update projections in chunk: {}", e);
+                        metrics
+                            .events_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Err(anyhow::anyhow!(
+                            "Failed to bulk update projections in chunk: {}",
+                            e
+                        ));
+                    }
+                    Err(e) => {
+                        error!("Join error in parallel upsert: {}", e);
+                        metrics
+                            .events_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Err(anyhow::anyhow!("Join error in parallel upsert: {}", e));
+                    }
+                }
             }
         }
 
@@ -756,9 +760,10 @@ impl UltraOptimizedCDCEventProcessor {
             .batches_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        debug!(
+        tracing::debug!(
             "Processed batch of {} events in {}ms",
-            events_count, batch_time
+            events_count,
+            batch_time
         );
 
         Ok(())
@@ -767,24 +772,45 @@ impl UltraOptimizedCDCEventProcessor {
     /// Get projection from cache or load from database
     async fn get_or_load_projection(
         cache: &mut ProjectionCache,
+        cache_service: &Arc<dyn CacheServiceTrait>,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         aggregate_id: Uuid,
-        metrics: &Arc<OptimizedCDCMetrics>,
+        metrics: &Arc<EnhancedCDCMetrics>,
     ) -> Result<ProjectionCacheEntry> {
+        // L1 cache check
         if let Some(cached) = cache.get(&aggregate_id) {
             metrics
-                .projection_cache_hits
+                .batches_processed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::debug!("ProjectionCache: L1 cache hit for {}", aggregate_id);
             return Ok(cached.clone());
         }
-
         metrics
-            .projection_cache_misses
+            .batches_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
+        tracing::debug!("ProjectionCache: L1 cache miss for {}", aggregate_id);
+        // L2 (Redis) cache check
+        if let Ok(Some(redis_proj)) = cache_service.get_account(aggregate_id).await {
+            tracing::debug!("ProjectionCache: L2 (Redis) cache hit for {}", aggregate_id);
+            // Populate L1
+            let entry = ProjectionCacheEntry {
+                balance: redis_proj.balance,
+                owner_name: redis_proj.owner_name,
+                is_active: redis_proj.is_active,
+                version: 1,
+                cached_at: Instant::now(),
+                last_event_id: None,
+            };
+            cache.put(aggregate_id, entry.clone());
+            return Ok(entry);
+        } else {
+            tracing::debug!(
+                "ProjectionCache: L2 (Redis) cache miss for {}",
+                aggregate_id
+            );
+        }
         // Load from database
         let db_projection = projection_store.get_account(aggregate_id).await?;
-
         let cache_entry = if let Some(proj) = db_projection {
             ProjectionCacheEntry {
                 balance: proj.balance,
@@ -795,7 +821,6 @@ impl UltraOptimizedCDCEventProcessor {
                 last_event_id: None,
             }
         } else {
-            // New projection
             ProjectionCacheEntry {
                 balance: Decimal::ZERO,
                 owner_name: String::new(),
@@ -805,7 +830,18 @@ impl UltraOptimizedCDCEventProcessor {
                 last_event_id: None,
             }
         };
-
+        // Populate both Redis and L1
+        // Convert AccountProjection to Account for cache_service
+        let account = crate::domain::Account {
+            id: aggregate_id,
+            owner_name: cache_entry.owner_name.clone(),
+            balance: cache_entry.balance,
+            is_active: cache_entry.is_active,
+            version: 1, // or use a version if available
+        };
+        let _ = cache_service
+            .set_account(&account, Some(Duration::from_secs(1800)))
+            .await;
         cache.put(aggregate_id, cache_entry.clone());
         Ok(cache_entry)
     }
@@ -899,7 +935,7 @@ impl UltraOptimizedCDCEventProcessor {
     }
 
     /// Get comprehensive metrics
-    pub async fn get_metrics(&self) -> OptimizedCDCMetrics {
+    pub async fn get_metrics(&self) -> EnhancedCDCMetrics {
         let cache_guard = self.projection_cache.lock().await;
         let memory_usage = cache_guard.memory_usage();
         drop(cache_guard);
@@ -909,7 +945,7 @@ impl UltraOptimizedCDCEventProcessor {
             .store(memory_usage as u64, std::sync::atomic::Ordering::Relaxed);
 
         // Create a copy of metrics for external use
-        OptimizedCDCMetrics {
+        EnhancedCDCMetrics {
             events_processed: std::sync::atomic::AtomicU64::new(
                 self.metrics
                     .events_processed
@@ -920,24 +956,29 @@ impl UltraOptimizedCDCEventProcessor {
                     .events_failed
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
+            processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            total_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .total_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            cache_invalidations: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .cache_invalidations
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            projection_updates: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .projection_updates
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
             batches_processed: std::sync::atomic::AtomicU64::new(
                 self.metrics
                     .batches_processed
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            avg_processing_latency_ms: std::sync::atomic::AtomicU64::new(
-                self.metrics
-                    .avg_processing_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            projection_cache_hits: std::sync::atomic::AtomicU64::new(
-                self.metrics
-                    .projection_cache_hits
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            projection_cache_misses: std::sync::atomic::AtomicU64::new(
-                self.metrics
-                    .projection_cache_misses
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
             circuit_breaker_trips: std::sync::atomic::AtomicU64::new(
@@ -945,26 +986,65 @@ impl UltraOptimizedCDCEventProcessor {
                     .circuit_breaker_trips
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
+            consumer_restarts: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .consumer_restarts
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            cleanup_cycles: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .cleanup_cycles
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
             memory_usage_bytes: std::sync::atomic::AtomicU64::new(memory_usage as u64),
-            active_goroutines: std::sync::atomic::AtomicU64::new(0),
-            business_validation_failures: std::sync::atomic::AtomicU64::new(
+            active_connections: std::sync::atomic::AtomicU64::new(
                 self.metrics
-                    .business_validation_failures
+                    .active_connections
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
-            duplicate_events_skipped: std::sync::atomic::AtomicU64::new(
+            queue_depth: std::sync::atomic::AtomicU64::new(
                 self.metrics
-                    .duplicate_events_skipped
+                    .queue_depth
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
-            projection_update_failures: std::sync::atomic::AtomicU64::new(
+            avg_batch_size: std::sync::atomic::AtomicU64::new(
                 self.metrics
-                    .projection_update_failures
+                    .avg_batch_size
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
-            cache_invalidation_failures: std::sync::atomic::AtomicU64::new(
+            p95_processing_latency_ms: std::sync::atomic::AtomicU64::new(
                 self.metrics
-                    .cache_invalidation_failures
+                    .p95_processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            p99_processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .p99_processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            throughput_per_second: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .throughput_per_second
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            consecutive_failures: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .consecutive_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            last_error_time: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .last_error_time
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            error_rate: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .error_rate
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            integration_helper_initialized: std::sync::atomic::AtomicBool::new(
+                self.metrics
+                    .integration_helper_initialized
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
         }

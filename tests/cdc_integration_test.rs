@@ -4,7 +4,7 @@ use banking_es::{
     infrastructure::{
         cache_service::{CacheConfig, CacheService, CacheServiceTrait},
         cdc_debezium::{CDCOutboxRepository, DebeziumConfig},
-        cdc_service_manager::CDCServiceManager,
+        cdc_service_manager::{CDCServiceManager, EnhancedCDCMetrics},
         event_store::{EventStore, EventStoreTrait},
         projections::{ProjectionStore, ProjectionStoreTrait},
         redis_abstraction::RealRedisClient,
@@ -28,6 +28,7 @@ use uuid::Uuid;
 #[tokio::test]
 #[ignore] // Ignored by default - requires full CDC setup
 async fn test_real_cdc_pipeline() {
+    let _ = tracing_subscriber::fmt::try_init();
     tracing::info!("🧪 Testing REAL CDC pipeline with Debezium...");
 
     // Check if CDC environment is available
@@ -57,7 +58,7 @@ async fn test_real_cdc_pipeline() {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Verify CDC metrics show processing
-        let cdc_metrics = context.cdc_service_manager.get_metrics();
+        let cdc_metrics = &context.metrics;
         let events_processed = cdc_metrics
             .events_processed
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -121,6 +122,7 @@ async fn test_real_cdc_pipeline() {
 #[tokio::test]
 // #[ignore]
 async fn test_cdc_consumer_connection() {
+    let _ = tracing_subscriber::fmt::try_init();
     tracing::info!("🔍 Testing CDC consumer connection...");
 
     // Check if CDC environment is available
@@ -278,6 +280,7 @@ struct RealCDCTestContext {
     cqrs_service: Arc<CQRSAccountService>,
     db_pool: PgPool,
     cdc_service_manager: CDCServiceManager,
+    metrics: Arc<EnhancedCDCMetrics>, // <-- add this field
 }
 
 async fn setup_real_cdc_test_environment(
@@ -288,13 +291,16 @@ async fn setup_real_cdc_test_environment(
     });
 
     let pool = PgPoolOptions::new()
-        .max_connections(50)
-        .min_connections(10)
+        .max_connections(500)
+        .min_connections(100)
         .acquire_timeout(Duration::from_secs(10))
         .idle_timeout(Duration::from_secs(1800))
         .max_lifetime(Duration::from_secs(3600))
+        .test_before_acquire(true)
         .connect(&database_url)
         .await?;
+
+    tracing::info!("✅ Database connection established successfully");
 
     // Initialize Redis client
     let redis_url =
@@ -307,11 +313,21 @@ async fn setup_real_cdc_test_environment(
     let projection_store =
         Arc::new(ProjectionStore::new(pool.clone())) as Arc<dyn ProjectionStoreTrait + 'static>;
 
-    let cache_config = CacheConfig::default();
+    let mut cache_config = CacheConfig::default();
+    cache_config.default_ttl = Duration::from_secs(1800); // Reduced TTL
+    cache_config.max_size = 10000; // Reduced cache size to prevent memory issues
+    cache_config.shard_count = 64; // Reduced shard count to prevent excessive memory usage
+    cache_config.warmup_batch_size = 100; // Reduced batch size
+    cache_config.warmup_interval = Duration::from_secs(1); // Faster warmup interval
+
     let cache_service = Arc::new(CacheService::new(redis_client_trait, cache_config))
         as Arc<dyn CacheServiceTrait + 'static>;
 
-    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    // Use a static group_id for debugging
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig {
+        group_id: "test-cdc-debug".to_string(),
+        ..banking_es::infrastructure::kafka_abstraction::KafkaConfig::default()
+    };
 
     // Create CQRS service
     let cqrs_service = Arc::new(CQRSAccountService::new(
@@ -332,6 +348,7 @@ async fn setup_real_cdc_test_environment(
         banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config)?;
 
     let cdc_config = DebeziumConfig::default();
+    let metrics = Arc::new(EnhancedCDCMetrics::default()); // <-- create metrics Arc
     let mut cdc_service_manager = CDCServiceManager::new(
         cdc_config,
         cdc_outbox_repo,
@@ -339,6 +356,7 @@ async fn setup_real_cdc_test_environment(
         kafka_consumer,
         cache_service,
         projection_store,
+        Some(metrics.clone()), // <-- pass metrics Arc
     )?;
 
     // Start REAL CDC service
@@ -352,6 +370,7 @@ async fn setup_real_cdc_test_environment(
         cqrs_service,
         db_pool: pool,
         cdc_service_manager,
+        metrics, // <-- store metrics Arc
     })
 }
 
@@ -364,6 +383,8 @@ async fn setup_real_cdc_test_environment(
 #[tokio::test]
 // #[ignore] // Ignored by default - requires full CDC setup
 async fn test_real_cdc_high_throughput_performance() {
+    let _ = tracing_subscriber::fmt::try_init();
+    println!("TEST STARTED: logging initialized");
     tracing::info!("🚀 Starting REAL CDC high throughput performance test...");
 
     // Check if CDC environment is available
@@ -400,7 +421,24 @@ async fn test_real_cdc_high_throughput_performance() {
 
         // Wait for CDC to process all account creation events
         tracing::info!("⏳ Waiting for CDC to process account creation events...");
-        tokio::time::sleep(Duration::from_secs(5)).await; // Reduced wait time for high throughput
+        let mut waited = 0;
+        let max_wait = 60; // seconds
+        loop {
+            let cdc_metrics = &context.metrics;
+            let events_processed = cdc_metrics
+                .events_processed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if events_processed > 0 || waited >= max_wait {
+                tracing::info!(
+                    "📊 CDC Metrics after waiting: events_processed={}, waited={}s",
+                    events_processed,
+                    waited
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            waited += 2;
+        }
 
         // Check if events were inserted into the CDC outbox table
         tracing::info!("🔍 Checking CDC outbox table for events...");
@@ -408,7 +446,7 @@ async fn test_real_cdc_high_throughput_performance() {
         tracing::info!("📊 CDC outbox table contains {} events", outbox_count);
 
         // Verify CDC metrics show processing
-        let cdc_metrics = context.cdc_service_manager.get_metrics();
+        let cdc_metrics = &context.metrics;
         let events_processed = cdc_metrics
             .events_processed
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -579,7 +617,7 @@ async fn test_real_cdc_high_throughput_performance() {
         }
 
         // Final CDC metrics
-        let final_cdc_metrics = context.cdc_service_manager.get_metrics();
+        let final_cdc_metrics = &context.metrics;
         let final_events_processed = final_cdc_metrics
             .events_processed
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -787,6 +825,7 @@ async fn test_real_cdc_high_throughput_performance() {
 #[tokio::test]
 #[ignore] // Ignored by default - requires full CDC setup
 async fn test_cdc_performance_comparison() {
+    let _ = tracing_subscriber::fmt::try_init();
     tracing::info!("🔬 Starting CDC Performance Comparison Test...");
 
     let test_future = async {
@@ -1655,17 +1694,19 @@ struct TestCDCTestContext {
 
 // Test-specific CDC service manager for high-performance testing
 struct TestCDCServiceManager {
-    metrics: Arc<banking_es::infrastructure::cdc_debezium::CDCMetrics>,
+    metrics: Arc<banking_es::infrastructure::cdc_service_manager::EnhancedCDCMetrics>,
 }
 
 impl TestCDCServiceManager {
     fn new() -> Self {
         Self {
-            metrics: Arc::new(banking_es::infrastructure::cdc_debezium::CDCMetrics::default()),
+            metrics: Arc::new(
+                banking_es::infrastructure::cdc_service_manager::EnhancedCDCMetrics::default(),
+            ),
         }
     }
 
-    fn get_metrics(&self) -> &banking_es::infrastructure::cdc_debezium::CDCMetrics {
+    fn get_metrics(&self) -> &banking_es::infrastructure::cdc_service_manager::EnhancedCDCMetrics {
         &self.metrics
     }
 }

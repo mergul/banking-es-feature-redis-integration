@@ -1,7 +1,6 @@
 use crate::infrastructure::cache_service::CacheServiceTrait;
-use crate::infrastructure::cdc_debezium::{
-    CDCConsumer, CDCEventProcessor, CDCOutboxRepository, DebeziumConfig,
-};
+use crate::infrastructure::cdc_debezium::{CDCConsumer, CDCOutboxRepository, DebeziumConfig};
+use crate::infrastructure::cdc_event_processor::UltraOptimizedCDCEventProcessor;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
@@ -20,7 +19,7 @@ use uuid::Uuid;
 pub struct CDCServiceManager {
     config: DebeziumConfig,
     outbox_repo: Arc<CDCOutboxRepository>,
-    processor: Arc<CDCEventProcessor>,
+    processor: Arc<UltraOptimizedCDCEventProcessor>,
 
     // Enhanced shutdown management
     shutdown_tx: watch::Sender<bool>,
@@ -127,21 +126,19 @@ impl CDCServiceManager {
         kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
         cache_service: Arc<dyn CacheServiceTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
+        metrics: Option<Arc<EnhancedCDCMetrics>>, // <-- add this param
     ) -> Result<Self> {
         let optimization_config = OptimizationConfig::default();
-
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let metrics = Arc::new(EnhancedCDCMetrics::default());
+        let metrics = metrics.unwrap_or_else(|| Arc::new(EnhancedCDCMetrics::default()));
         let health_checker = Arc::new(CDCHealthCheck::new(metrics.clone()));
-
-        let processor = Arc::new(CDCEventProcessor::new(
+        let processor = Arc::new(UltraOptimizedCDCEventProcessor::new(
             kafka_producer,
             cache_service,
             projection_store,
+            metrics.clone(), // <-- pass shared metrics Arc
             None,
         ));
-
         Ok(Self {
             config,
             outbox_repo,

@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
         kafka_consumer,
         cache_service,
         projection_store,
+        None, // <-- pass None for metrics in production
     )?;
 
     // 4. Start the CDC Service

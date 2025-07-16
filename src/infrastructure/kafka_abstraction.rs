@@ -480,7 +480,10 @@ impl KafkaConsumer {
             .set("partition.assignment.strategy", "cooperative-sticky")
             .create_with_context(context)?;
 
-        tracing::info!("KafkaConsumer: ✅ Consumer created successfully");
+        tracing::info!(
+            "KafkaConsumer: ✅ Consumer created successfully with group_id: {}",
+            config.group_id
+        );
         Ok(Self {
             consumer: Some(Arc::new(consumer)),
             config,
@@ -505,25 +508,27 @@ impl KafkaConsumer {
     pub async fn subscribe_to_topic(&self, topic: &str) -> Result<(), BankingKafkaError> {
         if !self.config.enabled || self.consumer.is_none() {
             tracing::warn!(
-                "KafkaConsumer: subscribe_to_topic - Kafka disabled or no consumer for topic: {}",
-                topic
+                "KafkaConsumer: subscribe_to_topic - Kafka disabled or no consumer for topic: {} (group_id: {})",
+                topic, self.config.group_id
             );
             return Ok(());
         }
 
         tracing::info!(
-            "KafkaConsumer: subscribe_to_topic - Subscribing to topic: {}",
-            topic
+            "KafkaConsumer: subscribe_to_topic - Subscribing to topic: {} with group_id: {}",
+            topic,
+            self.config.group_id
         );
         let result = self.consumer.as_ref().unwrap().subscribe(&[topic]);
         match &result {
             Ok(_) => tracing::info!(
-                "KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: {}",
-                topic
+                "KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: {} with group_id: {}",
+                topic, self.config.group_id
             ),
             Err(e) => tracing::error!(
-                "KafkaConsumer: subscribe_to_topic - Failed to subscribe to topic {}: {}",
+                "KafkaConsumer: subscribe_to_topic - Failed to subscribe to topic {} with group_id {}: {}",
                 topic,
+                self.config.group_id,
                 e
             ),
         }

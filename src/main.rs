@@ -171,6 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kafka_consumer_for_cdc,
             service_context.cache_service.clone(),
             service_context.projection_store.clone(),
+            None, // <-- pass None for metrics in production
         )?;
 
         // Start CDC service

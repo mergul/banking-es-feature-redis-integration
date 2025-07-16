@@ -23,6 +23,7 @@ use crate::infrastructure::cdc_integration_helper::{
     MigrationIntegrityReport, MigrationStats,
 };
 use crate::infrastructure::cdc_producer::{BusinessLogicValidator, CDCProducer, CDCProducerConfig};
+use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::event_processor::EventProcessor;
 
 /// Kafka message structure for CDC events
@@ -314,40 +315,32 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
 }
 
 /// Enhanced CDC Event Processor - now uses the optimized processor
-pub struct CDCEventProcessor {
+pub struct EnhancedCDCEventProcessor {
     // Use the optimized event processor
     optimized_processor: UltraOptimizedCDCEventProcessor,
     // Keep the old metrics for backward compatibility
-    metrics: Arc<CDCMetrics>,
+    metrics: Arc<EnhancedCDCMetrics>,
 }
 
-#[derive(Debug, Default)]
-pub struct CDCMetrics {
-    pub events_processed: std::sync::atomic::AtomicU64,
-    pub events_failed: std::sync::atomic::AtomicU64,
-    pub processing_latency_ms: std::sync::atomic::AtomicU64,
-    pub total_latency_ms: std::sync::atomic::AtomicU64,
-    pub cache_invalidations: std::sync::atomic::AtomicU64,
-    pub projection_updates: std::sync::atomic::AtomicU64,
-}
-
-impl CDCEventProcessor {
+impl EnhancedCDCEventProcessor {
     pub fn new(
         kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
         cache_service: Arc<dyn CacheServiceTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
         business_config: Option<BusinessLogicConfig>,
     ) -> Self {
+        let metrics = Arc::new(EnhancedCDCMetrics::default());
         let optimized_processor = UltraOptimizedCDCEventProcessor::new(
             kafka_producer,
             cache_service,
             projection_store,
+            metrics.clone(), // <-- pass metrics as required
             business_config,
         );
 
         Self {
             optimized_processor,
-            metrics: Arc::new(CDCMetrics::default()),
+            metrics,
         }
     }
 
@@ -395,12 +388,12 @@ impl CDCEventProcessor {
     /// Get metrics from the optimized processor
     pub async fn get_optimized_metrics(
         &self,
-    ) -> crate::infrastructure::cdc_event_processor::OptimizedCDCMetrics {
+    ) -> crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics {
         self.optimized_processor.get_metrics().await
     }
 
     /// Get legacy metrics for backward compatibility
-    pub fn get_metrics(&self) -> &CDCMetrics {
+    pub fn get_metrics(&self) -> &EnhancedCDCMetrics {
         &self.metrics
     }
 
@@ -426,7 +419,7 @@ impl CDCEventProcessor {
 }
 
 #[async_trait]
-impl EventProcessor for CDCEventProcessor {
+impl EventProcessor for EnhancedCDCEventProcessor {
     async fn process_event(&self, event: serde_json::Value) -> Result<()> {
         self.process_cdc_event(event).await
     }
@@ -450,7 +443,10 @@ impl CDCConsumer {
     }
 
     /// Start consuming CDC events
-    pub async fn start_consuming(&mut self, processor: Arc<CDCEventProcessor>) -> Result<()> {
+    pub async fn start_consuming(
+        &mut self,
+        processor: Arc<EnhancedCDCEventProcessor>,
+    ) -> Result<()> {
         // This method is kept for backward compatibility but should not be used
         // Use start_consuming_with_mutex directly
         Err(anyhow::anyhow!("Use start_consuming_with_mutex instead"))
@@ -459,7 +455,7 @@ impl CDCConsumer {
     /// Start consuming CDC events with mutex-wrapped processor
     pub async fn start_consuming_with_mutex(
         &mut self,
-        processor: Arc<CDCEventProcessor>,
+        processor: Arc<UltraOptimizedCDCEventProcessor>,
         mut shutdown_rx: mpsc::Receiver<()>,
     ) -> Result<()> {
         tracing::info!(
@@ -583,7 +579,7 @@ impl CDCConsumer {
                             tracing::info!("CDCConsumer: 📊 Message details - Topic: {:?}, Partition: {:?}, Offset: {:?}",
                                 message.topic(), message.partition(), message.offset());
 
-                            match processor.process_cdc_event(cdc_event).await {
+                            match processor.process_cdc_event_ultra_fast(cdc_event).await {
                                 Ok(_) => {
                                 tracing::info!("CDCConsumer: ✅ Successfully processed CDC event on poll #{}", poll_count);
                                     // CRITICAL: Commit offset after successful processing
@@ -600,7 +596,7 @@ impl CDCConsumer {
                                     tracing::error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
 
                                     // Send to DLQ
-                                    if let Err(dlq_err) = processor.optimized_processor.send_to_dlq_from_cdc(&message, &e.to_string()).await {
+                                    if let Err(dlq_err) = processor.send_to_dlq_from_cdc(&message, &e.to_string()).await {
                                         error!("CDCConsumer: ❌ Failed to send message to DLQ: {}", dlq_err);
                                     }
                                 }
@@ -646,7 +642,7 @@ impl CDCConsumer {
     async fn process_cdc_message(
         &self,
         message: crate::infrastructure::kafka_abstraction::KafkaMessage,
-        processor: &Arc<tokio::sync::Mutex<CDCEventProcessor>>,
+        processor: &Arc<tokio::sync::Mutex<EnhancedCDCEventProcessor>>,
     ) -> Result<()> {
         // Parse CDC event from Kafka message
         let cdc_event: serde_json::Value = serde_json::from_slice(&message.payload)?;
@@ -660,13 +656,13 @@ impl CDCConsumer {
 
 /// Health check for CDC service
 pub struct CDCHealthCheck {
-    metrics: Arc<CDCMetrics>,
-    optimized_metrics: Option<crate::infrastructure::cdc_event_processor::OptimizedCDCMetrics>,
+    metrics: Arc<EnhancedCDCMetrics>,
+    optimized_metrics: Option<crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics>,
     producer_health: Option<crate::infrastructure::cdc_producer::HealthStatus>,
 }
 
 impl CDCHealthCheck {
-    pub fn new(metrics: Arc<CDCMetrics>) -> Self {
+    pub fn new(metrics: Arc<EnhancedCDCMetrics>) -> Self {
         Self {
             metrics,
             optimized_metrics: None,
@@ -676,7 +672,7 @@ impl CDCHealthCheck {
 
     pub fn with_optimized_metrics(
         mut self,
-        optimized_metrics: crate::infrastructure::cdc_event_processor::OptimizedCDCMetrics,
+        optimized_metrics: crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics,
     ) -> Self {
         self.optimized_metrics = Some(optimized_metrics);
         self
@@ -731,10 +727,27 @@ impl CDCHealthCheck {
         // Add optimized metrics if available
         if let Some(ref opt_metrics) = self.optimized_metrics {
             status["optimized_metrics"] = serde_json::json!({
-                "business_validation_failures": opt_metrics.business_validation_failures.load(std::sync::atomic::Ordering::Relaxed),
-                "duplicate_events_skipped": opt_metrics.duplicate_events_skipped.load(std::sync::atomic::Ordering::Relaxed),
-                "projection_update_failures": opt_metrics.projection_update_failures.load(std::sync::atomic::Ordering::Relaxed),
+                "events_failed": opt_metrics.events_failed.load(std::sync::atomic::Ordering::Relaxed),
+                "events_processed": opt_metrics.events_processed.load(std::sync::atomic::Ordering::Relaxed),
+                "processing_latency_ms": opt_metrics.processing_latency_ms.load(std::sync::atomic::Ordering::Relaxed),
+                "total_latency_ms": opt_metrics.total_latency_ms.load(std::sync::atomic::Ordering::Relaxed),
+                "cache_invalidations": opt_metrics.cache_invalidations.load(std::sync::atomic::Ordering::Relaxed),
+                "projection_updates": opt_metrics.projection_updates.load(std::sync::atomic::Ordering::Relaxed),
+                "batches_processed": opt_metrics.batches_processed.load(std::sync::atomic::Ordering::Relaxed),
+                "circuit_breaker_trips": opt_metrics.circuit_breaker_trips.load(std::sync::atomic::Ordering::Relaxed),
+                "consumer_restarts": opt_metrics.consumer_restarts.load(std::sync::atomic::Ordering::Relaxed),
+                "cleanup_cycles": opt_metrics.cleanup_cycles.load(std::sync::atomic::Ordering::Relaxed),
                 "memory_usage_bytes": opt_metrics.memory_usage_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                "active_connections": opt_metrics.active_connections.load(std::sync::atomic::Ordering::Relaxed),
+                "queue_depth": opt_metrics.queue_depth.load(std::sync::atomic::Ordering::Relaxed),
+                "avg_batch_size": opt_metrics.avg_batch_size.load(std::sync::atomic::Ordering::Relaxed),
+                "p95_processing_latency_ms": opt_metrics.p95_processing_latency_ms.load(std::sync::atomic::Ordering::Relaxed),
+                "p99_processing_latency_ms": opt_metrics.p99_processing_latency_ms.load(std::sync::atomic::Ordering::Relaxed),
+                "throughput_per_second": opt_metrics.throughput_per_second.load(std::sync::atomic::Ordering::Relaxed),
+                "error_rate": opt_metrics.error_rate.load(std::sync::atomic::Ordering::Relaxed),
+                "consecutive_failures": opt_metrics.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed),
+                "last_error_time": opt_metrics.last_error_time.load(std::sync::atomic::Ordering::Relaxed),
+                "integration_helper_initialized": opt_metrics.integration_helper_initialized.load(std::sync::atomic::Ordering::Relaxed),
             });
         }
 

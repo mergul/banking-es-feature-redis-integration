@@ -423,11 +423,14 @@ impl TestCDCService {
 struct TestCDCServiceManager;
 
 impl TestCDCServiceManager {
-    fn get_metrics(&self) -> &banking_es::infrastructure::cdc_debezium::CDCMetrics {
+    fn get_metrics(&self) -> &banking_es::infrastructure::cdc_service_manager::EnhancedCDCMetrics {
         // Return a static metrics instance for test compatibility
-        static METRICS: std::sync::OnceLock<banking_es::infrastructure::cdc_debezium::CDCMetrics> =
-            std::sync::OnceLock::new();
-        METRICS.get_or_init(|| banking_es::infrastructure::cdc_debezium::CDCMetrics::default())
+        static METRICS: std::sync::OnceLock<
+            banking_es::infrastructure::cdc_service_manager::EnhancedCDCMetrics,
+        > = std::sync::OnceLock::new();
+        METRICS.get_or_init(|| {
+            banking_es::infrastructure::cdc_service_manager::EnhancedCDCMetrics::default()
+        })
     }
 }
 
