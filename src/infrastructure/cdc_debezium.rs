@@ -488,7 +488,7 @@ impl CDCConsumer {
 
         // Subscribe to CDC topic with retry logic
         tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
-        let max_subscription_retries = 3;
+        let max_subscription_retries = 5; // Increased retries
         let mut subscription_retries = 0;
 
         loop {
@@ -506,7 +506,7 @@ impl CDCConsumer {
 
                     // Wait a moment for the consumer to join the group
                     tracing::info!("CDCConsumer: Waiting for consumer to join group...");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tokio::time::sleep(Duration::from_secs(5)).await; // Increased wait time
 
                     // Log consumer group status
                     tracing::info!("CDCConsumer: Consumer group join completed");
@@ -536,7 +536,7 @@ impl CDCConsumer {
                     }
 
                     // Wait before retry
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tokio::time::sleep(Duration::from_secs(5)).await; // Increased wait time
                 }
             }
         }
@@ -598,14 +598,18 @@ impl CDCConsumer {
                                 Err(e) => {
                                     error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
                                     tracing::error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
-                                    // Don't commit offset on failure - let it be retried
+
+                                    // Send to DLQ
+                                    if let Err(dlq_err) = processor.optimized_processor.send_to_dlq_from_cdc(&message, &e.to_string()).await {
+                                        error!("CDCConsumer: ❌ Failed to send message to DLQ: {}", dlq_err);
+                                    }
                                 }
                             }
                         }
                         Ok(None) => {
                             consecutive_empty_polls += 1;
                             if poll_count <= 10 || poll_count % 50 == 0 { // Log every 50th empty poll to avoid spam
-                                tracing::info!(
+                                tracing::debug!(
                                     "CDCConsumer: ⏳ No CDC event available on poll #{} for topic: {} (consecutive empty: {})",
                                     poll_count, self.cdc_topic, consecutive_empty_polls
                                 );
@@ -624,7 +628,7 @@ impl CDCConsumer {
                         Err(e) => {
                             tracing::error!("CDCConsumer: ❌ Error polling CDC message on poll #{}: {}", poll_count, e);
                             // Add delay on error to avoid tight error loops
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            tokio::time::sleep(Duration::from_millis(500)).await; // Increased delay
                         }
                     }
                 }

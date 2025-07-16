@@ -22,6 +22,7 @@ use futures::StreamExt;
 use rdkafka::{
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
     client::ClientContext,
+    consumer::{ConsumerContext, Rebalance},
     error::{KafkaError, KafkaResult, RDKafkaErrorCode},
     message::{Header, Headers, OwnedMessage},
     util::Timeout,
@@ -415,9 +416,33 @@ impl KafkaProducerTrait for KafkaProducer {
 
 #[derive(Clone)]
 pub struct KafkaConsumer {
-    consumer: Option<Arc<StreamConsumer>>,
+    consumer: Option<Arc<LoggingConsumer>>,
     config: KafkaConfig,
 }
+
+struct LoggingConsumerContext;
+
+impl ClientContext for LoggingConsumerContext {}
+
+impl ConsumerContext for LoggingConsumerContext {
+    fn pre_rebalance(
+        &self,
+        _consumer: &rdkafka::consumer::BaseConsumer<Self>,
+        rebalance: &Rebalance,
+    ) {
+        tracing::info!("Pre-rebalance: {:?}", rebalance);
+    }
+
+    fn post_rebalance(
+        &self,
+        _consumer: &rdkafka::consumer::BaseConsumer<Self>,
+        rebalance: &Rebalance,
+    ) {
+        tracing::info!("Post-rebalance: {:?}", rebalance);
+    }
+}
+
+type LoggingConsumer = StreamConsumer<LoggingConsumerContext>;
 
 impl KafkaConsumer {
     pub fn new(config: KafkaConfig) -> Result<Self, BankingKafkaError> {
@@ -433,7 +458,9 @@ impl KafkaConsumer {
             config.bootstrap_servers, config.group_id, config.auto_offset_reset
         );
 
-        let consumer: StreamConsumer = ClientConfig::new()
+        let context = LoggingConsumerContext;
+
+        let consumer: LoggingConsumer = ClientConfig::new()
             .set("bootstrap.servers", &config.bootstrap_servers)
             .set("group.id", &config.group_id)
             .set("enable.auto.commit", "false")
@@ -454,7 +481,7 @@ impl KafkaConsumer {
                 "partition.assignment.strategy",
                 "org.apache.kafka.clients.consumer.RangeAssignor",
             )
-            .create()?;
+            .create_with_context(context)?;
 
         tracing::info!("KafkaConsumer: ✅ Consumer created successfully");
         Ok(Self {

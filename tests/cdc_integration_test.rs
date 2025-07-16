@@ -132,7 +132,7 @@ async fn test_cdc_consumer_connection() {
     // Create a simple Kafka consumer
     let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig {
         enabled: true,
-        bootstrap_servers: "localhost:9092".to_string(),
+        bootstrap_servers: "127.0.0.1:9092".to_string(),
         group_id: "test-cdc-consumer-group".to_string(),
         topic_prefix: "banking-es".to_string(),
         producer_acks: 1,
@@ -229,7 +229,7 @@ async fn check_kafka_connectivity() -> bool {
 /// Check if PostgreSQL logical replication is enabled
 async fn check_postgresql_replication() -> bool {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
     });
 
     match PgPoolOptions::new()
@@ -284,7 +284,7 @@ async fn setup_real_cdc_test_environment(
 ) -> Result<RealCDCTestContext, Box<dyn std::error::Error + Send + Sync>> {
     // Initialize database pool
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
     });
 
     let pool = PgPoolOptions::new()
@@ -298,7 +298,7 @@ async fn setup_real_cdc_test_environment(
 
     // Initialize Redis client
     let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let redis_client = redis::Client::open(redis_url)?;
     let redis_client_trait = RealRedisClient::new(redis_client, None);
 
@@ -1674,7 +1674,7 @@ async fn setup_test_cdc_test_environment(
 ) -> Result<TestCDCTestContext, Box<dyn std::error::Error + Send + Sync>> {
     // Initialize database pool
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
     });
 
     let pool = PgPoolOptions::new()
@@ -1688,7 +1688,7 @@ async fn setup_test_cdc_test_environment(
 
     // Initialize Redis client
     let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let redis_client = redis::Client::open(redis_url)?;
     let redis_client_trait = RealRedisClient::new(redis_client, None);
 

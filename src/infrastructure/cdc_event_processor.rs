@@ -5,6 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use rdkafka::Message;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
@@ -1022,6 +1023,24 @@ impl UltraOptimizedCDCEventProcessor {
     /// Update business logic configuration
     pub fn update_business_config(&mut self, config: BusinessLogicConfig) {
         self.business_config = config;
+    }
+
+    pub async fn send_to_dlq_from_cdc(
+        &self,
+        message: &rdkafka::message::BorrowedMessage<'_>,
+        error: &str,
+    ) -> Result<()> {
+        if let Some(dlq_producer) = &self.dlq_producer {
+            let key = message
+                .key()
+                .map(|k| String::from_utf8_lossy(k).to_string());
+            let payload = message.payload().unwrap_or_default();
+            let topic = "banking-es-dlq";
+            dlq_producer
+                .publish_binary_event(topic, payload, &key.unwrap_or_default())
+                .await?;
+        }
+        Ok(())
     }
 
     async fn send_to_dlq(
