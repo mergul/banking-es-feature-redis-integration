@@ -1,5 +1,6 @@
 use crate::domain::{Account, AccountEvent};
 use crate::infrastructure::cache_service::{CacheService, CacheServiceTrait};
+use crate::infrastructure::event_processor::EventProcessor;
 use crate::infrastructure::event_store::{EventStore, EventStoreTrait};
 use crate::infrastructure::kafka_abstraction::{
     EventBatch, KafkaConfig, KafkaConsumer, KafkaProducer,
@@ -469,6 +470,14 @@ impl KafkaEventProcessor {
                 Err(e)
             }
         }
+    }
+}
+
+#[async_trait]
+impl EventProcessor for KafkaEventProcessor {
+    async fn process_event(&self, event: serde_json::Value) -> Result<()> {
+        let batch: EventBatch = serde_json::from_value(event)?;
+        self.process_batch(batch).await
     }
 }
 

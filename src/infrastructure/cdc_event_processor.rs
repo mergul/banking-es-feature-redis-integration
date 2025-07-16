@@ -278,6 +278,17 @@ impl CircuitBreaker {
     }
 }
 
+impl Clone for CircuitBreaker {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            failure_threshold: self.failure_threshold,
+            recovery_timeout: self.recovery_timeout,
+            max_test_requests: self.max_test_requests,
+        }
+    }
+}
+
 // Memory-efficient LRU cache for projections with business validation
 struct ProjectionCache {
     cache: HashMap<Uuid, ProjectionCacheEntry>,
@@ -356,9 +367,24 @@ impl ProjectionCache {
     }
 }
 
+// DLQ event structure
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DLQEvent {
+    pub event_id: Uuid,
+    pub aggregate_id: Uuid,
+    pub event_type: String,
+    pub payload: Vec<u8>,
+    pub error: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub retry_count: u32,
+}
+
 // Ultra-optimized CDC Event Processor with business logic validation
 pub struct UltraOptimizedCDCEventProcessor {
     kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
+    dlq_producer: Option<crate::infrastructure::kafka_abstraction::KafkaProducer>,
+    max_retries: u32,
+    retry_backoff_ms: u64,
     cache_service: Arc<dyn CacheServiceTrait>,
     projection_store: Arc<dyn ProjectionStoreTrait>,
     metrics: Arc<OptimizedCDCMetrics>,
@@ -408,6 +434,29 @@ impl Default for BusinessLogicConfig {
     }
 }
 
+impl Clone for UltraOptimizedCDCEventProcessor {
+    fn clone(&self) -> Self {
+        Self {
+            kafka_producer: self.kafka_producer.clone(),
+            dlq_producer: self.dlq_producer.clone(),
+            max_retries: self.max_retries,
+            retry_backoff_ms: self.retry_backoff_ms,
+            cache_service: self.cache_service.clone(),
+            projection_store: self.projection_store.clone(),
+            metrics: self.metrics.clone(),
+            processing_semaphore: self.processing_semaphore.clone(),
+            batch_queue: self.batch_queue.clone(),
+            batch_size: self.batch_size,
+            batch_timeout: self.batch_timeout,
+            circuit_breaker: self.circuit_breaker.clone(),
+            projection_cache: self.projection_cache.clone(),
+            batch_processor_handle: None, // Don't clone the handle
+            shutdown_tx: None,            // Don't clone the sender
+            business_config: self.business_config.clone(),
+        }
+    }
+}
+
 impl UltraOptimizedCDCEventProcessor {
     pub fn new(
         kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
@@ -419,9 +468,11 @@ impl UltraOptimizedCDCEventProcessor {
             10000,                    // Max 10k cached projections
             Duration::from_secs(300), // 5 minute TTL
         )));
-
         Self {
-            kafka_producer,
+            kafka_producer: kafka_producer.clone(),
+            dlq_producer: Some(kafka_producer), // Use the same producer for DLQ by default
+            max_retries: 3,
+            retry_backoff_ms: 100,
             cache_service,
             projection_store,
             metrics: Arc::new(OptimizedCDCMetrics::default()),
@@ -483,23 +534,56 @@ impl UltraOptimizedCDCEventProcessor {
     #[instrument(skip(self, cdc_event))]
     pub async fn process_cdc_event_ultra_fast(&self, cdc_event: serde_json::Value) -> Result<()> {
         let start_time = Instant::now();
-
-        // Circuit breaker check
         if !self.circuit_breaker.can_execute().await {
             return Err(anyhow::anyhow!("Circuit breaker is open"));
         }
-
         self.circuit_breaker.on_attempt().await;
-
-        // Extract event with zero-copy deserialization where possible
         let processable_event = match self.extract_event_zero_copy(&cdc_event)? {
             Some(event) => event,
-            None => return Ok(()), // Skip tombstone/delete events
+            None => return Ok(()),
         };
+        let mut retries = 0;
+        loop {
+            match self.try_process_event(&processable_event).await {
+                Ok(_) => {
+                    self.circuit_breaker.on_success().await;
+                    break;
+                }
+                Err(e) => {
+                    retries += 1;
+                    if retries > self.max_retries {
+                        self.metrics
+                            .events_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.send_to_dlq(&processable_event, &e, retries).await?;
+                        self.circuit_breaker.on_failure().await;
+                        error!("Event sent to DLQ after {} retries: {}", retries, e);
+                        break;
+                    } else {
+                        warn!(
+                            "Retrying event {} (attempt {}): {}",
+                            processable_event.event_id, retries, e
+                        );
+                        tokio::time::sleep(Duration::from_millis(
+                            self.retry_backoff_ms * retries as u64,
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+        let processing_time = start_time.elapsed().as_millis() as u64;
+        self.metrics.record_processing_time(processing_time);
+        self.metrics
+            .events_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
 
+    async fn try_process_event(&self, processable_event: &ProcessableEvent) -> Result<()> {
         // Business logic validation
         if self.business_config.enable_validation {
-            if let Err(e) = self.validate_business_logic(&processable_event).await {
+            if let Err(e) = self.validate_business_logic(processable_event).await {
                 self.metrics.record_business_validation_failure();
                 error!(
                     "Business validation failed for event {}: {}",
@@ -508,7 +592,6 @@ impl UltraOptimizedCDCEventProcessor {
                 return Err(e);
             }
         }
-
         // Duplicate detection
         if self.business_config.enable_duplicate_detection {
             let mut cache_guard = self.projection_cache.lock().await;
@@ -520,30 +603,15 @@ impl UltraOptimizedCDCEventProcessor {
                 return Ok(());
             }
         }
-
-        // Acquire processing permit
         let _permit = self.processing_semaphore.acquire().await?;
-
-        // Add to batch queue for processing
         {
             let mut queue = self.batch_queue.lock().await;
-            queue.push(processable_event);
-
-            // Trigger immediate batch processing if queue is full
+            queue.push(processable_event.clone());
             if queue.len() >= self.batch_size {
-                drop(queue); // Release lock before processing
+                drop(queue);
                 self.process_current_batch().await?;
             }
         }
-
-        // Record metrics
-        let processing_time = start_time.elapsed().as_millis() as u64;
-        self.metrics.record_processing_time(processing_time);
-        self.metrics
-            .events_processed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        self.circuit_breaker.on_success().await;
         Ok(())
     }
 
@@ -917,10 +985,6 @@ impl UltraOptimizedCDCEventProcessor {
         info!("CDC Event Processor shutdown complete");
         Ok(())
     }
-}
-
-// Memory monitoring utilities
-impl UltraOptimizedCDCEventProcessor {
     pub async fn get_memory_usage(&self) -> usize {
         let cache_guard = self.projection_cache.lock().await;
         let cache_memory = cache_guard.memory_usage();
@@ -958,5 +1022,459 @@ impl UltraOptimizedCDCEventProcessor {
     /// Update business logic configuration
     pub fn update_business_config(&mut self, config: BusinessLogicConfig) {
         self.business_config = config;
+    }
+
+    async fn send_to_dlq(
+        &self,
+        event: &ProcessableEvent,
+        error: &anyhow::Error,
+        retry_count: u32,
+    ) -> Result<()> {
+        if let Some(dlq_producer) = &self.dlq_producer {
+            let dlq_event = DLQEvent {
+                event_id: event.event_id,
+                aggregate_id: event.aggregate_id,
+                event_type: event.event_type.clone(),
+                payload: event.payload.clone(),
+                error: error.to_string(),
+                timestamp: Utc::now(),
+                retry_count,
+            };
+            let payload = serde_json::to_vec(&dlq_event)?;
+            let topic = "banking-es-dlq";
+            let key = event.aggregate_id.to_string();
+            dlq_producer
+                .publish_binary_event(topic, &payload, &key)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+// DLQ Recovery Configuration
+#[derive(Debug, Clone)]
+pub struct DLQRecoveryConfig {
+    pub dlq_topic: String,
+    pub consumer_group_id: String,
+    pub max_reprocessing_retries: u32,
+    pub reprocessing_backoff_ms: u64,
+    pub batch_size: usize,
+    pub poll_timeout_ms: u64,
+    pub enable_auto_recovery: bool,
+    pub auto_recovery_interval_secs: u64,
+}
+
+impl Default for DLQRecoveryConfig {
+    fn default() -> Self {
+        Self {
+            dlq_topic: "banking-es-dlq".to_string(),
+            consumer_group_id: "banking-es-dlq-recovery".to_string(),
+            max_reprocessing_retries: 5,
+            reprocessing_backoff_ms: 1000,
+            batch_size: 10,
+            poll_timeout_ms: 100,
+            enable_auto_recovery: false,
+            auto_recovery_interval_secs: 300, // 5 minutes
+        }
+    }
+}
+
+// DLQ Consumer for recovery processing
+pub struct DLQConsumer {
+    kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
+    config: DLQRecoveryConfig,
+    processor: Arc<UltraOptimizedCDCEventProcessor>,
+    metrics: Arc<DLQRecoveryMetrics>,
+    shutdown_tx: Option<mpsc::Sender<()>>,
+    consumer_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Debug, Default)]
+pub struct DLQRecoveryMetrics {
+    pub dlq_messages_consumed: std::sync::atomic::AtomicU64,
+    pub dlq_messages_reprocessed: std::sync::atomic::AtomicU64,
+    pub dlq_messages_failed: std::sync::atomic::AtomicU64,
+    pub dlq_reprocessing_retries: std::sync::atomic::AtomicU64,
+    pub dlq_consumer_restarts: std::sync::atomic::AtomicU64,
+    pub dlq_processing_latency_ms: std::sync::atomic::AtomicU64,
+}
+
+impl DLQConsumer {
+    pub fn new(
+        kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
+        config: DLQRecoveryConfig,
+        processor: Arc<UltraOptimizedCDCEventProcessor>,
+    ) -> Self {
+        Self {
+            kafka_consumer,
+            config,
+            processor,
+            metrics: Arc::new(DLQRecoveryMetrics::default()),
+            shutdown_tx: None,
+            consumer_handle: None,
+        }
+    }
+
+    /// Start the DLQ consumer for automatic recovery
+    pub async fn start(&mut self) -> Result<()> {
+        if !self.config.enable_auto_recovery {
+            info!("DLQ auto-recovery is disabled");
+            return Ok(());
+        }
+
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+        self.shutdown_tx = Some(shutdown_tx);
+
+        let kafka_consumer = self.kafka_consumer.clone();
+        let config = self.config.clone();
+        let processor = self.processor.clone();
+        let metrics = self.metrics.clone();
+
+        let handle = tokio::spawn(async move {
+            info!("Starting DLQ consumer for topic: {}", config.dlq_topic);
+
+            // Subscribe to DLQ topic
+            if let Err(e) = kafka_consumer.subscribe_to_topic(&config.dlq_topic).await {
+                error!("Failed to subscribe to DLQ topic: {}", e);
+                return;
+            }
+
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(config.auto_recovery_interval_secs));
+
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        info!("DLQ consumer received shutdown signal");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        if let Err(e) = Self::process_dlq_batch(&kafka_consumer, &processor, &metrics, &config).await {
+                            error!("DLQ batch processing failed: {}", e);
+                            metrics.dlq_consumer_restarts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+
+            info!("DLQ consumer stopped");
+        });
+
+        self.consumer_handle = Some(handle);
+        info!("DLQ consumer started successfully");
+        Ok(())
+    }
+
+    /// Stop the DLQ consumer
+    pub async fn stop(&mut self) -> Result<()> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(()).await;
+        }
+
+        if let Some(handle) = self.consumer_handle.take() {
+            handle.await?;
+        }
+
+        info!("DLQ consumer stopped");
+        Ok(())
+    }
+
+    /// Process a batch of DLQ messages
+    async fn process_dlq_batch(
+        consumer: &crate::infrastructure::kafka_abstraction::KafkaConsumer,
+        processor: &Arc<UltraOptimizedCDCEventProcessor>,
+        metrics: &Arc<DLQRecoveryMetrics>,
+        config: &DLQRecoveryConfig,
+    ) -> Result<()> {
+        let mut processed_count = 0;
+        let start_time = Instant::now();
+
+        for _ in 0..config.batch_size {
+            match consumer.poll_dlq_message().await {
+                Ok(Some(dlq_message)) => {
+                    metrics
+                        .dlq_messages_consumed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    if let Err(e) =
+                        Self::reprocess_dlq_message(processor, &dlq_message, config).await
+                    {
+                        error!("Failed to reprocess DLQ message: {}", e);
+                        metrics
+                            .dlq_messages_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        metrics
+                            .dlq_messages_reprocessed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        processed_count += 1;
+                    }
+                }
+                Ok(None) => {
+                    // No more messages available
+                    break;
+                }
+                Err(e) => {
+                    error!("Error polling DLQ message: {}", e);
+                    break;
+                }
+            }
+        }
+
+        if processed_count > 0 {
+            let latency = start_time.elapsed().as_millis() as u64;
+            metrics
+                .dlq_processing_latency_ms
+                .store(latency, std::sync::atomic::Ordering::Relaxed);
+            info!(
+                "Processed {} DLQ messages in {}ms",
+                processed_count, latency
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Reprocess a single DLQ message
+    async fn reprocess_dlq_message(
+        processor: &Arc<UltraOptimizedCDCEventProcessor>,
+        dlq_message: &crate::infrastructure::kafka_dlq::DeadLetterMessage,
+        config: &DLQRecoveryConfig,
+    ) -> Result<()> {
+        // Convert DeadLetterMessage back to ProcessableEvent
+        // Note: DeadLetterMessage contains events, not individual event data
+        // We'll process the first event from the batch for simplicity
+        if let Some(first_event) = dlq_message.events.first() {
+            let event_id = Uuid::new_v4(); // Generate new event ID for reprocessing
+            let payload = bincode::serialize(first_event)?;
+
+            let processable_event = ProcessableEvent::new(
+                event_id,
+                dlq_message.account_id,
+                format!("{:?}", std::mem::discriminant(first_event)),
+                payload,
+                None, // partition_key
+            )?;
+
+            let mut retries = 0;
+            loop {
+                match processor.try_process_event(&processable_event).await {
+                    Ok(_) => {
+                        info!(
+                            "Successfully reprocessed DLQ message for account: {}",
+                            dlq_message.account_id
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        retries += 1;
+                        if retries > config.max_reprocessing_retries {
+                            error!(
+                                "Failed to reprocess DLQ message for account {} after {} retries: {}",
+                                dlq_message.account_id, retries, e
+                            );
+                            return Err(e);
+                        } else {
+                            warn!(
+                                "Retrying DLQ message for account {} (attempt {}): {}",
+                                dlq_message.account_id, retries, e
+                            );
+                            tokio::time::sleep(Duration::from_millis(
+                                config.reprocessing_backoff_ms * retries as u64,
+                            ))
+                            .await;
+                        }
+                    }
+                }
+            }
+        } else {
+            Err(anyhow::anyhow!("No events found in DLQ message"))
+        }
+    }
+
+    /// Get DLQ recovery metrics
+    pub fn get_metrics(&self) -> DLQRecoveryMetrics {
+        DLQRecoveryMetrics {
+            dlq_messages_consumed: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .dlq_messages_consumed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            dlq_messages_reprocessed: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .dlq_messages_reprocessed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            dlq_messages_failed: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .dlq_messages_failed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            dlq_reprocessing_retries: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .dlq_reprocessing_retries
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            dlq_consumer_restarts: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .dlq_consumer_restarts
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            dlq_processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.metrics
+                    .dlq_processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
+}
+
+impl UltraOptimizedCDCEventProcessor {
+    /// Create a DLQ consumer for recovery processing
+    pub fn create_dlq_consumer(&self, config: DLQRecoveryConfig) -> Result<DLQConsumer> {
+        let kafka_config = crate::infrastructure::kafka_abstraction::KafkaConfig::default();
+        let kafka_consumer =
+            crate::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config)?;
+
+        Ok(DLQConsumer::new(
+            kafka_consumer,
+            config,
+            Arc::new(self.clone()),
+        ))
+    }
+
+    /// Manual DLQ reprocessing - process all available DLQ messages
+    pub async fn reprocess_dlq(&self) -> Result<DLQRecoveryMetrics> {
+        let config = DLQRecoveryConfig::default();
+        let mut dlq_consumer = self.create_dlq_consumer(config.clone())?;
+
+        info!("Starting manual DLQ reprocessing");
+
+        // Process all available DLQ messages
+        let mut total_processed = 0;
+        let mut total_failed = 0;
+
+        // Create a Kafka consumer for DLQ polling
+        let kafka_config = crate::infrastructure::kafka_abstraction::KafkaConfig::default();
+        let kafka_consumer =
+            crate::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config)?;
+
+        // Subscribe to DLQ topic
+        kafka_consumer.subscribe_to_dlq().await?;
+
+        // Clone config to avoid move issues
+        let config_clone = config.clone();
+
+        loop {
+            match kafka_consumer.poll_dlq_message().await {
+                Ok(Some(dlq_message)) => {
+                    match self
+                        .reprocess_single_dlq_message(&dlq_message, &config_clone)
+                        .await
+                    {
+                        Ok(_) => {
+                            total_processed += 1;
+                            info!(
+                                "Successfully reprocessed DLQ message for account: {}",
+                                dlq_message.account_id
+                            );
+                        }
+                        Err(e) => {
+                            total_failed += 1;
+                            error!(
+                                "Failed to reprocess DLQ message for account {}: {}",
+                                dlq_message.account_id, e
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // No more messages
+                    break;
+                }
+                Err(e) => {
+                    error!("Error polling DLQ message: {}", e);
+                    break;
+                }
+            }
+        }
+
+        info!(
+            "Manual DLQ reprocessing completed: {} processed, {} failed",
+            total_processed, total_failed
+        );
+
+        // Return metrics
+        Ok(DLQRecoveryMetrics {
+            dlq_messages_consumed: std::sync::atomic::AtomicU64::new(
+                total_processed + total_failed,
+            ),
+            dlq_messages_reprocessed: std::sync::atomic::AtomicU64::new(total_processed),
+            dlq_messages_failed: std::sync::atomic::AtomicU64::new(total_failed),
+            dlq_reprocessing_retries: std::sync::atomic::AtomicU64::new(0),
+            dlq_consumer_restarts: std::sync::atomic::AtomicU64::new(0),
+            dlq_processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// Reprocess a single DLQ message with retries
+    async fn reprocess_single_dlq_message(
+        &self,
+        dlq_message: &crate::infrastructure::kafka_dlq::DeadLetterMessage,
+        config: &DLQRecoveryConfig,
+    ) -> Result<()> {
+        // Convert DeadLetterMessage to ProcessableEvent
+        // Note: DeadLetterMessage contains events, not individual event data
+        if let Some(first_event) = dlq_message.events.first() {
+            let event_id = Uuid::new_v4(); // Generate new event ID for reprocessing
+            let payload = bincode::serialize(first_event)?;
+
+            let processable_event = ProcessableEvent::new(
+                event_id,
+                dlq_message.account_id,
+                format!("{:?}", std::mem::discriminant(first_event)),
+                payload,
+                None,
+            )?;
+
+            let mut retries = 0;
+            loop {
+                match self.try_process_event(&processable_event).await {
+                    Ok(_) => {
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        retries += 1;
+                        if retries > config.max_reprocessing_retries {
+                            return Err(e);
+                        } else {
+                            warn!(
+                                "Retrying DLQ message for account {} (attempt {}): {}",
+                                dlq_message.account_id, retries, e
+                            );
+                            tokio::time::sleep(Duration::from_millis(
+                                config.reprocessing_backoff_ms * retries as u64,
+                            ))
+                            .await;
+                        }
+                    }
+                }
+            }
+        } else {
+            Err(anyhow::anyhow!("No events found in DLQ message"))
+        }
+    }
+
+    /// Get DLQ statistics
+    pub async fn get_dlq_stats(&self) -> Result<serde_json::Value> {
+        // This would typically query the DLQ topic/table for statistics
+        // For now, return a placeholder
+        Ok(serde_json::json!({
+            "dlq_topic": "banking-es-dlq",
+            "total_messages": 0, // Would query actual count
+            "oldest_message_age_seconds": 0, // Would calculate from timestamps
+            "recovery_enabled": false,
+            "last_recovery_attempt": null,
+        }))
     }
 }

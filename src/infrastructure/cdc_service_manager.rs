@@ -158,6 +158,7 @@ impl CDCServiceManager {
 
     /// Start the CDC service with optimized resource management
     pub async fn start(&mut self) -> Result<()> {
+        tracing::info!("CDCServiceManager::start() called");
         self.set_state(ServiceState::Starting).await;
 
         info!("Starting optimized CDC Service Manager");
@@ -167,16 +168,23 @@ impl CDCServiceManager {
         );
 
         // Initialize infrastructure
+        tracing::info!("CDCServiceManager: Initializing infrastructure...");
         self.initialize_infrastructure().await?;
+        tracing::info!("CDCServiceManager: Infrastructure initialized successfully");
 
         // Start core services
+        tracing::info!("CDCServiceManager: Starting core services...");
         self.start_core_services().await?;
+        tracing::info!("CDCServiceManager: Core services started successfully");
 
         // Start monitoring and maintenance tasks
+        tracing::info!("CDCServiceManager: Starting monitoring tasks...");
         self.start_monitoring_tasks().await?;
+        tracing::info!("CDCServiceManager: Monitoring tasks started successfully");
 
         self.set_state(ServiceState::Running).await;
         info!("CDC Service Manager started successfully");
+        tracing::info!("CDCServiceManager: Service is now RUNNING");
 
         Ok(())
     }
@@ -245,6 +253,7 @@ impl CDCServiceManager {
 
     /// Start resilient CDC consumer with auto-recovery
     async fn start_resilient_consumer(&self) -> Result<tokio::task::JoinHandle<()>> {
+        tracing::info!("CDCServiceManager::start_resilient_consumer() called");
         let config = self.config.clone();
         let processor = self.processor.clone();
         let metrics = self.metrics.clone();
@@ -252,6 +261,7 @@ impl CDCServiceManager {
         let optimization_config = self.optimization_config.clone();
 
         let handle = tokio::spawn(async move {
+            tracing::info!("CDCServiceManager: consumer task spawned");
             let mut consecutive_failures = 0;
             let max_retries = optimization_config.max_retries;
 
@@ -262,11 +272,16 @@ impl CDCServiceManager {
                     break;
                 }
 
+                tracing::info!("CDC Consumer: Creating new Kafka consumer instance...");
                 // Create new consumer instance
                 let kafka_consumer = match Self::create_kafka_consumer(&config).await {
-                    Ok(consumer) => consumer,
+                    Ok(consumer) => {
+                        tracing::info!("CDC Consumer: ✅ Successfully created Kafka consumer");
+                        consumer
+                    }
                     Err(e) => {
                         error!("CDC Consumer: Failed to create Kafka consumer: {}", e);
+                        tracing::error!("CDC Consumer: Failed to create Kafka consumer: {}", e);
                         consecutive_failures += 1;
 
                         if consecutive_failures >= max_retries {
@@ -283,19 +298,15 @@ impl CDCServiceManager {
                 };
 
                 let cdc_topic = format!("{}.{}", config.topic_prefix, config.table_include_list);
-                let (shutdown_tx, shutdown_rx_inner) = mpsc::channel(1);
+                let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-                let mut consumer = CDCConsumer::new(kafka_consumer, cdc_topic, shutdown_rx_inner);
+                let mut consumer = CDCConsumer::new(kafka_consumer, cdc_topic);
 
-                // Start consuming with timeout
-                let consumer_result = tokio::select! {
-                    result = consumer.start_consuming(processor.clone()) => result,
-                    _ = shutdown_rx.changed() => {
-                        tracing::info!("CDC Consumer: Shutdown requested");
-                        let _ = shutdown_tx.send(()).await;
-                        Ok(())
-                    }
-                };
+                tracing::info!("CDCServiceManager: about to enter consumer main loop");
+                // Start consuming with timeout using the mutex version
+                let consumer_result = consumer
+                    .start_consuming_with_mutex(processor.clone(), shutdown_rx)
+                    .await;
 
                 match consumer_result {
                     Ok(_) => {
@@ -304,6 +315,7 @@ impl CDCServiceManager {
                     }
                     Err(e) => {
                         error!("CDC Consumer: Failed with error: {}", e);
+                        tracing::error!("CDC Consumer: Failed with error: {}", e);
                         consecutive_failures += 1;
                         metrics
                             .consumer_restarts
@@ -629,9 +641,33 @@ impl CDCServiceManager {
     async fn create_kafka_consumer(
         config: &DebeziumConfig,
     ) -> Result<crate::infrastructure::kafka_abstraction::KafkaConsumer> {
-        // Create Kafka consumer with optimized settings
-        // Placeholder - implement actual consumer creation
-        Err(anyhow::anyhow!("Kafka consumer creation not implemented"))
+        tracing::info!("CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: {}", config.topic_prefix);
+
+        // Create Kafka consumer with proper configuration
+        let kafka_config = crate::infrastructure::kafka_abstraction::KafkaConfig {
+            enabled: true,
+            bootstrap_servers: "localhost:9092".to_string(),
+            group_id: "banking-es-group".to_string(),
+            topic_prefix: config.topic_prefix.clone(),
+            producer_acks: 1,
+            producer_retries: 3,
+            consumer_max_poll_interval_ms: 300000,
+            consumer_session_timeout_ms: 10000,
+            consumer_max_poll_records: 500,
+            security_protocol: "PLAINTEXT".to_string(),
+            sasl_mechanism: "PLAIN".to_string(),
+            ssl_ca_location: None,
+            auto_offset_reset: "earliest".to_string(),
+            cache_invalidation_topic: "banking-es-cache-invalidation".to_string(),
+            event_topic: "banking-es-events".to_string(),
+        };
+
+        tracing::info!("CDCServiceManager: Kafka config created, attempting to create consumer...");
+        let consumer = crate::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config)
+            .map_err(|e| anyhow::anyhow!("Failed to create Kafka consumer: {}", e))?;
+
+        tracing::info!("CDCServiceManager: ✅ Kafka consumer created successfully");
+        Ok(consumer)
     }
 
     async fn get_memory_usage() -> Result<u64> {
@@ -681,13 +717,24 @@ impl CDCHealthCheck {
             .error_rate
             .load(std::sync::atomic::Ordering::Relaxed);
 
-        // Multiple health criteria
+        // Multiple health criteria - more lenient for startup and no-message scenarios
         let has_processed_events = processed > 0;
-        let low_failure_rate = failed == 0 || (failed as f64 / processed as f64) < 0.1;
+        let low_failure_rate = if processed > 0 {
+            failed == 0 || (failed as f64 / processed as f64) < 0.1
+        } else {
+            true // No failures if no events processed yet
+        };
         let no_consecutive_failures = consecutive_failures < 5;
         let acceptable_error_rate = error_rate < 10; // Less than 10%
 
-        has_processed_events && low_failure_rate && no_consecutive_failures && acceptable_error_rate
+        // Service is healthy if:
+        // 1. It has processed events successfully, OR
+        // 2. It has no failures and is just waiting for messages (normal startup state)
+        (has_processed_events
+            && low_failure_rate
+            && no_consecutive_failures
+            && acceptable_error_rate)
+            || (!has_processed_events && failed == 0 && consecutive_failures == 0)
     }
 
     pub fn get_health_status(&self) -> serde_json::Value {

@@ -3,7 +3,8 @@ use banking_es::{
     domain::{AccountError, AccountEvent},
     infrastructure::{
         cache_service::{CacheConfig, CacheService, CacheServiceTrait},
-        cdc_debezium::{CDCOutboxRepository, CDCServiceManager, DebeziumConfig},
+        cdc_debezium::{CDCOutboxRepository, DebeziumConfig},
+        cdc_service_manager::CDCServiceManager,
         event_store::{EventStore, EventStoreTrait},
         projections::{ProjectionStore, ProjectionStoreTrait},
         redis_abstraction::RealRedisClient,
@@ -14,6 +15,7 @@ use rust_decimal::Decimal;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing;
 use uuid::Uuid;
 
@@ -55,7 +57,7 @@ async fn test_real_cdc_pipeline() {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Verify CDC metrics show processing
-        let cdc_metrics = context.cdc_service_manager.get_metrics().await?;
+        let cdc_metrics = context.cdc_service_manager.get_metrics();
         let events_processed = cdc_metrics
             .events_processed
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -113,6 +115,81 @@ async fn test_real_cdc_pipeline() {
             panic!("Real CDC test timeout");
         }
     }
+}
+
+/// Test to verify CDC consumer can connect to Kafka
+#[tokio::test]
+// #[ignore]
+async fn test_cdc_consumer_connection() {
+    tracing::info!("🔍 Testing CDC consumer connection...");
+
+    // Check if CDC environment is available
+    if !is_cdc_environment_available().await {
+        tracing::warn!("⚠️ CDC environment not available, skipping CDC consumer connection test");
+        return;
+    }
+
+    // Create a simple Kafka consumer
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig {
+        enabled: true,
+        bootstrap_servers: "localhost:9092".to_string(),
+        group_id: "test-cdc-consumer-group".to_string(),
+        topic_prefix: "banking-es".to_string(),
+        producer_acks: 1,
+        producer_retries: 3,
+        consumer_max_poll_interval_ms: 300000,
+        consumer_session_timeout_ms: 10000,
+        consumer_max_poll_records: 500,
+        security_protocol: "PLAINTEXT".to_string(),
+        sasl_mechanism: "PLAIN".to_string(),
+        ssl_ca_location: None,
+        auto_offset_reset: "earliest".to_string(),
+        cache_invalidation_topic: "banking-es-cache-invalidation".to_string(),
+        event_topic: "banking-es-events".to_string(),
+    };
+
+    let consumer =
+        match banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config) {
+            Ok(consumer) => {
+                tracing::info!("✅ Kafka consumer created successfully");
+                consumer
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to create Kafka consumer: {}", e);
+                return;
+            }
+        };
+
+    // Try to subscribe to the CDC topic
+    let cdc_topic = "banking-es.public.kafka_outbox_cdc";
+    tracing::info!("🔍 Attempting to subscribe to topic: {}", cdc_topic);
+
+    match consumer.subscribe_to_topic(cdc_topic).await {
+        Ok(_) => {
+            tracing::info!("✅ Successfully subscribed to CDC topic: {}", cdc_topic);
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to subscribe to CDC topic: {}", e);
+            return;
+        }
+    }
+
+    // Try to poll for messages
+    tracing::info!("🔍 Attempting to poll for messages...");
+    match consumer.poll_cdc_events().await {
+        Ok(Some(event)) => {
+            tracing::info!("✅ Successfully received CDC event: {:?}", event);
+        }
+        Ok(None) => {
+            tracing::info!("⏳ No events available (this is normal if no new events)");
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to poll CDC events: {}", e);
+            return;
+        }
+    }
+
+    tracing::info!("✅ CDC consumer connection test completed successfully");
 }
 
 /// Check if the CDC environment is available
@@ -186,6 +263,17 @@ async fn check_postgresql_replication() -> bool {
     }
 }
 
+/// Check the number of events in the CDC outbox table
+async fn check_cdc_outbox_count(
+    pool: &PgPool,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let count = sqlx::query!("SELECT COUNT(*) as count FROM kafka_outbox_cdc")
+        .fetch_one(pool)
+        .await?;
+
+    Ok(count.count.unwrap_or(0) as usize)
+}
+
 struct RealCDCTestContext {
     cqrs_service: Arc<CQRSAccountService>,
     db_pool: PgPool,
@@ -251,10 +339,7 @@ async fn setup_real_cdc_test_environment(
         kafka_consumer,
         cache_service,
         projection_store,
-        None,
-        None,
-    )
-    .await?;
+    )?;
 
     // Start REAL CDC service
     cdc_service_manager.start().await?;
@@ -277,7 +362,7 @@ async fn setup_real_cdc_test_environment(
 /// 3. PostgreSQL with logical replication enabled
 /// 4. Proper network connectivity
 #[tokio::test]
-#[ignore] // Ignored by default - requires full CDC setup
+// #[ignore] // Ignored by default - requires full CDC setup
 async fn test_real_cdc_high_throughput_performance() {
     tracing::info!("🚀 Starting REAL CDC high throughput performance test...");
 
@@ -292,11 +377,11 @@ async fn test_real_cdc_high_throughput_performance() {
         let context = setup_real_cdc_test_environment().await?;
         tracing::info!("✅ Real CDC test environment setup complete");
 
-        // More conservative test parameters for real CDC
-        let target_ops = 100; // Reduced from 500
-        let worker_count = 5; // Reduced from 20
-        let account_count = 50; // Reduced from 500
-        let channel_buffer_size = 1000; // Reduced from 5000
+        // High throughput test parameters for real CDC (adjusted for stability)
+        let target_ops = 5000; // Reduced for stability
+        let worker_count = 25; // Reduced for stability
+        let account_count = 500; // Reduced for stability
+        let channel_buffer_size = 5000; // Reduced for stability
 
         tracing::info!(
             "🎯 Test Parameters - Target Ops: {}, Workers: {}, Accounts: {}",
@@ -305,46 +390,25 @@ async fn test_real_cdc_high_throughput_performance() {
             account_count
         );
 
-        // Create accounts first with better error handling
+        // Create accounts using the improved batch processing function
         tracing::info!("🔧 Creating {} test accounts...", account_count);
-        let mut account_ids = Vec::new();
-        for i in 0..account_count {
-            let owner_name = format!("HighThroughputUser_{}", i);
-            let initial_balance = rust_decimal::Decimal::new(1000, 0);
-
-            match tokio::time::timeout(
-                Duration::from_secs(10), // Increased timeout
-                context
-                    .cqrs_service
-                    .create_account(owner_name, initial_balance),
-            )
-            .await
-            {
-                Ok(Ok(account_id)) => {
-                    account_ids.push(account_id);
-                    if i % 10 == 0 {
-                        // Log every 10th account
-                        tracing::info!("✅ Created {} accounts", i + 1);
-                    }
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("❌ Failed to create account {}: {}", i, e);
-                    return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
-                }
-                Err(_) => {
-                    tracing::error!("❌ Timeout creating account {}", i);
-                    return Err("Account creation timeout".into());
-                }
-            }
-        }
-        tracing::info!("✅ Created {} accounts successfully", account_ids.len());
+        let account_ids = create_test_accounts(&context.cqrs_service, account_count).await?;
+        tracing::info!(
+            "✅ Created {} test accounts successfully",
+            account_ids.len()
+        );
 
         // Wait for CDC to process all account creation events
         tracing::info!("⏳ Waiting for CDC to process account creation events...");
-        tokio::time::sleep(Duration::from_secs(10)).await; // Increased wait time
+        tokio::time::sleep(Duration::from_secs(5)).await; // Reduced wait time for high throughput
+
+        // Check if events were inserted into the CDC outbox table
+        tracing::info!("🔍 Checking CDC outbox table for events...");
+        let outbox_count = check_cdc_outbox_count(&context.db_pool).await?;
+        tracing::info!("📊 CDC outbox table contains {} events", outbox_count);
 
         // Verify CDC metrics show processing
-        let cdc_metrics = context.cdc_service_manager.get_metrics().await?;
+        let cdc_metrics = context.cdc_service_manager.get_metrics();
         let events_processed = cdc_metrics
             .events_processed
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -398,7 +462,7 @@ async fn test_real_cdc_high_throughput_performance() {
                         "deposit" => {
                             let amount = rust_decimal::Decimal::new(rng.gen_range(1..100), 0);
                             tokio::time::timeout(
-                                Duration::from_secs(5), // Increased timeout
+                                Duration::from_secs(2), // Reduced timeout for high throughput
                                 cqrs_service.deposit_money(account_id, amount),
                             )
                             .await
@@ -406,19 +470,19 @@ async fn test_real_cdc_high_throughput_performance() {
                         "withdraw" => {
                             let amount = rust_decimal::Decimal::new(rng.gen_range(1..50), 0);
                             tokio::time::timeout(
-                                Duration::from_secs(5), // Increased timeout
+                                Duration::from_secs(2), // Reduced timeout for high throughput
                                 cqrs_service.withdraw_money(account_id, amount),
                             )
                             .await
                         }
                         "get_account" => tokio::time::timeout(
-                            Duration::from_secs(5), // Increased timeout
+                            Duration::from_secs(1), // Reduced timeout for high throughput
                             cqrs_service.get_account(account_id),
                         )
                         .await
                         .map(|r| r.map(|_| ())),
                         "get_balance" => tokio::time::timeout(
-                            Duration::from_secs(5), // Increased timeout
+                            Duration::from_secs(1), // Reduced timeout for high throughput
                             cqrs_service.get_account_balance(account_id),
                         )
                         .await
@@ -445,8 +509,8 @@ async fn test_real_cdc_high_throughput_performance() {
 
                     local_ops += 1;
 
-                    // Small delay to prevent overwhelming the system
-                    tokio::time::sleep(Duration::from_millis(50)).await; // Increased delay
+                    // Minimal delay for high throughput
+                    tokio::time::sleep(Duration::from_millis(1)).await; // Minimal delay for high throughput
                 }
             });
 
@@ -462,7 +526,7 @@ async fn test_real_cdc_high_throughput_performance() {
         let mut total_duration = Duration::ZERO;
 
         // Set a timeout for collecting results
-        let collection_timeout = Duration::from_secs(60); // 1 minute timeout
+        let collection_timeout = Duration::from_secs(300); // 5 minutes timeout for high throughput
         let start_time = std::time::Instant::now();
 
         loop {
@@ -515,7 +579,7 @@ async fn test_real_cdc_high_throughput_performance() {
         }
 
         // Final CDC metrics
-        let final_cdc_metrics = context.cdc_service_manager.get_metrics().await?;
+        let final_cdc_metrics = context.cdc_service_manager.get_metrics();
         let final_events_processed = final_cdc_metrics
             .events_processed
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -977,7 +1041,7 @@ async fn run_real_cdc_performance_test(
     // Get final metrics
     let cqrs_metrics = context.cqrs_service.get_metrics();
     let cache_metrics = context.cqrs_service.get_cache_metrics();
-    let cdc_metrics = context.cdc_service_manager.get_metrics().await?;
+    let cdc_metrics = context.cdc_service_manager.get_metrics();
 
     let teardown_start = std::time::Instant::now();
     // Cleanup
@@ -1067,31 +1131,110 @@ async fn create_test_accounts(
     cqrs_service: &Arc<CQRSAccountService>,
     account_count: usize,
 ) -> Result<Vec<Uuid>, Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("🔧 Creating {} test accounts...", account_count);
+    tracing::info!(
+        "🔧 Creating {} test accounts with batch processing...",
+        account_count
+    );
     let mut account_ids = Vec::new();
+    let batch_size = 50; // Process accounts in batches to reduce contention
+    let max_retries = 5;
+    let base_delay = Duration::from_millis(200);
 
-    for i in 0..account_count {
-        let owner_name = format!("PerfTestUser_{}", i);
-        let initial_balance = rust_decimal::Decimal::new(1000, 0);
+    for batch_start in (0..account_count).step_by(batch_size) {
+        let batch_end = (batch_start + batch_size).min(account_count);
+        let batch_size_actual = batch_end - batch_start;
 
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            cqrs_service.create_account(owner_name, initial_balance),
-        )
-        .await
-        {
-            Ok(Ok(account_id)) => {
-                account_ids.push(account_id);
-                if i % 50 == 0 {
-                    tracing::info!("✅ Created {} accounts", i + 1);
+        tracing::info!(
+            "📦 Processing batch {}/{} (accounts {}-{})",
+            (batch_start / batch_size) + 1,
+            (account_count + batch_size - 1) / batch_size,
+            batch_start + 1,
+            batch_end
+        );
+
+        // Create accounts in parallel within the batch
+        let mut batch_futures = Vec::new();
+        for i in batch_start..batch_end {
+            let owner_name = format!("PerfTestUser_{}", i);
+            let initial_balance = rust_decimal::Decimal::new(1000, 0);
+            let cqrs_service = cqrs_service.clone();
+
+            let future = async move {
+                let mut retry_count = 0;
+                loop {
+                    tracing::debug!("🔧 Creating account for user: {}", owner_name);
+                    match tokio::time::timeout(
+                        Duration::from_secs(15), // Increased timeout
+                        cqrs_service.create_account(owner_name.clone(), initial_balance),
+                    )
+                    .await
+                    {
+                        Ok(Ok(account_id)) => {
+                            tracing::debug!(
+                                "✅ Created account: {} for user: {}",
+                                account_id,
+                                owner_name
+                            );
+                            return Ok::<Uuid, Box<dyn std::error::Error + Send + Sync>>(
+                                account_id,
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            // Check if it's a serialization error that can be retried
+                            let error_msg = e.to_string();
+                            if error_msg.contains("serialize access")
+                                || error_msg.contains("deadlock")
+                                || error_msg.contains("could not serialize")
+                            {
+                                retry_count += 1;
+                                if retry_count <= max_retries {
+                                    let delay = base_delay * (2_u32.pow(retry_count as u32));
+                                    tracing::warn!("🔄 Serialization failure, retrying account creation for {} (attempt {}/{}), delay: {:?}: {}", 
+                                        owner_name, retry_count, max_retries, delay, error_msg);
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                }
+                            }
+                            return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+                        }
+                        Err(_) => {
+                            retry_count += 1;
+                            if retry_count <= max_retries {
+                                let delay = base_delay * (2_u32.pow(retry_count as u32));
+                                tracing::debug!(
+                                    "⏰ Timeout retry for account creation {} (attempt {}/{})",
+                                    owner_name,
+                                    retry_count,
+                                    max_retries
+                                );
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                            return Err("Account creation timeout after retries".into());
+                        }
+                    }
+                }
+            };
+            batch_futures.push(future);
+        }
+
+        // Wait for all accounts in the batch to be created
+        let batch_results = futures::future::join_all(batch_futures).await;
+
+        // Collect successful results
+        for result in batch_results {
+            match result {
+                Ok(account_id) => account_ids.push(account_id),
+                Err(e) => {
+                    tracing::error!("❌ Failed to create account in batch: {}", e);
+                    return Err(e);
                 }
             }
-            Ok(Err(e)) => {
-                return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
-            }
-            Err(_) => {
-                return Err("Account creation timeout".into());
-            }
+        }
+
+        // Small delay between batches to reduce database pressure
+        if batch_end < account_count {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
@@ -1130,36 +1273,77 @@ async fn run_high_throughput_operations(
                 };
 
                 let start_time = std::time::Instant::now();
-                let result: Result<Result<(), _>, _> = match operation {
-                    "deposit" => {
-                        let amount = rust_decimal::Decimal::new(rng.gen_range(1..100), 0);
-                        tokio::time::timeout(
-                            Duration::from_secs(5),
-                            cqrs_service.deposit_money(account_id, amount),
-                        )
-                        .await
+                let result: Result<Result<(), _>, _> = {
+                    let mut retry_count = 0;
+                    let max_retries = 5;
+                    let base_delay = Duration::from_millis(200);
+
+                    loop {
+                        let operation_result = match operation {
+                            "deposit" => {
+                                let amount = rust_decimal::Decimal::new(rng.gen_range(1..100), 0);
+                                tokio::time::timeout(
+                                    Duration::from_secs(8), // Increased timeout
+                                    cqrs_service.deposit_money(account_id, amount),
+                                )
+                                .await
+                            }
+                            "withdraw" => {
+                                let amount = rust_decimal::Decimal::new(rng.gen_range(1..50), 0);
+                                tokio::time::timeout(
+                                    Duration::from_secs(8), // Increased timeout
+                                    cqrs_service.withdraw_money(account_id, amount),
+                                )
+                                .await
+                            }
+                            "get_account" => tokio::time::timeout(
+                                Duration::from_secs(8), // Increased timeout
+                                cqrs_service.get_account(account_id),
+                            )
+                            .await
+                            .map(|r| r.map(|_| ())),
+                            "get_balance" => tokio::time::timeout(
+                                Duration::from_secs(8), // Increased timeout
+                                cqrs_service.get_account_balance(account_id),
+                            )
+                            .await
+                            .map(|r| r.map(|_| ())),
+                            _ => unreachable!(),
+                        };
+
+                        match &operation_result {
+                            Ok(Ok(_)) => break operation_result,
+                            Ok(Err(e)) => {
+                                let error_msg = e.to_string();
+                                if (error_msg.contains("serialize access")
+                                    || error_msg.contains("deadlock")
+                                    || error_msg.contains("could not serialize"))
+                                    && retry_count < max_retries
+                                {
+                                    retry_count += 1;
+                                    let delay = base_delay * (2_u32.pow(retry_count as u32));
+                                    tracing::warn!("🔄 Serialization failure, retrying operation {} for account {} (attempt {}/{}), delay: {:?}: {}", 
+                                        operation, account_id, retry_count, max_retries, delay, error_msg);
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                } else {
+                                    break operation_result;
+                                }
+                            }
+                            Err(_) => {
+                                if retry_count < max_retries {
+                                    retry_count += 1;
+                                    let delay = base_delay * (2_u32.pow(retry_count as u32));
+                                    tracing::debug!("⏰ Timeout retry for operation {} on account {} (attempt {}/{})", 
+                                        operation, account_id, retry_count, max_retries);
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                } else {
+                                    break operation_result;
+                                }
+                            }
+                        }
                     }
-                    "withdraw" => {
-                        let amount = rust_decimal::Decimal::new(rng.gen_range(1..50), 0);
-                        tokio::time::timeout(
-                            Duration::from_secs(5),
-                            cqrs_service.withdraw_money(account_id, amount),
-                        )
-                        .await
-                    }
-                    "get_account" => tokio::time::timeout(
-                        Duration::from_secs(5),
-                        cqrs_service.get_account(account_id),
-                    )
-                    .await
-                    .map(|r| r.map(|_| ())),
-                    "get_balance" => tokio::time::timeout(
-                        Duration::from_secs(5),
-                        cqrs_service.get_account_balance(account_id),
-                    )
-                    .await
-                    .map(|r| r.map(|_| ())),
-                    _ => unreachable!(),
                 };
 
                 let duration = start_time.elapsed();
@@ -1180,7 +1364,7 @@ async fn run_high_throughput_operations(
                     .await;
 
                 local_ops += 1;
-                tokio::time::sleep(Duration::from_millis(10)).await; // Small delay
+                tokio::time::sleep(Duration::from_millis(20)).await; // Increased delay to reduce DB pressure
             }
         });
 

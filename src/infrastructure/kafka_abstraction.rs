@@ -428,10 +428,19 @@ impl KafkaConsumer {
             });
         }
 
+        tracing::info!(
+            "KafkaConsumer: Creating consumer with config - bootstrap_servers: {}, group_id: {}, auto_offset_reset: {}",
+            config.bootstrap_servers, config.group_id, config.auto_offset_reset
+        );
+
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", &config.bootstrap_servers)
             .set("group.id", &config.group_id)
             .set("enable.auto.commit", "false")
+            .set("auto.offset.reset", &config.auto_offset_reset)
+            .set("enable.partition.eof", "false")
+            .set("allow.auto.create.topics", "true")
+            .set("enable.auto.offset.store", "false")
             .set(
                 "max.poll.interval.ms",
                 config.consumer_max_poll_interval_ms.to_string(),
@@ -440,8 +449,14 @@ impl KafkaConsumer {
                 "session.timeout.ms",
                 config.consumer_session_timeout_ms.to_string(),
             )
+            .set("heartbeat.interval.ms", "3000")
+            .set(
+                "partition.assignment.strategy",
+                "org.apache.kafka.clients.consumer.RangeAssignor",
+            )
             .create()?;
 
+        tracing::info!("KafkaConsumer: ✅ Consumer created successfully");
         Ok(Self {
             consumer: Some(Arc::new(consumer)),
             config,
@@ -626,6 +641,80 @@ impl KafkaConsumer {
         }
     }
 
+    pub async fn poll_cdc_events_with_message(
+        &self,
+    ) -> Result<Option<(serde_json::Value, rdkafka::message::BorrowedMessage<'_>)>, BankingKafkaError>
+    {
+        if !self.config.enabled || self.consumer.is_none() {
+            tracing::info!(
+                "KafkaConsumer: poll_cdc_events_with_message - Kafka disabled or no consumer"
+            );
+            return Ok(None);
+        }
+
+        let mut stream = self.consumer.as_ref().unwrap().stream();
+        match timeout(Duration::from_millis(100), stream.next()).await {
+            Ok(Some(Ok(msg))) => {
+                tracing::info!(
+                    "KafkaConsumer: poll_cdc_events_with_message - Received message from topic: {:?}, partition: {:?}, offset: {:?}",
+                    msg.topic(), msg.partition(), msg.offset()
+                );
+
+                let payload = msg.payload().ok_or_else(|| {
+                    tracing::error!(
+                        "KafkaConsumer: poll_cdc_events_with_message - Empty message payload"
+                    );
+                    BankingKafkaError::ConsumerError("Empty message payload".to_string())
+                })?;
+
+                tracing::info!(
+                    "KafkaConsumer: poll_cdc_events_with_message - Raw payload length: {} bytes",
+                    payload.len()
+                );
+
+                let cdc_event: serde_json::Value =
+                    serde_json::from_slice(payload).map_err(|e| {
+                        tracing::error!(
+                            "KafkaConsumer: poll_cdc_events_with_message - Failed to deserialize CDC event: {}",
+                            e
+                        );
+                        tracing::error!(
+                            "KafkaConsumer: poll_cdc_events_with_message - Raw payload (first 200 chars): {:?}",
+                            String::from_utf8_lossy(&payload[..payload.len().min(200)])
+                        );
+                        BankingKafkaError::ConsumerError(
+                            "Failed to deserialize CDC event".to_string(),
+                        )
+                    })?;
+
+                tracing::info!(
+                    "KafkaConsumer: poll_cdc_events_with_message - Successfully deserialized CDC event: {:?}",
+                    cdc_event
+                );
+                Ok(Some((cdc_event, msg)))
+            }
+            Ok(Some(Err(e))) => {
+                tracing::error!(
+                    "KafkaConsumer: poll_cdc_events_with_message - Error receiving message: {}",
+                    e
+                );
+                Err(e.into())
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    "KafkaConsumer: poll_cdc_events_with_message - No message available"
+                );
+                Ok(None)
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "KafkaConsumer: poll_cdc_events_with_message - Timeout, no message"
+                );
+                Ok(None) // Timeout
+            }
+        }
+    }
+
     pub async fn poll_cache_updates(&self) -> Result<Option<Account>, BankingKafkaError> {
         if !self.config.enabled || self.consumer.is_none() {
             return Ok(None);
@@ -694,18 +783,63 @@ impl KafkaConsumer {
         }
     }
 
-    /// Commit the current message offset
+    /// Commit a specific message offset
+    pub async fn commit_message(
+        &self,
+        message: &rdkafka::message::BorrowedMessage<'_>,
+    ) -> Result<(), BankingKafkaError> {
+        if !self.config.enabled || self.consumer.is_none() {
+            tracing::warn!("KafkaConsumer: commit_message - Kafka disabled or no consumer");
+            return Ok(());
+        }
+
+        tracing::info!(
+            "KafkaConsumer: commit_message - Committing message offset: {:?}, partition: {:?}, topic: {:?}",
+            message.offset(), message.partition(), message.topic()
+        );
+
+        // Commit the specific message offset
+        match self
+            .consumer
+            .as_ref()
+            .unwrap()
+            .commit_message(message, CommitMode::Async)
+        {
+            Ok(_) => {
+                tracing::info!(
+                    "KafkaConsumer: commit_message - Successfully committed offset {:?}",
+                    message.offset()
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    "KafkaConsumer: commit_message - Failed to commit offset {:?}: {}",
+                    message.offset(),
+                    e
+                );
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Commit the current message offset (deprecated - use commit_message instead)
     pub async fn commit_current_message(&self) -> Result<(), BankingKafkaError> {
         if !self.config.enabled || self.consumer.is_none() {
             return Ok(());
         }
 
-        // Commit the current offset
+        // For backward compatibility, commit the consumer state
         self.consumer
             .as_ref()
             .unwrap()
             .commit_consumer_state(CommitMode::Async)?;
         Ok(())
+    }
+
+    /// Get the Kafka configuration
+    pub fn get_config(&self) -> &KafkaConfig {
+        &self.config
     }
 }
 

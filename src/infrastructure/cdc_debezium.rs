@@ -4,6 +4,7 @@ use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rdkafka::Message;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
@@ -22,10 +23,7 @@ use crate::infrastructure::cdc_integration_helper::{
     MigrationIntegrityReport, MigrationStats,
 };
 use crate::infrastructure::cdc_producer::{BusinessLogicValidator, CDCProducer, CDCProducerConfig};
-use crate::infrastructure::cdc_service_manager::{
-    CDCServiceManager as OptimizedCDCServiceManager, EnhancedCDCMetrics, OptimizationConfig,
-    ServiceState,
-};
+use crate::infrastructure::event_processor::EventProcessor;
 
 /// Kafka message structure for CDC events
 #[derive(Debug, Clone)]
@@ -229,8 +227,8 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
             return Ok(());
         }
 
-        for msg in messages {
-            sqlx::query!(
+        for msg in &messages {
+            let result = sqlx::query!(
                 r#"
                 INSERT INTO kafka_outbox_cdc
                     (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at)
@@ -245,8 +243,13 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
                 msg.metadata
             )
             .execute(&mut **tx)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to insert CDC outbox message: {}", e))?;
+            .await;
+
+            if let Err(e) = &result {
+                tracing::error!("CDCOutboxRepository: Failed to insert OutboxMessage: {:?} | aggregate_id: {:?}, event_id: {:?}, event_type: {:?}, topic: {:?}, metadata: {:?}", e, msg.aggregate_id, msg.event_id, msg.event_type, msg.topic, msg.metadata);
+            }
+
+            result.map_err(|e| anyhow::anyhow!("Failed to insert CDC outbox message: {}", e))?;
         }
         Ok(())
     }
@@ -354,6 +357,7 @@ impl CDCEventProcessor {
         tracing::info!(
             "🔍 CDC Event Processor: Starting to process CDC event with optimized processor"
         );
+        tracing::info!("🔍 CDC Event Processor: Event details: {:?}", cdc_event);
 
         // Use the optimized processor
         match self
@@ -382,6 +386,7 @@ impl CDCEventProcessor {
                     .events_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 error!("CDC Event Processor: Failed to process event: {}", e);
+                tracing::error!("CDC Event Processor: Failed to process event: {}", e);
                 Err(e)
             }
         }
@@ -420,23 +425,27 @@ impl CDCEventProcessor {
     }
 }
 
+#[async_trait]
+impl EventProcessor for CDCEventProcessor {
+    async fn process_event(&self, event: serde_json::Value) -> Result<()> {
+        self.process_cdc_event(event).await
+    }
+}
+
 /// CDC Consumer - consumes CDC events from Kafka Connect
 pub struct CDCConsumer {
     kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
     cdc_topic: String,
-    shutdown_rx: mpsc::Receiver<()>,
 }
 
 impl CDCConsumer {
     pub fn new(
         kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
         cdc_topic: String,
-        shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
         Self {
             kafka_consumer,
             cdc_topic,
-            shutdown_rx,
         }
     }
 
@@ -450,32 +459,87 @@ impl CDCConsumer {
     /// Start consuming CDC events with mutex-wrapped processor
     pub async fn start_consuming_with_mutex(
         &mut self,
-        processor: Arc<tokio::sync::Mutex<CDCEventProcessor>>,
+        processor: Arc<CDCEventProcessor>,
+        mut shutdown_rx: mpsc::Receiver<()>,
     ) -> Result<()> {
+        tracing::info!(
+            "CDCConsumer::start_consuming_with_mutex() called for topic: {}",
+            self.cdc_topic
+        );
         info!("Starting CDC consumer for topic: {}", self.cdc_topic);
         tracing::info!(
             "CDCConsumer: Entered start_consuming async loop for topic: {}",
             self.cdc_topic
         );
 
-        // Subscribe to CDC topic directly
-        tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
-        let subscribe_result = self
-            .kafka_consumer
-            .subscribe_to_topic(&self.cdc_topic)
-            .await;
-        match &subscribe_result {
-            Ok(_) => tracing::info!(
-                "CDCConsumer: Successfully subscribed to topic: {}",
-                self.cdc_topic
-            ),
-            Err(e) => tracing::error!(
-                "CDCConsumer: Failed to subscribe to topic: {}: {}",
-                self.cdc_topic,
-                e
-            ),
+        // Validate Kafka consumer is properly configured
+        let kafka_config = self.kafka_consumer.get_config();
+        if !kafka_config.enabled {
+            tracing::error!("CDCConsumer: Kafka consumer is disabled");
+            return Err(anyhow::anyhow!("Kafka consumer is disabled"));
         }
-        subscribe_result.map_err(|e| anyhow::anyhow!("Failed to subscribe to CDC topic: {}", e))?;
+
+        tracing::info!(
+            "CDCConsumer: Kafka consumer config - enabled: {}, group_id: {}, bootstrap_servers: {}",
+            kafka_config.enabled,
+            kafka_config.group_id,
+            kafka_config.bootstrap_servers
+        );
+
+        // Subscribe to CDC topic with retry logic
+        tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
+        let max_subscription_retries = 3;
+        let mut subscription_retries = 0;
+
+        loop {
+            let subscribe_result = self
+                .kafka_consumer
+                .subscribe_to_topic(&self.cdc_topic)
+                .await;
+
+            match &subscribe_result {
+                Ok(_) => {
+                    tracing::info!(
+                        "CDCConsumer: ✅ Successfully subscribed to topic: {}",
+                        self.cdc_topic
+                    );
+
+                    // Wait a moment for the consumer to join the group
+                    tracing::info!("CDCConsumer: Waiting for consumer to join group...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    // Log consumer group status
+                    tracing::info!("CDCConsumer: Consumer group join completed");
+                    break;
+                }
+                Err(e) => {
+                    subscription_retries += 1;
+                    tracing::error!(
+                        "CDCConsumer: ❌ Failed to subscribe to topic: {} (attempt {}/{}): {}",
+                        self.cdc_topic,
+                        subscription_retries,
+                        max_subscription_retries,
+                        e
+                    );
+
+                    if subscription_retries >= max_subscription_retries {
+                        tracing::error!(
+                            "CDCConsumer: Failed to subscribe to CDC topic after {} attempts: {}",
+                            max_subscription_retries,
+                            e
+                        );
+                        return Err(anyhow::anyhow!(
+                            "Failed to subscribe to CDC topic after {} attempts: {}",
+                            max_subscription_retries,
+                            e
+                        ));
+                    }
+
+                    // Wait before retry
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
 
         tracing::info!(
             "CDCConsumer: Starting main consumption loop for topic: {}",
@@ -483,6 +547,8 @@ impl CDCConsumer {
         );
         let mut poll_count = 0;
         let mut last_log_time = std::time::Instant::now();
+        let mut consecutive_empty_polls = 0;
+        let max_consecutive_empty_polls = 100; // Log warning after 100 empty polls
 
         // Log immediately to confirm we're in the loop
         tracing::info!("CDCConsumer: Entering main polling loop");
@@ -504,41 +570,61 @@ impl CDCConsumer {
             }
 
             tokio::select! {
-                _ = self.shutdown_rx.recv() => {
+                _ = shutdown_rx.recv() => {
                     info!("CDC consumer received shutdown signal");
                     tracing::info!("CDCConsumer: Received shutdown signal, breaking loop");
                     break;
                 }
-                message_result = self.kafka_consumer.poll_cdc_events() => {
+                message_result = self.kafka_consumer.poll_cdc_events_with_message() => {
                     match message_result {
-                        Ok(Some(cdc_event)) => {
+                        Ok(Some((cdc_event, message))) => {
+                            consecutive_empty_polls = 0; // Reset counter on successful message
                             tracing::info!("CDCConsumer: ✅ Received CDC event on poll #{}: {:?}", poll_count, cdc_event);
-                            match processor.lock().await.process_cdc_event(cdc_event).await {
+                            tracing::info!("CDCConsumer: 📊 Message details - Topic: {:?}, Partition: {:?}, Offset: {:?}",
+                                message.topic(), message.partition(), message.offset());
+
+                            match processor.process_cdc_event(cdc_event).await {
                                 Ok(_) => {
                                 tracing::info!("CDCConsumer: ✅ Successfully processed CDC event on poll #{}", poll_count);
                                     // CRITICAL: Commit offset after successful processing
-                                    if let Err(e) = self.kafka_consumer.commit_current_message().await {
+                                    tracing::info!("CDCConsumer: 🔄 Attempting to commit offset for message at offset {:?}", message.offset());
+                                    if let Err(e) = self.kafka_consumer.commit_message(&message).await {
                                         error!("CDCConsumer: ❌ Failed to commit offset: {}", e);
+                                        tracing::error!("CDCConsumer: ❌ Failed to commit offset: {}", e);
                                     } else {
                                         tracing::info!("CDCConsumer: ✅ Successfully committed offset for poll #{}", poll_count);
                                     }
                                 }
                                 Err(e) => {
                                     error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
+                                    tracing::error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
                                     // Don't commit offset on failure - let it be retried
                                 }
                             }
                         }
                         Ok(None) => {
+                            consecutive_empty_polls += 1;
                             if poll_count <= 10 || poll_count % 50 == 0 { // Log every 50th empty poll to avoid spam
                                 tracing::info!(
-                                    "CDCConsumer: ⏳ No CDC event available on poll #{} for topic: {}",
-                                    poll_count, self.cdc_topic
+                                    "CDCConsumer: ⏳ No CDC event available on poll #{} for topic: {} (consecutive empty: {})",
+                                    poll_count, self.cdc_topic, consecutive_empty_polls
                                 );
+                            }
+
+                            // Log warning if too many consecutive empty polls
+                            if consecutive_empty_polls >= max_consecutive_empty_polls {
+                                tracing::warn!(
+                                    "CDCConsumer: ⚠️ No messages received for {} consecutive polls. Check if Debezium is producing messages to topic: {}",
+                                    consecutive_empty_polls,
+                                    self.cdc_topic
+                                );
+                                consecutive_empty_polls = 0; // Reset to avoid spam
                             }
                         }
                         Err(e) => {
                             tracing::error!("CDCConsumer: ❌ Error polling CDC message on poll #{}: {}", poll_count, e);
+                            // Add delay on error to avoid tight error loops
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
                 }
@@ -567,555 +653,6 @@ impl CDCConsumer {
         Ok(())
     }
 }
-
-/// Enhanced CDC Service Manager - manages the entire CDC pipeline with optimized components
-pub struct CDCServiceManager {
-    config: DebeziumConfig,
-    outbox_repo: Arc<CDCOutboxRepository>,
-    cdc_consumer: Option<CDCConsumer>,
-    processor: Arc<tokio::sync::Mutex<CDCEventProcessor>>,
-    // Add the optimized producer
-    cdc_producer: Option<Arc<tokio::sync::Mutex<CDCProducer>>>,
-    shutdown_tx: mpsc::Sender<()>,
-    cleanup_handle: Option<tokio::task::JoinHandle<()>>,
-    cdc_consumer_handle: Option<tokio::task::JoinHandle<()>>,
-
-    // Enhanced components from service manager
-    optimized_service_manager: Option<OptimizedCDCServiceManager>,
-    integration_helper: Option<CDCIntegrationHelper>,
-
-    // Enhanced state management
-    service_state: Arc<tokio::sync::RwLock<ServiceState>>,
-    enhanced_metrics: Arc<EnhancedCDCMetrics>,
-}
-
-impl CDCServiceManager {
-    pub async fn new(
-        config: DebeziumConfig,
-        outbox_repo: Arc<CDCOutboxRepository>,
-        kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
-        kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
-        cache_service: Arc<dyn CacheServiceTrait>,
-        projection_store: Arc<dyn ProjectionStoreTrait>,
-        business_config: Option<BusinessLogicConfig>,
-        producer_config: Option<CDCProducerConfig>,
-    ) -> Result<Self> {
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-
-        // Create optimized event processor
-        let processor = Arc::new(tokio::sync::Mutex::new(CDCEventProcessor::new(
-            kafka_producer.clone(),
-            cache_service.clone(),
-            projection_store.clone(),
-            business_config,
-        )));
-
-        // Create optimized CDC producer
-        let cdc_producer = if let Some(prod_config) = producer_config {
-            Some(Arc::new(tokio::sync::Mutex::new(
-                CDCProducer::new(
-                    kafka_producer.clone(),
-                    outbox_repo.pool.clone(),
-                    prod_config,
-                )
-                .await?,
-            )))
-        } else {
-            None
-        };
-
-        let cdc_topic = format!(
-            "{}.{}",
-            config.topic_prefix,
-            config.table_include_list // Do not remove 'public.'
-        );
-
-        let cdc_consumer = CDCConsumer::new(kafka_consumer.clone(), cdc_topic, shutdown_rx);
-
-        // Initialize enhanced service manager with proper configuration
-        let optimization_config = OptimizationConfig::default();
-        let enhanced_service_manager = OptimizedCDCServiceManager::new(
-            config.clone(),
-            outbox_repo.clone(),
-            kafka_producer.clone(),
-            kafka_consumer.clone(),
-            cache_service.clone(),
-            projection_store.clone(),
-        )?;
-
-        Ok(Self {
-            config,
-            outbox_repo,
-            cdc_consumer: Some(cdc_consumer),
-            processor,
-            cdc_producer,
-            shutdown_tx,
-            cleanup_handle: None,
-            cdc_consumer_handle: None,
-            optimized_service_manager: Some(enhanced_service_manager),
-            integration_helper: None,
-            service_state: Arc::new(tokio::sync::RwLock::new(ServiceState::Stopped)),
-            enhanced_metrics: Arc::new(EnhancedCDCMetrics::default()),
-        })
-    }
-
-    /// Start the CDC service
-    pub async fn start(&mut self) -> Result<()> {
-        // Update service state
-        self.set_service_state(ServiceState::Starting).await;
-
-        info!("Starting CDC Service Manager with optimized components");
-
-        // Create CDC table if it doesn't exist
-        tracing::info!("CDC Service Manager: Creating CDC outbox table...");
-        self.outbox_repo.create_cdc_outbox_table().await?;
-        tracing::info!("CDC Service Manager: ✅ CDC outbox table created/verified");
-
-        // Start the optimized CDC producer if configured
-        if let Some(ref mut producer) = self.cdc_producer {
-            tracing::info!("CDC Service Manager: Starting optimized CDC producer...");
-            producer.lock().await.start().await?;
-            tracing::info!("CDC Service Manager: ✅ Optimized CDC producer started");
-        }
-
-        // Start batch processor for the event processor
-        tracing::info!("CDC Service Manager: Starting batch processor...");
-        self.processor.lock().await.start_batch_processor().await?;
-        tracing::info!("CDC Service Manager: ✅ Batch processor started");
-
-        // Start enhanced service manager if available
-        if let Some(ref mut enhanced_manager) = self.optimized_service_manager {
-            tracing::info!("CDC Service Manager: Starting enhanced service manager...");
-            enhanced_manager.start().await?;
-            tracing::info!("CDC Service Manager: ✅ Enhanced service manager started");
-        }
-
-        // Start CDC consumer
-        if let Some(mut consumer) = self.cdc_consumer.take() {
-            let processor = self.processor.clone();
-            let cdc_topic = format!(
-                "{}.{}",
-                self.config.topic_prefix,
-                self.config.table_include_list // Do not remove 'public.'
-            );
-            tracing::info!(
-                "CDC Service Manager: Starting CDC consumer for topic: {}",
-                cdc_topic
-            );
-            tracing::info!("CDC Service Manager: About to spawn CDC consumer task");
-
-            let handle = tokio::spawn(async move {
-                tracing::info!("CDC Service Manager: CDC consumer task spawned and running");
-                tracing::info!("CDC Service Manager: About to call consumer.start_consuming()");
-
-                match consumer.start_consuming_with_mutex(processor).await {
-                    Ok(_) => {
-                        tracing::info!("CDC Service Manager: CDC consumer completed normally");
-                    }
-                    Err(e) => {
-                        error!("CDC Service Manager: CDC consumer failed: {}", e);
-                        tracing::error!("CDC Service Manager: CDC consumer error details: {:?}", e);
-                    }
-                }
-                tracing::error!("CDC Service Manager: CDC consumer task exited unexpectedly!");
-            });
-
-            self.cdc_consumer_handle = Some(handle);
-            tracing::info!("CDC Service Manager: ✅ CDC consumer task spawned and handle stored");
-        } else {
-            tracing::error!("CDC Service Manager: ❌ No CDC consumer available to start");
-        }
-
-        // Start cleanup task
-        let outbox_repo = self.outbox_repo.clone();
-        let cleanup_handle = tokio::spawn(async move {
-            tracing::info!("CDC Service Manager: Starting cleanup task");
-            let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Run every hour
-            loop {
-                interval.tick().await;
-                if let Err(e) = outbox_repo
-                    .cleanup_old_messages(Duration::from_secs(86400 * 7))
-                    .await
-                {
-                    // Clean up messages older than 7 days
-                    error!("Failed to cleanup old CDC messages: {}", e);
-                }
-            }
-        });
-        self.cleanup_handle = Some(cleanup_handle);
-        tracing::info!("CDC Service Manager: ✅ Cleanup task spawned");
-
-        // Update service state to running
-        self.set_service_state(ServiceState::Running).await;
-
-        info!("CDC Service Manager started successfully with optimized components");
-        Ok(())
-    }
-
-    /// Stop the CDC service
-    pub async fn stop(&self) -> Result<()> {
-        // Update service state
-        self.set_service_state(ServiceState::Stopping).await;
-
-        info!("Stopping CDC Service Manager");
-
-        // Send shutdown signal
-        if let Err(e) = self.shutdown_tx.send(()).await {
-            warn!("Failed to send shutdown signal to CDC consumer: {}", e);
-        }
-
-        // Stop the enhanced service manager if available
-        if let Some(ref enhanced_manager) = self.optimized_service_manager {
-            if let Err(e) = enhanced_manager.stop().await {
-                error!("Failed to stop enhanced service manager: {}", e);
-            }
-        }
-
-        // Stop the CDC producer
-        if let Some(ref producer) = self.cdc_producer {
-            if let Err(e) = producer.lock().await.stop().await {
-                error!("Failed to stop CDC producer: {}", e);
-            }
-        }
-
-        // Shutdown the event processor
-        if let Err(e) = self.processor.lock().await.shutdown().await {
-            error!("Failed to shutdown event processor: {}", e);
-        }
-
-        // Cancel cleanup task
-        if let Some(handle) = &self.cleanup_handle {
-            handle.abort();
-        }
-
-        // Cancel CDC consumer task
-        if let Some(handle) = &self.cdc_consumer_handle {
-            handle.abort();
-        }
-
-        // Update service state to stopped
-        self.set_service_state(ServiceState::Stopped).await;
-
-        info!("CDC Service Manager stopped");
-        Ok(())
-    }
-
-    /// Get CDC metrics
-    pub async fn get_metrics(&self) -> Result<CDCMetrics> {
-        let processor = self.processor.lock().await;
-        let metrics = processor.get_metrics();
-        Ok(CDCMetrics {
-            events_processed: std::sync::atomic::AtomicU64::new(
-                metrics
-                    .events_processed
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            events_failed: std::sync::atomic::AtomicU64::new(
-                metrics
-                    .events_failed
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            processing_latency_ms: std::sync::atomic::AtomicU64::new(
-                metrics
-                    .processing_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            total_latency_ms: std::sync::atomic::AtomicU64::new(
-                metrics
-                    .total_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            cache_invalidations: std::sync::atomic::AtomicU64::new(
-                metrics
-                    .cache_invalidations
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            projection_updates: std::sync::atomic::AtomicU64::new(
-                metrics
-                    .projection_updates
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-        })
-    }
-
-    /// Get optimized metrics
-    pub async fn get_optimized_metrics(
-        &self,
-    ) -> Result<crate::infrastructure::cdc_event_processor::OptimizedCDCMetrics> {
-        Ok(self.processor.lock().await.get_optimized_metrics().await)
-    }
-
-    /// Get producer metrics if available
-    pub async fn get_producer_metrics(
-        &self,
-    ) -> Option<crate::infrastructure::cdc_producer::CDCProducerMetrics> {
-        if let Some(ref producer) = self.cdc_producer {
-            let producer_guard = producer.lock().await;
-            let metrics = producer_guard.get_metrics();
-            Some(crate::infrastructure::cdc_producer::CDCProducerMetrics {
-                messages_produced: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .messages_produced
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                messages_failed: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .messages_failed
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                batch_count: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .batch_count
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                avg_batch_size: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .avg_batch_size
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                produce_latency_ms: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .produce_latency_ms
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                db_write_latency_ms: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .db_write_latency_ms
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                kafka_produce_latency_ms: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .kafka_produce_latency_ms
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                circuit_breaker_trips: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .circuit_breaker_trips
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                retries_attempted: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .retries_attempted
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                health_check_failures: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .health_check_failures
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                last_successful_produce: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .last_successful_produce
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                queue_depth: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .queue_depth
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                throughput_per_second: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .throughput_per_second
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                validation_failures: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .validation_failures
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                duplicate_messages_rejected: std::sync::atomic::AtomicU64::new(
-                    metrics
-                        .duplicate_messages_rejected
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Get producer health status if available
-    pub async fn get_producer_health(
-        &self,
-    ) -> Option<crate::infrastructure::cdc_producer::HealthStatus> {
-        if let Some(ref producer) = self.cdc_producer {
-            Some(producer.lock().await.get_health_status().await)
-        } else {
-            None
-        }
-    }
-
-    /// Generate Debezium connector configuration
-    pub fn get_debezium_config(&self) -> serde_json::Value {
-        self.outbox_repo.generate_debezium_config(&self.config)
-    }
-
-    /// Produce a message using the optimized producer
-    pub async fn produce_message(&self, message: CDCOutboxMessage) -> Result<()> {
-        if let Some(ref producer) = self.cdc_producer {
-            // Convert to producer's CDCOutboxMessage type
-            let producer_message = crate::infrastructure::cdc_producer::CDCOutboxMessage {
-                id: message.id,
-                aggregate_id: message.aggregate_id,
-                event_id: message.event_id,
-                event_type: message.event_type,
-                topic: message.topic,
-                metadata: message.metadata,
-                created_at: message.created_at,
-                updated_at: message.updated_at,
-            };
-            producer
-                .lock()
-                .await
-                .produce_message(producer_message)
-                .await
-        } else {
-            Err(anyhow::anyhow!("CDC producer not configured"))
-        }
-    }
-
-    /// Initialize integration helper for migration operations
-    pub async fn initialize_integration_helper(
-        &mut self,
-        config: CDCIntegrationConfig,
-    ) -> Result<()> {
-        let integration_helper = CDCIntegrationHelper::new(self.outbox_repo.pool.clone(), config);
-        self.integration_helper = Some(integration_helper);
-
-        // Update enhanced metrics to reflect integration helper initialization
-        self.enhanced_metrics
-            .integration_helper_initialized
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        info!("CDC Integration Helper initialized");
-        Ok(())
-    }
-
-    /// Migrate existing outbox to CDC format
-    pub async fn migrate_existing_outbox(
-        &self,
-        old_repo: &crate::infrastructure::outbox::PostgresOutboxRepository,
-    ) -> Result<MigrationStats> {
-        if let Some(ref helper) = self.integration_helper {
-            // Update service state during migration
-            self.set_service_state(ServiceState::Migrating).await;
-
-            let result = helper
-                .migrate_existing_outbox(old_repo, &self.outbox_repo)
-                .await;
-
-            // Update service state back to running after migration
-            self.set_service_state(ServiceState::Running).await;
-
-            result
-        } else {
-            Err(anyhow::anyhow!(
-                "Integration helper not initialized. Call initialize_integration_helper first."
-            ))
-        }
-    }
-
-    /// Verify migration integrity
-    pub async fn verify_migration_integrity(&self) -> Result<MigrationIntegrityReport> {
-        if let Some(ref helper) = self.integration_helper {
-            helper.verify_migration_integrity(&self.outbox_repo).await
-        } else {
-            Err(anyhow::anyhow!("Integration helper not initialized"))
-        }
-    }
-
-    /// Get enhanced service status with all metrics
-    pub async fn get_enhanced_status(&self) -> serde_json::Value {
-        let processor_guard = self.processor.lock().await;
-        let processor_metrics = processor_guard.get_metrics();
-        let mut status = serde_json::json!({
-            "service_state": format!("{:?}", *self.service_state.read().await),
-            "basic_metrics": {
-                "events_processed": processor_metrics.events_processed.load(std::sync::atomic::Ordering::Relaxed),
-                "events_failed": processor_metrics.events_failed.load(std::sync::atomic::Ordering::Relaxed),
-                "cache_invalidations": processor_metrics.cache_invalidations.load(std::sync::atomic::Ordering::Relaxed),
-                "projection_updates": processor_metrics.projection_updates.load(std::sync::atomic::Ordering::Relaxed),
-            },
-            "enhanced_metrics": {
-                "memory_usage_bytes": self.enhanced_metrics.memory_usage_bytes.load(std::sync::atomic::Ordering::Relaxed),
-                "throughput_per_second": self.enhanced_metrics.throughput_per_second.load(std::sync::atomic::Ordering::Relaxed),
-                "error_rate": self.enhanced_metrics.error_rate.load(std::sync::atomic::Ordering::Relaxed),
-                "circuit_breaker_trips": self.enhanced_metrics.circuit_breaker_trips.load(std::sync::atomic::Ordering::Relaxed),
-                "integration_helper_initialized": self.enhanced_metrics.integration_helper_initialized.load(std::sync::atomic::Ordering::Relaxed),
-            }
-        });
-
-        // Add optimized metrics if available
-        if let Ok(optimized_metrics) = self.get_optimized_metrics().await {
-            status["optimized_metrics"] = serde_json::json!({
-                "business_validation_failures": optimized_metrics.business_validation_failures.load(std::sync::atomic::Ordering::Relaxed),
-                "duplicate_events_skipped": optimized_metrics.duplicate_events_skipped.load(std::sync::atomic::Ordering::Relaxed),
-                "projection_update_failures": optimized_metrics.projection_update_failures.load(std::sync::atomic::Ordering::Relaxed),
-            });
-        }
-
-        // Add producer health if available
-        if let Some(producer_health) = self.get_producer_health().await {
-            status["producer_health"] =
-                serde_json::to_value(producer_health).unwrap_or(serde_json::Value::Null);
-        }
-
-        // Add enhanced service manager status if available
-        if let Some(ref enhanced_manager) = self.optimized_service_manager {
-            let enhanced_status = enhanced_manager.get_service_status().await;
-            status["enhanced_service_manager"] = enhanced_status;
-        }
-
-        status
-    }
-
-    /// Update service state
-    pub async fn set_service_state(&self, state: ServiceState) {
-        let mut state_guard = self.service_state.write().await;
-        *state_guard = state;
-    }
-
-    /// Get current service state
-    pub async fn get_service_state(&self) -> ServiceState {
-        self.service_state.read().await.clone()
-    }
-
-    /// Get enhanced metrics
-    pub fn get_enhanced_metrics(&self) -> &EnhancedCDCMetrics {
-        &self.enhanced_metrics
-    }
-
-    /// Cleanup old messages from both outbox systems
-    pub async fn cleanup_old_messages(
-        &self,
-        old_repo: &crate::infrastructure::outbox::PostgresOutboxRepository,
-        older_than: std::time::Duration,
-    ) -> Result<(usize, usize)> {
-        if let Some(ref helper) = self.integration_helper {
-            helper
-                .cleanup_old_messages(old_repo, &self.outbox_repo, older_than)
-                .await
-        } else {
-            // Fallback to basic cleanup
-            let old_cleaned = 0; // Would need to implement
-            let new_cleaned = self.outbox_repo.cleanup_old_messages(older_than).await?;
-            Ok((old_cleaned, new_cleaned))
-        }
-    }
-}
-
-/// Extension trait to allow downcasting
-pub trait AsAny {
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-
-impl<T: 'static> AsAny for T {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-// Integration helper is now imported from cdc_integration_helper module
 
 /// Health check for CDC service
 pub struct CDCHealthCheck {

@@ -18,15 +18,6 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-// Optimized connection pool configuration
-#[derive(Debug, Clone)]
-pub struct ConnectionPoolConfig {
-    pub max_connections: u32,
-    pub min_connections: u32,
-    pub max_lifetime: Duration,
-    pub idle_timeout: Duration,
-}
-
 // High-performance message cache with TTL
 #[derive(Debug)]
 pub struct MessageCache {
@@ -626,17 +617,6 @@ impl CDCProducerHealthCheck {
         // Quick check without full health check
         self.metrics.get_success_rate() >= 95.0
     }
-}
-
-/// Kafka message structure for CDC events
-#[derive(Debug, Clone)]
-pub struct KafkaMessage {
-    pub topic: String,
-    pub partition: i32,
-    pub offset: i64,
-    pub key: Option<Vec<u8>>,
-    pub payload: Vec<u8>,
-    pub timestamp: Option<i64>,
 }
 
 /// CDC-based outbox message structure
