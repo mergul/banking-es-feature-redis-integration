@@ -4,5 +4,6 @@
   "rust-analyzer.checkOnSave.command": "clippy",
   "rust-analyzer.cargo.loadOutDirsFromCheck": true,
   "rust-analyzer.procMacro.enable": true,
-  "cmake.ignoreCMakeListsMissing": true
+  "cmake.ignoreCMakeListsMissing": true,
+  "editor.fontSize": 22
 }

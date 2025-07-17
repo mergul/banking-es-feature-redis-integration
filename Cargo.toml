@@ -92,3 +92,6 @@ mockall = "0.13.1"
 banking-es = { path = "." }
 once_cell = "1.19"
 toml = "0.8"
+
+[lints.rust]
+warnings = "allow"

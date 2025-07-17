@@ -222,6 +222,133 @@ impl CDCOutboxRepository {
     }
 }
 
+/// OutboxBatcher - Buffers outbox messages and flushes them in batches
+/// Flushes when buffer reaches batch_size (1000) or after batch_timeout (100ms)
+pub struct OutboxBatcher {
+    sender: mpsc::Sender<crate::infrastructure::outbox::OutboxMessage>,
+}
+
+impl OutboxBatcher {
+    pub fn new(
+        repo: Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait + Send + Sync>,
+        pool: Arc<sqlx::PgPool>,
+        batch_size: usize,
+        batch_timeout: Duration,
+    ) -> Self {
+        let (sender, mut receiver) =
+            mpsc::channel::<crate::infrastructure::outbox::OutboxMessage>(batch_size * 2);
+
+        // Spawn background task for batching and flushing
+        tokio::spawn(async move {
+            let mut buffer = Vec::with_capacity(batch_size);
+            let mut last_flush = tokio::time::Instant::now();
+
+            tracing::info!(
+                "OutboxBatcher: Started with batch_size={}, batch_timeout={:?}",
+                batch_size,
+                batch_timeout
+            );
+
+            loop {
+                tokio::select! {
+                    Some(msg) = receiver.recv() => {
+                        buffer.push(msg);
+                        if buffer.len() >= batch_size {
+                            tracing::debug!(
+                                "OutboxBatcher: Flushing {} messages (size threshold reached)",
+                                buffer.len()
+                            );
+                            Self::flush(&repo, &pool, &mut buffer).await;
+                            last_flush = tokio::time::Instant::now();
+                        }
+                    }
+                    _ = tokio::time::sleep_until(last_flush + batch_timeout), if !buffer.is_empty() => {
+                        tracing::debug!(
+                            "OutboxBatcher: Flushing {} messages (timeout reached)",
+                            buffer.len()
+                        );
+                        Self::flush(&repo, &pool, &mut buffer).await;
+                        last_flush = tokio::time::Instant::now();
+                    }
+                }
+            }
+        });
+
+        Self { sender }
+    }
+
+    /// Submit a message to the batcher
+    pub async fn submit(&self, msg: crate::infrastructure::outbox::OutboxMessage) -> Result<()> {
+        self.sender
+            .send(msg)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to submit message to outbox batcher: {}", e))
+    }
+
+    /// Flush the current buffer to the database
+    async fn flush(
+        repo: &Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait + Send + Sync>,
+        pool: &Arc<sqlx::PgPool>,
+        buffer: &mut Vec<crate::infrastructure::outbox::OutboxMessage>,
+    ) {
+        if buffer.is_empty() {
+            return;
+        }
+
+        let start_time = std::time::Instant::now();
+        let message_count = buffer.len();
+
+        // Begin transaction
+        let mut transaction = match pool.begin().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("OutboxBatcher: Failed to begin transaction: {}", e);
+                return;
+            }
+        };
+
+        // Add messages to outbox
+        match repo
+            .add_pending_messages(&mut transaction, buffer.clone())
+            .await
+        {
+            Ok(_) => {
+                // Commit transaction
+                match transaction.commit().await {
+                    Ok(_) => {
+                        let duration = start_time.elapsed();
+                        tracing::info!(
+                            "OutboxBatcher: Successfully flushed {} messages in {:?}",
+                            message_count,
+                            duration
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("OutboxBatcher: Failed to commit outbox batch: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "OutboxBatcher: Failed to batch insert outbox messages: {}",
+                    e
+                );
+            }
+        }
+
+        // Clear buffer after flush (successful or not)
+        buffer.clear();
+    }
+
+    /// Create a default OutboxBatcher with 1000 messages batch size and 100ms timeout
+    pub fn new_default(
+        repo: Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait + Send + Sync>,
+        pool: Arc<sqlx::PgPool>,
+    ) -> Self {
+        Self::new(repo, pool, 1000, Duration::from_millis(100))
+    }
+}
+
 /// Implementation of the existing OutboxRepositoryTrait for CDC
 /// This allows the CDC outbox to be used as a drop-in replacement
 #[async_trait]
@@ -235,29 +362,67 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
             return Ok(());
         }
 
-        for msg in &messages {
-            let result = sqlx::query!(
-                r#"
-                INSERT INTO kafka_outbox_cdc
-                    (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at)
-                VALUES
-                    ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-                "#,
-                msg.aggregate_id,
-                msg.event_id,
-                msg.event_type,
-                msg.payload,
-                msg.topic,
-                msg.metadata
-            )
-            .execute(&mut **tx)
-            .await;
+        let chunk_size = 1000;
+        for chunk in messages.chunks(chunk_size) {
+            let mut query = String::from(
+                "INSERT INTO kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) VALUES "
+            );
 
-            if let Err(e) = &result {
-                tracing::error!("CDCOutboxRepository: Failed to insert OutboxMessage: {:?} | aggregate_id: {:?}, event_id: {:?}, event_type: {:?}, topic: {:?}, metadata: {:?}", e, msg.aggregate_id, msg.event_id, msg.event_type, msg.topic, msg.metadata);
+            let mut values = Vec::new();
+            let mut params: Vec<(
+                Uuid,
+                Uuid,
+                String,
+                Vec<u8>,
+                String,
+                Option<serde_json::Value>,
+            )> = Vec::new();
+            let mut param_index = 1;
+
+            for msg in chunk {
+                values.push(format!(
+                    "(${},${},${},${},${},${},NOW(),NOW())",
+                    param_index,
+                    param_index + 1,
+                    param_index + 2,
+                    param_index + 3,
+                    param_index + 4,
+                    param_index + 5
+                ));
+
+                params.push((
+                    msg.aggregate_id,
+                    msg.event_id,
+                    msg.event_type.clone(),
+                    msg.payload.clone(),
+                    msg.topic.clone(),
+                    msg.metadata.clone(),
+                ));
+
+                param_index += 6;
             }
 
-            result.map_err(|e| anyhow::anyhow!("Failed to insert CDC outbox message: {}", e))?;
+            query.push_str(&values.join(","));
+
+            let mut query = sqlx::query(&query);
+            for (aggregate_id, event_id, event_type, payload, topic, metadata) in params {
+                query = query
+                    .bind(aggregate_id)
+                    .bind(event_id)
+                    .bind(event_type)
+                    .bind(payload)
+                    .bind(topic)
+                    .bind(metadata);
+            }
+
+            let result = query.execute(&mut **tx).await;
+            if let Err(e) = &result {
+                tracing::error!(
+                    "CDCOutboxRepository: Failed to batch insert OutboxMessages: {:?}",
+                    e
+                );
+                return Err(anyhow::anyhow!("Batch insert failed: {:?}", e));
+            }
         }
         Ok(())
     }

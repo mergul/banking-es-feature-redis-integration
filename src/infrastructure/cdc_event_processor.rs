@@ -949,28 +949,29 @@ impl UltraOptimizedCDCEventProcessor {
         let mut cdc_event_bytes = cdc_event_str.as_bytes().to_vec();
         let cdc_event_simd: OwnedValue = simd_json::to_owned_value(&mut cdc_event_bytes)?;
 
-        let payload = match &cdc_event_simd["payload"] {
+        // With SMT, the data is directly in the payload field
+        let event_data = match &cdc_event_simd["payload"] {
             simd_json::OwnedValue::Object(map) => map,
-            _ => return Err(anyhow::anyhow!("Missing payload")),
-        };
-        let after = payload.get("after");
-        if after
-            .map(|v| {
-                matches!(
-                    v,
-                    simd_json::OwnedValue::Static(simd_json::StaticNode::Null)
-                )
-            })
-            .unwrap_or(true)
-        {
-            return Ok(None); // Skip tombstone
-        }
-        let after_data = match after.unwrap() {
-            simd_json::OwnedValue::Object(map) => map,
-            _ => return Err(anyhow::anyhow!("Missing after object")),
+            simd_json::OwnedValue::Static(simd_json::StaticNode::Null) => {
+                return Ok(None); // Skip tombstone events
+            }
+            _ => return Err(anyhow::anyhow!("Missing or invalid payload")),
         };
 
-        let event_id = after_data
+        // Check for __deleted flag (SMT adds this for DELETE operations)
+        let is_deleted = event_data
+            .get("__deleted")
+            .and_then(|v| match v {
+                simd_json::OwnedValue::String(s) => Some(s.as_str() == "true"),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        if is_deleted {
+            return Ok(None); // Skip deleted events
+        }
+
+        let event_id = event_data
             .get("event_id")
             .and_then(|v| match v {
                 simd_json::OwnedValue::String(s) => Some(s.as_str()),
@@ -978,7 +979,7 @@ impl UltraOptimizedCDCEventProcessor {
             })
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| anyhow::anyhow!("Invalid event_id"))?;
-        let aggregate_id = after_data
+        let aggregate_id = event_data
             .get("aggregate_id")
             .and_then(|v| match v {
                 simd_json::OwnedValue::String(s) => Some(s.as_str()),
@@ -986,7 +987,7 @@ impl UltraOptimizedCDCEventProcessor {
             })
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| anyhow::anyhow!("Invalid aggregate_id"))?;
-        let event_type = after_data
+        let event_type = event_data
             .get("event_type")
             .and_then(|v| match v {
                 simd_json::OwnedValue::String(s) => Some(s.as_str()),
@@ -994,7 +995,7 @@ impl UltraOptimizedCDCEventProcessor {
             })
             .ok_or_else(|| anyhow::anyhow!("Missing event_type"))?
             .to_string();
-        let payload_str = after_data
+        let payload_str = event_data
             .get("payload")
             .and_then(|v| match v {
                 simd_json::OwnedValue::String(s) => Some(s.as_str()),
@@ -1002,7 +1003,7 @@ impl UltraOptimizedCDCEventProcessor {
             })
             .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
         let payload_bytes = BASE64_STANDARD.decode(payload_str)?;
-        let partition_key = after_data
+        let partition_key = event_data
             .get("partition_key")
             .and_then(|v| match v {
                 simd_json::OwnedValue::String(s) => Some(s.as_str()),
@@ -1029,41 +1030,51 @@ impl UltraOptimizedCDCEventProcessor {
             cdc_event
         );
 
-        // Try to extract the payload
-        let payload = cdc_event
+        // Try to extract the payload - with SMT, the data is directly in the payload field
+        let event_data = cdc_event
             .get("payload")
             .ok_or_else(|| anyhow::anyhow!("Missing payload field"))?;
 
-        // Check for after field
-        let after = payload.get("after");
-        if after.is_none() || after.unwrap().is_null() {
-            tracing::debug!("🔍 Skipping tombstone event");
-            return Ok(None); // Skip tombstone
+        // Check if this is a tombstone (null payload)
+        if event_data.is_null() {
+            tracing::debug!("🔍 Skipping tombstone event (null payload)");
+            return Ok(None);
         }
 
-        let after_data = after.unwrap();
-        tracing::debug!("🔍 After data: {:?}", after_data);
+        // Check for __deleted flag (SMT adds this for DELETE operations)
+        let is_deleted = event_data
+            .get("__deleted")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "true")
+            .unwrap_or(false);
 
-        // Extract fields
-        let event_id = after_data
+        if is_deleted {
+            tracing::debug!("🔍 Skipping deleted event (__deleted=true)");
+            return Ok(None);
+        }
+
+        tracing::debug!("🔍 Event data: {:?}", event_data);
+
+        // Extract fields directly from the unwrapped payload
+        let event_id = event_data
             .get("event_id")
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| anyhow::anyhow!("Invalid event_id"))?;
 
-        let aggregate_id = after_data
+        let aggregate_id = event_data
             .get("aggregate_id")
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| anyhow::anyhow!("Invalid aggregate_id"))?;
 
-        let event_type = after_data
+        let event_type = event_data
             .get("event_type")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing event_type"))?
             .to_string();
 
-        let payload_str = after_data
+        let payload_str = event_data
             .get("payload")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
@@ -1087,7 +1098,7 @@ impl UltraOptimizedCDCEventProcessor {
                 return Err(anyhow::anyhow!("Base64 decode error: {}", e));
             }
         };
-        let partition_key = after_data
+        let partition_key = event_data
             .get("partition_key")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());

@@ -1,5 +1,6 @@
 use crate::domain::{Account, AccountCommand, AccountError, AccountEvent};
 use crate::infrastructure::{
+    cdc_debezium::OutboxBatcher, // Added for batched outbox processing
     // cache_service::CacheServiceTrait, // No longer directly used by command handlers
     event_store::EventStoreTrait,
     kafka_abstraction::KafkaConfig, // For topic names
@@ -39,9 +40,12 @@ impl CommandBus {
         db_pool: Arc<PgPool>,
         kafka_config: Arc<KafkaConfig>,
     ) -> Self {
+        // Create OutboxBatcher for efficient batching
+        let outbox_batcher = OutboxBatcher::new_default(outbox_repository, db_pool.clone());
+
         let account_command_handler = Arc::new(AccountCommandHandler::new(
             event_store,
-            outbox_repository,
+            outbox_batcher,
             db_pool,
             kafka_config,
         ));
@@ -84,7 +88,7 @@ impl From<CommandResult> for () {
 /// Account command handler implementing CQRS write model
 pub struct AccountCommandHandler {
     event_store: Arc<dyn EventStoreTrait>,
-    outbox_repository: Arc<dyn OutboxRepositoryTrait>,
+    outbox_batcher: OutboxBatcher,
     db_pool: Arc<PgPool>,
     kafka_config: Arc<KafkaConfig>,
 }
@@ -92,13 +96,13 @@ pub struct AccountCommandHandler {
 impl AccountCommandHandler {
     pub fn new(
         event_store: Arc<dyn EventStoreTrait>,
-        outbox_repository: Arc<dyn OutboxRepositoryTrait>,
+        outbox_batcher: OutboxBatcher,
         db_pool: Arc<PgPool>,
         kafka_config: Arc<KafkaConfig>,
     ) -> Self {
         Self {
             event_store,
-            outbox_repository,
+            outbox_batcher,
             db_pool,
             kafka_config,
         }
@@ -119,7 +123,8 @@ impl AccountCommandHandler {
         account_id: Uuid,
         events: &[AccountEvent],
     ) -> Vec<OutboxMessage> {
-        let cdc_topic = "banking-es.public.kafka_outbox_cdc".to_string();
+        let cdc_topic = format!("{}.public.kafka_outbox_cdc", self.kafka_config.topic_prefix);
+
         events
             .iter()
             .filter_map(|event| {
@@ -195,22 +200,24 @@ impl AccountCommandHandler {
                 let outbox_messages = self.create_outbox_messages(account_id, &events);
 
                 if !outbox_messages.is_empty() {
-                    if let Err(e) = self
-                        .outbox_repository
-                        .add_pending_messages(&mut tx, outbox_messages)
-                        .await
-                    {
-                        error!(
-                            "Outbox write failed for account {}: {}. Attempting rollback.",
-                            account_id, e
-                        );
-                        tx.rollback().await.map_err(|re| {
-                            AccountError::InfrastructureError(format!("DB Rollback Error: {}", re))
-                        })?;
-                        return Err(AccountError::InfrastructureError(format!(
-                            "Outbox write failed: {}",
-                            e
-                        )));
+                    // Submit messages to the batcher instead of direct repository call
+                    for message in outbox_messages {
+                        if let Err(e) = self.outbox_batcher.submit(message).await {
+                            error!(
+                                "Outbox batcher submission failed for account {}: {}. Attempting rollback.",
+                                account_id, e
+                            );
+                            tx.rollback().await.map_err(|re| {
+                                AccountError::InfrastructureError(format!(
+                                    "DB Rollback Error: {}",
+                                    re
+                                ))
+                            })?;
+                            return Err(AccountError::InfrastructureError(format!(
+                                "Outbox batcher submission failed: {}",
+                                e
+                            )));
+                        }
                     }
                 } else if events
                     .iter()
@@ -231,7 +238,7 @@ impl AccountCommandHandler {
                 })?;
 
                 info!(
-                    "{} (events saved to store & outbox) for account {}",
+                    "{} (events saved to store & submitted to outbox batcher) for account {}",
                     success_message_prefix, account_id
                 );
 

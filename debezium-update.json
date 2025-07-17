@@ -1,0 +1,21 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "database.user": "postgres",
+  "database.dbname": "banking_es",
+  "database.server.name": "banking-es-server",
+  "schema.history.internal.kafka.bootstrap.servers": "localhost:9092",
+  "database.port": "5432",
+  "plugin.name": "pgoutput",
+  "topic.prefix": "banking-es",
+  "schema.history.internal.kafka.topic": "schema-changes.banking-es",
+  "database.hostname": "localhost",
+  "database.password": "Francisco1",
+  "name": "banking-es-connector",
+  "table.include.list": "public.kafka_outbox_cdc",
+
+  "transforms": "unwrap",
+  "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+  "transforms.unwrap.drop.tombstones": "false",
+  "transforms.unwrap.delete.handling.mode": "rewrite",
+  "transforms.unwrap.operation.header": "true"
+}
