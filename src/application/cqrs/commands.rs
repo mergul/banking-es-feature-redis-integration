@@ -357,6 +357,11 @@ impl AccountCommandHandler {
     // For this sketch, we assume it can fetch the state needed.
     // A proper solution would involve passing `&mut Transaction` to `get_events` or loading within the transaction.
     async fn get_account_state(&self, account_id: Uuid) -> Result<Account, AccountError> {
+        tracing::info!(
+            "🔍 get_account_state: Starting to load account state for {}",
+            account_id
+        );
+
         // TODO: Refactor this to not use self.cache_service if it's removed,
         // and ideally, load aggregate within the same transaction as command processing.
         // For now, it relies on EventStoreTrait::get_events which doesn't take a tx.
@@ -366,26 +371,61 @@ impl AccountCommandHandler {
         //     return Ok(cached_account);
         // }
 
+        tracing::info!(
+            "🔍 get_account_state: About to call event_store.get_events for {}",
+            account_id
+        );
         let events = self
             .event_store
             .get_events(account_id, None)
             .await
             .map_err(|e| {
+                tracing::error!(
+                    "🔍 get_account_state: EventStore Error for {}: {}",
+                    account_id,
+                    e
+                );
                 AccountError::InfrastructureError(format!("EventStore Error: {}", e.to_string()))
             })?;
+        tracing::info!(
+            "🔍 get_account_state: Retrieved {} events for account {}",
+            events.len(),
+            account_id
+        );
 
         if events.is_empty() {
+            tracing::warn!(
+                "🔍 get_account_state: No events found for account {}",
+                account_id
+            );
             return Err(AccountError::NotFound);
         }
 
+        tracing::info!(
+            "🔍 get_account_state: Starting to deserialize and apply events for {}",
+            account_id
+        );
         let mut account = Account::default(); // Make sure Account::default initializes id and version correctly for rehydration
         account.id = account_id; // Explicitly set id
-        for event_wrapper in events {
+        for (i, event_wrapper) in events.iter().enumerate() {
+            tracing::debug!(
+                "🔍 get_account_state: Deserializing event {} for account {}",
+                i,
+                account_id
+            );
             let account_event: AccountEvent = bincode::deserialize(&event_wrapper.event_data)
-                .map_err(|e| AccountError::EventDeserializationError(e.to_string()))?;
+                .map_err(|e| {
+                    tracing::error!("🔍 get_account_state: Event deserialization error for account {} event {}: {}", account_id, i, e);
+                    AccountError::EventDeserializationError(e.to_string())
+                })?;
             account.apply_event(&account_event);
             account.version = event_wrapper.version; // Crucial: update version from stored event
         }
+        tracing::info!(
+            "🔍 get_account_state: Successfully loaded account state for {} (version: {})",
+            account_id,
+            account.version
+        );
         Ok(account)
     }
 }

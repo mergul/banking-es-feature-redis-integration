@@ -111,14 +111,14 @@ pub struct ProjectionConfig {
 impl Default for ProjectionConfig {
     fn default() -> Self {
         Self {
-            cache_ttl_secs: 300, // 5 minutes
-            batch_size: 5000,
-            batch_timeout_ms: 20,
-            max_connections: 100,
-            min_connections: 20,
-            acquire_timeout_secs: 30,
-            idle_timeout_secs: 600,
-            max_lifetime_secs: 1800,
+            cache_ttl_secs: 300,      // 5 minutes
+            batch_size: 1000,         // Reduced from 5000
+            batch_timeout_ms: 50,     // Increased from 20
+            max_connections: 30,      // Reduced from 100
+            min_connections: 5,       // Reduced from 20
+            acquire_timeout_secs: 15, // Reduced from 30
+            idle_timeout_secs: 300,   // Reduced from 600
+            max_lifetime_secs: 900,   // Reduced from 1800
         }
     }
 }
@@ -311,6 +311,10 @@ impl ProjectionStore {
 
     pub async fn get_account(&self, account_id: Uuid) -> Result<Option<AccountProjection>> {
         let start_time = Instant::now();
+        tracing::info!(
+            "🔍 ProjectionStore::get_account: Starting query for account {}",
+            account_id
+        );
 
         // Try cache first
         {
@@ -320,6 +324,10 @@ impl ProjectionStore {
                     self.metrics
                         .cache_hits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!(
+                        "🔍 ProjectionStore::get_account: Cache hit for account {}",
+                        account_id
+                    );
                     return Ok(Some(entry.data.clone()));
                 }
             }
@@ -328,8 +336,25 @@ impl ProjectionStore {
         self.metrics
             .cache_misses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            "🔍 ProjectionStore::get_account: Cache miss for account {}, querying database",
+            account_id
+        );
 
         // Cache miss - fetch from database with prepared statement
+        tracing::info!(
+            "🔍 ProjectionStore::get_account: About to execute SQL query for account {}",
+            account_id
+        );
+
+        // Log pool state before query
+        tracing::info!(
+            "🔍 ProjectionStore::get_account: Pool state before query - size: {}, idle: {}, active: {}",
+            self.pool.size(),
+            self.pool.num_idle(),
+            (self.pool.size() as usize).saturating_sub(self.pool.num_idle())
+        );
+
         let account: Option<AccountProjection> = sqlx::query_as!(
             AccountProjection,
             r#"
@@ -341,6 +366,11 @@ impl ProjectionStore {
         )
         .fetch_optional(&self.pool)
         .await?;
+        tracing::info!(
+            "🔍 ProjectionStore::get_account: SQL query completed for account {}: {:?}",
+            account_id,
+            account.as_ref().map(|a| a.id)
+        );
 
         // Update cache if found
         if let Some(ref account) = account {
@@ -586,11 +616,19 @@ impl ProjectionStore {
 
         // Process account updates
         if !account_batch.is_empty() {
+            // Deduplicate by id to avoid ON CONFLICT DO UPDATE error
+            use std::collections::HashMap;
+            let mut deduped = HashMap::new();
+            for acc in account_batch.iter() {
+                deduped.insert(acc.id, acc.clone());
+            }
+            let mut unique_accounts: Vec<_> = deduped.into_values().collect();
             tracing::info!(
-                "[ProjectionStore] Upserting {} accounts",
+                "[ProjectionStore] Upserting {} accounts (deduped from {})",
+                unique_accounts.len(),
                 account_batch.len()
             );
-            if let Err(e) = Self::bulk_upsert_accounts(&mut tx, account_batch).await {
+            if let Err(e) = Self::bulk_upsert_accounts(&mut tx, &unique_accounts).await {
                 let _ = tx.rollback().await;
                 error!("[ProjectionStore] Error in bulk_upsert_accounts: {}", e);
                 return Err(e.into());
@@ -601,7 +639,7 @@ impl ProjectionStore {
             {
                 let mut cache = account_cache.write().await;
                 let version = cache_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                for account in account_batch.drain(..) {
+                for account in unique_accounts.drain(..) {
                     cache.insert(
                         account.id,
                         CacheEntry {
@@ -613,6 +651,8 @@ impl ProjectionStore {
                     );
                 }
             }
+
+            account_batch.clear();
 
             metrics
                 .batch_updates

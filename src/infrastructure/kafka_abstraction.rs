@@ -6,6 +6,7 @@ use rdkafka::{
     Message,
 };
 use serde::{Deserialize, Serialize};
+use simd_json;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -635,16 +636,49 @@ impl KafkaConsumer {
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
 
-                let cdc_event: serde_json::Value =
-                    serde_json::from_slice(payload).map_err(|e| {
-                        tracing::error!(
-                            "KafkaConsumer: poll_cdc_events - Failed to deserialize CDC event: {}",
-                            e
-                        );
-                        BankingKafkaError::ConsumerError(
-                            "Failed to deserialize CDC event".to_string(),
-                        )
-                    })?;
+                // Try simd_json first for better performance and compatibility
+                let cdc_event: serde_json::Value = {
+                    let mut payload_copy = payload.to_vec();
+                    match simd_json::to_owned_value(&mut payload_copy) {
+                        Ok(simd_value) => {
+                            // Convert simd_json::OwnedValue to serde_json::Value
+                            let json_string = simd_json::to_string(&simd_value).map_err(|e| {
+                                tracing::error!(
+                                    "KafkaConsumer: poll_cdc_events - Failed to convert simd_json to string: {}",
+                                    e
+                                );
+                                BankingKafkaError::ConsumerError(
+                                    "Failed to convert simd_json to string".to_string(),
+                                )
+                            })?;
+                            serde_json::from_str(&json_string).map_err(|e| {
+                                tracing::error!(
+                                    "KafkaConsumer: poll_cdc_events - Failed to deserialize from simd_json string: {}",
+                                    e
+                                );
+                                BankingKafkaError::ConsumerError(
+                                    "Failed to deserialize from simd_json string".to_string(),
+                                )
+                            })?
+                        }
+                        Err(simd_err) => {
+                            tracing::warn!(
+                                "KafkaConsumer: poll_cdc_events - simd_json failed, falling back to serde_json: {}",
+                                simd_err
+                            );
+                            // Fallback to serde_json
+                            serde_json::from_slice(payload).map_err(|e| {
+                                tracing::error!(
+                                    "KafkaConsumer: poll_cdc_events - Failed to deserialize CDC event with serde_json: {}",
+                                    e
+                                );
+                                BankingKafkaError::ConsumerError(
+                                    "Failed to deserialize CDC event".to_string(),
+                                )
+                            })?
+                        }
+                    }
+                };
 
                 tracing::info!(
                     "KafkaConsumer: poll_cdc_events - Successfully deserialized CDC event: {:?}",
@@ -691,7 +725,20 @@ impl KafkaConsumer {
 
                 let payload = msg.payload().ok_or_else(|| {
                     tracing::error!(
-                        "KafkaConsumer: poll_cdc_events_with_message - Empty message payload"
+                        "KafkaConsumer: poll_cdc_events_with_message - Empty message payload from topic: {:?}, partition: {:?}, offset: {:?}",
+                        msg.topic(), msg.partition(), msg.offset()
+                    );
+                    tracing::error!(
+                        "KafkaConsumer: poll_cdc_events_with_message - Message key: {:?}",
+                        msg.key().map(|k| String::from_utf8_lossy(k))
+                    );
+                    tracing::error!(
+                        "KafkaConsumer: poll_cdc_events_with_message - Message headers: {:?}",
+                        msg.headers().map(|h| h.iter().map(|header| {
+                            let key_str = header.key;
+                            let value_str = header.value;
+                            format!("{}: {:?}", key_str, value_str)
+                        }).collect::<Vec<_>>()).unwrap_or_default()
                     );
                     BankingKafkaError::ConsumerError("Empty message payload".to_string())
                 })?;
@@ -701,20 +748,53 @@ impl KafkaConsumer {
                     payload.len()
                 );
 
-                let cdc_event: serde_json::Value =
-                    serde_json::from_slice(payload).map_err(|e| {
-                        tracing::error!(
-                            "KafkaConsumer: poll_cdc_events_with_message - Failed to deserialize CDC event: {}",
-                            e
-                        );
-                        tracing::error!(
-                            "KafkaConsumer: poll_cdc_events_with_message - Raw payload (first 200 chars): {:?}",
-                            String::from_utf8_lossy(&payload[..payload.len().min(200)])
-                        );
-                        BankingKafkaError::ConsumerError(
-                            "Failed to deserialize CDC event".to_string(),
-                        )
-                    })?;
+                // Try simd_json first for better performance and compatibility
+                let cdc_event: serde_json::Value = {
+                    let mut payload_copy = payload.to_vec();
+                    match simd_json::to_owned_value(&mut payload_copy) {
+                        Ok(simd_value) => {
+                            // Convert simd_json::OwnedValue to serde_json::Value
+                            let json_string = simd_json::to_string(&simd_value).map_err(|e| {
+                                tracing::error!(
+                                    "KafkaConsumer: poll_cdc_events_with_message - Failed to convert simd_json to string: {}",
+                                    e
+                                );
+                                BankingKafkaError::ConsumerError(
+                                    "Failed to convert simd_json to string".to_string(),
+                                )
+                            })?;
+                            serde_json::from_str(&json_string).map_err(|e| {
+                                tracing::error!(
+                                    "KafkaConsumer: poll_cdc_events_with_message - Failed to deserialize from simd_json string: {}",
+                                    e
+                                );
+                                BankingKafkaError::ConsumerError(
+                                    "Failed to deserialize from simd_json string".to_string(),
+                                )
+                            })?
+                        }
+                        Err(simd_err) => {
+                            tracing::warn!(
+                                "KafkaConsumer: poll_cdc_events_with_message - simd_json failed, falling back to serde_json: {}",
+                                simd_err
+                            );
+                            // Fallback to serde_json
+                            serde_json::from_slice(payload).map_err(|e| {
+                                tracing::error!(
+                                    "KafkaConsumer: poll_cdc_events_with_message - Failed to deserialize CDC event with serde_json: {}",
+                                    e
+                                );
+                                tracing::error!(
+                                    "KafkaConsumer: poll_cdc_events_with_message - Raw payload (first 200 chars): {:?}",
+                                    String::from_utf8_lossy(&payload[..payload.len().min(200)])
+                                );
+                                BankingKafkaError::ConsumerError(
+                                    "Failed to deserialize CDC event".to_string(),
+                                )
+                            })?
+                        }
+                    }
+                };
 
                 tracing::info!(
                     "KafkaConsumer: poll_cdc_events_with_message - Successfully deserialized CDC event: {:?}",
@@ -869,6 +949,20 @@ impl KafkaConsumer {
     /// Get the Kafka configuration
     pub fn get_config(&self) -> &KafkaConfig {
         &self.config
+    }
+
+    pub fn commit(
+        &self,
+        tpl: &rdkafka::TopicPartitionList,
+        mode: rdkafka::consumer::CommitMode,
+    ) -> Result<(), rdkafka::error::KafkaError> {
+        if let Some(consumer) = &self.consumer {
+            consumer.commit(tpl, mode)
+        } else {
+            Err(rdkafka::error::KafkaError::ClientCreation(
+                "No consumer available".into(),
+            ))
+        }
     }
 }
 

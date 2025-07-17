@@ -1027,12 +1027,58 @@ impl EventStore {
         from_version: Option<i64>,
     ) -> Result<Vec<Event>, EventStoreError> {
         let start_time = Instant::now();
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|e| EventStoreError::DatabaseError(e))?;
+        tracing::info!(
+            "🔍 EventStore::get_events: Starting query for aggregate_id: {}, from_version: {:?}",
+            aggregate_id,
+            from_version
+        );
 
+        // Log pool state before acquisition
+        tracing::info!(
+            "🔍 EventStore::get_events: Pool state before acquisition - size: {}, idle: {}, active: {}",
+            self.pool.size(),
+            self.pool.num_idle(),
+            (self.pool.size() as usize).saturating_sub(self.pool.num_idle())
+        );
+
+        tracing::info!("🔍 EventStore::get_events: About to acquire connection from pool");
+        let connection_result = tokio::time::timeout(
+            Duration::from_secs(30), // Increased timeout for debugging
+            self.pool.acquire(),
+        )
+        .await;
+
+        let mut conn = match connection_result {
+            Ok(Ok(conn)) => {
+                tracing::info!(
+                    "🔍 EventStore::get_events: ✅ Successfully acquired connection for aggregate_id: {}",
+                    aggregate_id
+                );
+                conn
+            }
+            Ok(Err(e)) => {
+                tracing::error!(
+                    "🔍 EventStore::get_events: ❌ Failed to acquire connection for aggregate_id {}: {}",
+                    aggregate_id,
+                    e
+                );
+                return Err(EventStoreError::DatabaseError(e));
+            }
+            Err(_) => {
+                tracing::error!(
+                    "🔍 EventStore::get_events: ❌ Connection acquisition timeout for aggregate_id: {}",
+                    aggregate_id
+                );
+                return Err(EventStoreError::DatabaseError(sqlx::Error::Configuration(
+                    "Connection acquisition timeout".into(),
+                )));
+            }
+        };
+
+        tracing::info!(
+            "🔍 EventStore::get_events: About to execute SQL query for aggregate_id: {}",
+            aggregate_id
+        );
         let events = sqlx::query_as!(
             EventRow,
             r#"
@@ -1047,7 +1093,15 @@ impl EventStore {
         )
         .fetch_all(&mut *conn)
         .await
-        .map_err(|e| EventStoreError::DatabaseError(e))?;
+        .map_err(|e| {
+            tracing::error!("🔍 EventStore::get_events: SQL query failed for aggregate_id {}: {}", aggregate_id, e);
+            EventStoreError::DatabaseError(e)
+        })?;
+        tracing::info!(
+            "🔍 EventStore::get_events: SQL query completed for aggregate_id: {}, found {} events",
+            aggregate_id,
+            events.len()
+        );
 
         let duration = start_time.elapsed();
         self.metrics.connection_acquire_time.fetch_add(
@@ -1718,21 +1772,21 @@ impl Default for EventStoreConfig {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
                 "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
             }),
-            max_connections: 200,
-            min_connections: 50,
-            acquire_timeout_secs: 5,
-            idle_timeout_secs: 1800,
-            max_lifetime_secs: 3600,
+            max_connections: 50,      // Reduced from 200 to prevent exhaustion
+            min_connections: 10,      // Reduced from 50
+            acquire_timeout_secs: 10, // Increased from 5 for stability
+            idle_timeout_secs: 600,   // Reduced from 1800
+            max_lifetime_secs: 1800,  // Reduced from 3600
 
-            // Optimized batching settings for maximum throughput
-            batch_size: 10000,
-            batch_timeout_ms: 1,
-            max_batch_queue_size: 100000,
-            batch_processor_count: 32,
-            snapshot_threshold: 1000,
+            // Optimized batching settings for stability
+            batch_size: 1000,            // Reduced from 10000
+            batch_timeout_ms: 10,        // Increased from 1
+            max_batch_queue_size: 10000, // Reduced from 100000
+            batch_processor_count: 8,    // Reduced from 32
+            snapshot_threshold: 500,     // Reduced from 1000
             snapshot_interval_secs: 300,
-            snapshot_cache_ttl_secs: 3600,
-            max_snapshots_per_run: 50,
+            snapshot_cache_ttl_secs: 1800, // Reduced from 3600
+            max_snapshots_per_run: 20,     // Reduced from 50
         }
     }
 }

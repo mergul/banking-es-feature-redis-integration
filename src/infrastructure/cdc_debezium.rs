@@ -4,10 +4,15 @@ use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rdkafka::consumer::{CommitMode, Consumer};
+use rdkafka::message::{BorrowedMessage, OwnedMessage};
 use rdkafka::Message;
+use rdkafka::Offset;
+use rdkafka::TopicPartitionList;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -25,6 +30,8 @@ use crate::infrastructure::cdc_integration_helper::{
 use crate::infrastructure::cdc_producer::{BusinessLogicValidator, CDCProducer, CDCProducerConfig};
 use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::event_processor::EventProcessor;
+use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 
 /// Kafka message structure for CDC events
 #[derive(Debug, Clone)]
@@ -398,18 +405,32 @@ impl EnhancedCDCEventProcessor {
     }
 
     /// Get business logic configuration
-    pub fn get_business_config(&self) -> &BusinessLogicConfig {
-        self.optimized_processor.get_business_config()
+    pub async fn get_business_config(&self) -> BusinessLogicConfig {
+        self.optimized_processor.get_business_config().await
     }
 
     /// Update business logic configuration
-    pub fn update_business_config(&mut self, config: BusinessLogicConfig) {
-        self.optimized_processor.update_business_config(config);
+    pub async fn update_business_config(&mut self, config: BusinessLogicConfig) {
+        self.optimized_processor
+            .update_business_config(config)
+            .await
     }
 
     /// Start batch processor
     pub async fn start_batch_processor(&mut self) -> Result<()> {
         self.optimized_processor.start_batch_processor().await
+    }
+
+    /// Enable and start batch processor
+    pub async fn enable_and_start_batch_processor(&mut self) -> Result<()> {
+        self.optimized_processor
+            .enable_and_start_batch_processor()
+            .await
+    }
+
+    /// Check if batch processor is running
+    pub async fn is_batch_processor_running(&self) -> bool {
+        self.optimized_processor.is_batch_processor_running().await
     }
 
     /// Shutdown the processor
@@ -545,6 +566,72 @@ impl CDCConsumer {
         let mut last_log_time = std::time::Instant::now();
         let mut consecutive_empty_polls = 0;
         let max_consecutive_empty_polls = 100; // Log warning after 100 empty polls
+        let max_concurrent = 32; // Tune as needed
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        let offsets = Arc::new(Mutex::new(Vec::<(String, i32, i64)>::new()));
+        let offsets_clone = offsets.clone();
+        let (dlq_tx, mut dlq_rx) =
+            mpsc::channel::<(String, i32, i64, Vec<u8>, Option<Vec<u8>>, String)>(1000);
+        let kafka_consumer = self.kafka_consumer.clone();
+        // Background offset committer
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let mut offsets = offsets_clone.lock().await;
+                if offsets.len() >= 1000 {
+                    // Only commit the highest offset per (topic, partition)
+                    let mut highest: HashMap<(String, i32), i64> = HashMap::new();
+                    for (topic, partition, offset) in offsets.drain(..) {
+                        let key = (topic.clone(), partition);
+                        highest
+                            .entry(key)
+                            .and_modify(|v| *v = (*v).max(offset))
+                            .or_insert(offset);
+                    }
+                    let mut tpl = TopicPartitionList::new();
+                    for ((topic, partition), offset) in highest {
+                        tpl.add_partition_offset(&topic, partition, Offset::Offset(offset + 1))
+                            .unwrap();
+                    }
+                    if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
+                        tracing::error!("Failed to batch commit offsets: {}", e);
+                    }
+                }
+            }
+        });
+        // Background DLQ handler (batch)
+        let dlq_producer = processor.clone();
+        tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(100);
+            let mut last_send = std::time::Instant::now();
+            loop {
+                tokio::select! {
+                    Some((topic, partition, offset, payload, key, error)) = dlq_rx.recv() => {
+                        batch.push((topic, partition, offset, payload, key, error));
+                        if batch.len() >= 100 || last_send.elapsed() > std::time::Duration::from_millis(100) {
+                            let to_send = std::mem::take(&mut batch);
+                            for (topic, partition, offset, payload, key, error) in to_send {
+                                if let Err(e) = dlq_producer.send_to_dlq_from_cdc_parts(&topic, partition, offset, &payload, key.as_deref(), &error).await {
+                                    tracing::error!("Failed to send to DLQ: {}", e);
+                                }
+                            }
+                            last_send = std::time::Instant::now();
+                        }
+                    }
+                    else => {
+                        if !batch.is_empty() {
+                            let to_send = std::mem::take(&mut batch);
+                            for (topic, partition, offset, payload, key, error) in to_send {
+                                if let Err(e) = dlq_producer.send_to_dlq_from_cdc_parts(&topic, partition, offset, &payload, key.as_deref(), &error).await {
+                                    tracing::error!("Failed to send to DLQ: {}", e);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        });
 
         // Log immediately to confirm we're in the loop
         tracing::info!("CDCConsumer: Entering main polling loop");
@@ -575,32 +662,33 @@ impl CDCConsumer {
                     match message_result {
                         Ok(Some((cdc_event, message))) => {
                             consecutive_empty_polls = 0; // Reset counter on successful message
-                            tracing::info!("CDCConsumer: ✅ Received CDC event on poll #{}: {:?}", poll_count, cdc_event);
+                            tracing::info!("[CDCConsumer] Received CDC event on poll #{}: {:?}", poll_count, cdc_event);
                             tracing::info!("CDCConsumer: 📊 Message details - Topic: {:?}, Partition: {:?}, Offset: {:?}",
                                 message.topic(), message.partition(), message.offset());
-
+                            let permit = semaphore.clone().acquire_owned().await.unwrap();
+                            let processor = processor.clone();
+                            let offsets = offsets.clone();
+                            let dlq_tx = dlq_tx.clone();
+                            // For DLQ and offset batching, extract info from message
+                            let topic = message.topic().to_string();
+                            let partition = message.partition();
+                            let offset = message.offset();
+                            let payload = message.payload().map(|p| p.to_vec()).unwrap_or_default();
+                            let key = message.key().map(|k| k.to_vec());
+                            tokio::spawn(async move {
+                                let _permit = permit;
                             match processor.process_cdc_event_ultra_fast(cdc_event).await {
                                 Ok(_) => {
-                                tracing::info!("CDCConsumer: ✅ Successfully processed CDC event on poll #{}", poll_count);
-                                    // CRITICAL: Commit offset after successful processing
-                                    tracing::info!("CDCConsumer: 🔄 Attempting to commit offset for message at offset {:?}", message.offset());
-                                    if let Err(e) = self.kafka_consumer.commit_message(&message).await {
-                                        error!("CDCConsumer: ❌ Failed to commit offset: {}", e);
-                                        tracing::error!("CDCConsumer: ❌ Failed to commit offset: {}", e);
-                                    } else {
-                                        tracing::info!("CDCConsumer: ✅ Successfully committed offset for poll #{}", poll_count);
-                                    }
+                                        // Push offset for batch commit
+                                        offsets.lock().await.push((topic.clone(), partition, offset));
                                 }
                                 Err(e) => {
-                                    error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
-                                    tracing::error!("CDCConsumer: ❌ Failed to process CDC event: {}", e);
-
-                                    // Send to DLQ
-                                    if let Err(dlq_err) = processor.send_to_dlq_from_cdc(&message, &e.to_string()).await {
-                                        error!("CDCConsumer: ❌ Failed to send message to DLQ: {}", dlq_err);
+                                        tracing::error!("Failed to process CDC event: {}", e);
+                                        // Send to DLQ in parallel
+                                        let _ = dlq_tx.send((topic, partition, offset, payload, key, e.to_string())).await;
                                     }
                                 }
-                            }
+                            });
                         }
                         Ok(None) => {
                             consecutive_empty_polls += 1;

@@ -4,11 +4,14 @@ use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use rdkafka::Message;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use simd_json::OwnedValue;
 use sqlx::{Postgres, Transaction};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -128,7 +131,23 @@ impl ProcessableEvent {
         partition_key: Option<String>,
     ) -> Result<Self> {
         // Pre-deserialize domain event for better performance
-        let domain_event = bincode::deserialize(&payload)?;
+        let domain_event = match bincode::deserialize(&payload) {
+            Ok(event) => {
+                tracing::debug!(
+                    "Successfully deserialized domain event for event_id {}",
+                    event_id
+                );
+                event
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to deserialize domain event for event_id {}: {}",
+                    event_id,
+                    e
+                );
+                return Err(anyhow::anyhow!("Bincode deserialize error: {}", e));
+            }
+        };
 
         Ok(Self {
             event_id,
@@ -358,12 +377,12 @@ pub struct UltraOptimizedCDCEventProcessor {
     // Memory-efficient projection cache
     projection_cache: Arc<Mutex<ProjectionCache>>,
 
-    // Batch processing coordination
-    batch_processor_handle: Option<tokio::task::JoinHandle<()>>,
-    shutdown_tx: Option<mpsc::Sender<()>>,
+    // Batch processing coordination with interior mutability
+    batch_processor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    shutdown_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 
-    // Business logic configuration
-    business_config: BusinessLogicConfig,
+    // Business logic configuration with interior mutability
+    business_config: Arc<Mutex<BusinessLogicConfig>>,
 }
 
 #[derive(Debug, Clone)]
@@ -386,7 +405,7 @@ impl Default for BusinessLogicConfig {
             max_transaction_amount: Decimal::from_str("1000000.00").unwrap(),
             enable_duplicate_detection: true,
             cache_invalidation_delay_ms: 10, // Reduced from 50ms
-            batch_processing_enabled: true,
+            batch_processing_enabled: false, // Changed: require explicit start
         }
     }
 }
@@ -407,9 +426,9 @@ impl Clone for UltraOptimizedCDCEventProcessor {
             batch_timeout: self.batch_timeout,
             circuit_breaker: self.circuit_breaker.clone(),
             projection_cache: self.projection_cache.clone(),
-            batch_processor_handle: None, // Don't clone the handle
-            shutdown_tx: None,            // Don't clone the sender
-            business_config: self.business_config.clone(),
+            batch_processor_handle: Arc::new(Mutex::new(None)), // Don't clone the handle
+            shutdown_tx: Arc::new(Mutex::new(None)),            // Don't clone the sender
+            business_config: Arc::new(Mutex::new(BusinessLogicConfig::default())), // Use default instead of trying to clone
         }
     }
 }
@@ -427,6 +446,10 @@ impl UltraOptimizedCDCEventProcessor {
             50000,                     // Max 50k cached projections
             Duration::from_secs(1800), // 30 minute TTL
         )));
+
+        let business_config = business_config.unwrap_or_default();
+        let batch_timeout = Duration::from_millis(5); // Reduced batch timeout
+
         Self {
             kafka_producer: kafka_producer.clone(),
             dlq_producer: Some(kafka_producer), // Use the same producer for DLQ by default
@@ -437,23 +460,29 @@ impl UltraOptimizedCDCEventProcessor {
             metrics,                                             // <-- use the provided Arc
             processing_semaphore: Arc::new(Semaphore::new(100)), // Increased concurrency
             batch_queue: Arc::new(Mutex::new(Vec::with_capacity(1000))),
-            batch_size: 200,                         // Increased batch size
-            batch_timeout: Duration::from_millis(5), // Reduced batch timeout
+            batch_size: 200, // Increased batch size
+            batch_timeout,   // Use the variable
             circuit_breaker: CircuitBreaker::new(),
             projection_cache,
-            batch_processor_handle: None,
-            shutdown_tx: None,
-            business_config: business_config.unwrap_or_default(),
+            batch_processor_handle: Arc::new(Mutex::new(None)), // No automatic start
+            shutdown_tx: Arc::new(Mutex::new(None)),            // No automatic start
+            business_config: Arc::new(Mutex::new(business_config)),
         }
     }
 
     pub async fn start_batch_processor(&mut self) -> Result<()> {
-        if !self.business_config.batch_processing_enabled {
-            return Ok(());
+        // Check if batch processor is already running
+        if self.batch_processor_handle.lock().await.is_some() {
+            return Ok(()); // Already running
+        }
+
+        // Check if batch processing is enabled in config
+        if !self.business_config.lock().await.batch_processing_enabled {
+            return Err(anyhow::anyhow!("Batch processing is disabled in configuration. Enable it first with update_business_config()"));
         }
 
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
-        self.shutdown_tx = Some(shutdown_tx);
+        *self.shutdown_tx.lock().await = Some(shutdown_tx);
 
         let batch_queue = Arc::clone(&self.batch_queue);
         let projection_store = Arc::clone(&self.projection_store);
@@ -487,8 +516,25 @@ impl UltraOptimizedCDCEventProcessor {
             }
         });
 
-        self.batch_processor_handle = Some(handle);
+        *self.batch_processor_handle.lock().await = Some(handle);
+        info!("Batch processor started successfully");
         Ok(())
+    }
+
+    /// Check if the batch processor is currently running
+    pub async fn is_batch_processor_running(&self) -> bool {
+        self.batch_processor_handle.lock().await.is_some()
+    }
+
+    /// Enable batch processing and start the processor
+    pub async fn enable_and_start_batch_processor(&mut self) -> Result<()> {
+        // Update configuration to enable batch processing
+        let mut config = self.business_config.lock().await.clone();
+        config.batch_processing_enabled = true;
+        *self.business_config.lock().await = config;
+
+        // Start the batch processor
+        self.start_batch_processor().await
     }
 
     /// Ultra-fast event processing with business logic validation
@@ -499,15 +545,31 @@ impl UltraOptimizedCDCEventProcessor {
             return Err(anyhow::anyhow!("Circuit breaker is open"));
         }
         self.circuit_breaker.on_attempt().await;
-        let processable_event = match self.extract_event_zero_copy(&cdc_event)? {
-            Some(event) => event,
-            None => return Ok(()),
+
+        // Try serde_json first for debugging
+        let processable_event = match self.extract_event_serde_json(&cdc_event)? {
+            Some(event) => {
+                tracing::debug!(
+                    "🔍 Successfully extracted event with serde_json: {}",
+                    event.event_id
+                );
+                event
+            }
+            None => {
+                tracing::debug!("🔍 No event to process (tombstone or empty)");
+                return Ok(());
+            }
         };
+
         let mut retries = 0;
         loop {
             match self.try_process_event(&processable_event).await {
                 Ok(_) => {
                     self.circuit_breaker.on_success().await;
+                    tracing::debug!(
+                        "🔍 Event processed successfully: {}",
+                        processable_event.event_id
+                    );
                     break;
                 }
                 Err(e) => {
@@ -545,7 +607,7 @@ impl UltraOptimizedCDCEventProcessor {
 
     async fn try_process_event(&self, processable_event: &ProcessableEvent) -> Result<()> {
         // Business logic validation
-        if self.business_config.enable_validation {
+        if self.business_config.lock().await.enable_validation {
             if let Err(e) = self.validate_business_logic(processable_event).await {
                 self.metrics
                     .events_failed
@@ -558,7 +620,7 @@ impl UltraOptimizedCDCEventProcessor {
             }
         }
         // Duplicate detection
-        if self.business_config.enable_duplicate_detection {
+        if self.business_config.lock().await.enable_duplicate_detection {
             let mut cache_guard = self.projection_cache.lock().await;
             if cache_guard
                 .is_duplicate_event(&processable_event.event_id, &processable_event.aggregate_id)
@@ -591,7 +653,7 @@ impl UltraOptimizedCDCEventProcessor {
                 if *amount <= Decimal::ZERO {
                     return Err(anyhow::anyhow!("Deposit amount must be positive"));
                 }
-                if *amount > self.business_config.max_transaction_amount {
+                if *amount > self.business_config.lock().await.max_transaction_amount {
                     return Err(anyhow::anyhow!("Deposit amount exceeds maximum allowed"));
                 }
             }
@@ -599,17 +661,17 @@ impl UltraOptimizedCDCEventProcessor {
                 if *amount <= Decimal::ZERO {
                     return Err(anyhow::anyhow!("Withdrawal amount must be positive"));
                 }
-                if *amount > self.business_config.max_transaction_amount {
+                if *amount > self.business_config.lock().await.max_transaction_amount {
                     return Err(anyhow::anyhow!("Withdrawal amount exceeds maximum allowed"));
                 }
             }
             crate::domain::AccountEvent::AccountCreated {
                 initial_balance, ..
             } => {
-                if *initial_balance < self.business_config.min_balance {
+                if *initial_balance < self.business_config.lock().await.min_balance {
                     return Err(anyhow::anyhow!("Initial balance cannot be negative"));
                 }
-                if *initial_balance > self.business_config.max_balance {
+                if *initial_balance > self.business_config.lock().await.max_balance {
                     return Err(anyhow::anyhow!("Initial balance exceeds maximum allowed"));
                 }
             }
@@ -882,18 +944,107 @@ impl UltraOptimizedCDCEventProcessor {
         &self,
         cdc_event: &serde_json::Value,
     ) -> Result<Option<ProcessableEvent>> {
+        // Convert serde_json::Value to string, then to simd-json OwnedValue for fast field access
+        let cdc_event_str = serde_json::to_string(cdc_event)?;
+        let mut cdc_event_bytes = cdc_event_str.as_bytes().to_vec();
+        let cdc_event_simd: OwnedValue = simd_json::to_owned_value(&mut cdc_event_bytes)?;
+
+        let payload = match &cdc_event_simd["payload"] {
+            simd_json::OwnedValue::Object(map) => map,
+            _ => return Err(anyhow::anyhow!("Missing payload")),
+        };
+        let after = payload.get("after");
+        if after
+            .map(|v| {
+                matches!(
+                    v,
+                    simd_json::OwnedValue::Static(simd_json::StaticNode::Null)
+                )
+            })
+            .unwrap_or(true)
+        {
+            return Ok(None); // Skip tombstone
+        }
+        let after_data = match after.unwrap() {
+            simd_json::OwnedValue::Object(map) => map,
+            _ => return Err(anyhow::anyhow!("Missing after object")),
+        };
+
+        let event_id = after_data
+            .get("event_id")
+            .and_then(|v| match v {
+                simd_json::OwnedValue::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| anyhow::anyhow!("Invalid event_id"))?;
+        let aggregate_id = after_data
+            .get("aggregate_id")
+            .and_then(|v| match v {
+                simd_json::OwnedValue::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| anyhow::anyhow!("Invalid aggregate_id"))?;
+        let event_type = after_data
+            .get("event_type")
+            .and_then(|v| match v {
+                simd_json::OwnedValue::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("Missing event_type"))?
+            .to_string();
+        let payload_str = after_data
+            .get("payload")
+            .and_then(|v| match v {
+                simd_json::OwnedValue::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
+        let payload_bytes = BASE64_STANDARD.decode(payload_str)?;
+        let partition_key = after_data
+            .get("partition_key")
+            .and_then(|v| match v {
+                simd_json::OwnedValue::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .map(|s| s.to_string());
+        ProcessableEvent::new(
+            event_id,
+            aggregate_id,
+            event_type,
+            payload_bytes,
+            partition_key,
+        )
+        .map(Some)
+    }
+
+    /// Extract event with serde_json fallback (for debugging)
+    fn extract_event_serde_json(
+        &self,
+        cdc_event: &serde_json::Value,
+    ) -> Result<Option<ProcessableEvent>> {
+        tracing::debug!(
+            "🔍 extract_event_serde_json: Processing CDC event: {:?}",
+            cdc_event
+        );
+
+        // Try to extract the payload
         let payload = cdc_event
             .get("payload")
-            .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
+            .ok_or_else(|| anyhow::anyhow!("Missing payload field"))?;
 
+        // Check for after field
         let after = payload.get("after");
-        if after.is_none() || after == Some(&serde_json::Value::Null) {
+        if after.is_none() || after.unwrap().is_null() {
+            tracing::debug!("🔍 Skipping tombstone event");
             return Ok(None); // Skip tombstone
         }
 
         let after_data = after.unwrap();
+        tracing::debug!("🔍 After data: {:?}", after_data);
 
-        // Extract required fields with minimal string allocations
+        // Extract fields
         let event_id = after_data
             .get("event_id")
             .and_then(|v| v.as_str())
@@ -917,12 +1068,36 @@ impl UltraOptimizedCDCEventProcessor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
 
-        let payload_bytes = base64::decode(payload_str)?;
-
+        let payload_bytes = match BASE64_STANDARD.decode(payload_str) {
+            Ok(bytes) => {
+                tracing::debug!(
+                    "Decoded base64 payload for event_id {}: {} bytes (first 16: {:?})",
+                    event_id,
+                    bytes.len(),
+                    &bytes[..bytes.len().min(16)]
+                );
+                bytes
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to base64 decode payload for event_id {}: {}",
+                    event_id,
+                    e
+                );
+                return Err(anyhow::anyhow!("Base64 decode error: {}", e));
+            }
+        };
         let partition_key = after_data
             .get("partition_key")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+
+        tracing::debug!(
+            "🔍 Extracted event - ID: {}, Aggregate: {}, Type: {}",
+            event_id,
+            aggregate_id,
+            event_type
+        );
 
         ProcessableEvent::new(
             event_id,
@@ -1052,11 +1227,11 @@ impl UltraOptimizedCDCEventProcessor {
 
     /// Graceful shutdown
     pub async fn shutdown(&mut self) -> Result<()> {
-        if let Some(tx) = self.shutdown_tx.take() {
+        if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(()).await;
         }
 
-        if let Some(handle) = self.batch_processor_handle.take() {
+        if let Some(handle) = self.batch_processor_handle.lock().await.take() {
             handle.await?;
         }
 
@@ -1096,13 +1271,13 @@ impl UltraOptimizedCDCEventProcessor {
     }
 
     /// Get business logic configuration
-    pub fn get_business_config(&self) -> &BusinessLogicConfig {
-        &self.business_config
+    pub async fn get_business_config(&self) -> BusinessLogicConfig {
+        self.business_config.lock().await.clone()
     }
 
     /// Update business logic configuration
-    pub fn update_business_config(&mut self, config: BusinessLogicConfig) {
-        self.business_config = config;
+    pub async fn update_business_config(&mut self, config: BusinessLogicConfig) {
+        *self.business_config.lock().await = config;
     }
 
     pub async fn send_to_dlq_from_cdc(
@@ -1144,6 +1319,39 @@ impl UltraOptimizedCDCEventProcessor {
             let key = event.aggregate_id.to_string();
             dlq_producer
                 .publish_binary_event(topic, &payload, &key)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Send to DLQ using primitive fields (for batch DLQ from consumer)
+    pub async fn send_to_dlq_from_cdc_parts(
+        &self,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+        payload: &[u8],
+        key: Option<&[u8]>,
+        error: &str,
+    ) -> Result<()> {
+        if let Some(dlq_producer) = &self.dlq_producer {
+            // Compose a DLQ event (you can expand this as needed)
+            let dlq_event = crate::infrastructure::cdc_event_processor::DLQEvent {
+                event_id: Uuid::new_v4(),
+                aggregate_id: Uuid::nil(),
+                event_type: format!("DLQ_{}_{}_{}", topic, partition, offset),
+                payload: payload.to_vec(),
+                error: error.to_string(),
+                timestamp: chrono::Utc::now(),
+                retry_count: 0,
+            };
+            let payload = serde_json::to_vec(&dlq_event)?;
+            let dlq_topic = "banking-es-dlq";
+            let key_str = key
+                .map(|k| String::from_utf8_lossy(k).to_string())
+                .unwrap_or_default();
+            dlq_producer
+                .publish_binary_event(dlq_topic, &payload, &key_str)
                 .await?;
         }
         Ok(())
@@ -1575,5 +1783,60 @@ impl UltraOptimizedCDCEventProcessor {
             "recovery_enabled": false,
             "last_recovery_attempt": null,
         }))
+    }
+}
+
+impl UltraOptimizedCDCEventProcessor {
+    /// Static method to enable and start batch processor on an Arc (for use in service managers)
+    pub async fn enable_and_start_batch_processor_arc(processor: Arc<Self>) -> Result<()> {
+        // Update configuration to enable batch processing
+        {
+            let mut config = processor.business_config.lock().await;
+            config.batch_processing_enabled = true;
+        }
+
+        // Check if batch processor is already running
+        if processor.batch_processor_handle.lock().await.is_some() {
+            return Ok(()); // Already running
+        }
+
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+        *processor.shutdown_tx.lock().await = Some(shutdown_tx);
+
+        let batch_queue = Arc::clone(&processor.batch_queue);
+        let projection_store = Arc::clone(&processor.projection_store);
+        let projection_cache = Arc::clone(&processor.projection_cache);
+        let cache_service = Arc::clone(&processor.cache_service);
+        let metrics = Arc::clone(&processor.metrics);
+        let batch_size = processor.batch_size;
+        let batch_timeout = processor.batch_timeout;
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(batch_timeout);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Err(e) = Self::process_batch(
+                            &batch_queue,
+                            &projection_store,
+                            &projection_cache,
+                            &cache_service,
+                            &metrics,
+                            batch_size,
+                        ).await {
+                            error!("Batch processing failed: {}", e);
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        info!("Batch processor shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+
+        *processor.batch_processor_handle.lock().await = Some(handle);
+        info!("Batch processor started successfully");
+        Ok(())
     }
 }

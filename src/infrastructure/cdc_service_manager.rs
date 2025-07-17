@@ -214,7 +214,30 @@ impl CDCServiceManager {
         let consumer_handle = self.start_resilient_consumer().await?;
         tasks.push(consumer_handle);
 
-        // Start batch processor if enabled
+        // Start event processor's batch processor if enabled
+        if self.optimization_config.enable_batching {
+            tracing::info!("CDC Service Manager: Starting event processor's batch processor...");
+
+            // Use the static method to start the batch processor
+            let processor_clone = self.processor.clone();
+
+            // Start the event processor's batch processor
+            match UltraOptimizedCDCEventProcessor::enable_and_start_batch_processor_arc(
+                processor_clone,
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::info!("CDC Service Manager: ✅ Event processor's batch processor started successfully");
+                }
+                Err(e) => {
+                    tracing::error!("CDC Service Manager: Failed to start event processor's batch processor: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Start CDC service manager's own batch processor if enabled (for additional processing)
         if self.optimization_config.enable_batching {
             let batch_handle = self.start_batch_processor().await?;
             tasks.push(batch_handle);
@@ -679,6 +702,10 @@ impl CDCServiceManager {
 
     pub fn get_debezium_config(&self) -> serde_json::Value {
         self.outbox_repo.generate_debezium_config(&self.config)
+    }
+
+    pub fn processor_arc(&self) -> Arc<UltraOptimizedCDCEventProcessor> {
+        self.processor.clone()
     }
 }
 
