@@ -225,6 +225,10 @@ impl ProjectionStore {
         let cache_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let metrics = Arc::new(ProjectionMetrics::default());
 
+        // Clone before move
+        let processor_cache_version = cache_version.clone();
+        let processor_metrics = metrics.clone();
+
         let store = Self {
             pool: pool.clone(),
             account_cache: account_cache.clone(),
@@ -246,6 +250,8 @@ impl ProjectionStore {
                 update_receiver,
                 processor_account_cache,
                 processor_transaction_cache,
+                processor_cache_version,
+                processor_metrics,
                 processor_config,
             )
             .await;
@@ -542,77 +548,76 @@ impl ProjectionStore {
         Ok(accounts)
     }
 
+    // async fn update_processor(
+    //     pool: PgPool,
+    //     mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
+    //     account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
+    //     transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
+    //     config: ProjectionConfig,
+    // ) {
+    //     let mut account_batch = Vec::with_capacity(config.batch_size);
+    //     let mut transaction_batch = Vec::with_capacity(config.batch_size);
+    //     let mut last_flush = Instant::now();
+    //     let batch_timeout = Duration::from_millis(config.batch_timeout_ms);
+    //     let cache_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    //     let metrics = Arc::new(ProjectionMetrics::default());
+
+    //     tracing::info!("[ProjectionStore] Background update_processor started with batch_size={} batch_timeout_ms={}", config.batch_size, config.batch_timeout_ms);
+
+    //     while let Some(update) = receiver.recv().await {
+    //         match update {
+    //             ProjectionUpdate::AccountBatch(accounts) => {
+    //                 let ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
+    //                 tracing::info!(
+    //                     "[ProjectionStore] Received AccountBatch of size {}: ids={:?}",
+    //                     accounts.len(),
+    //                     ids
+    //                 );
+    //                 account_batch.extend(accounts);
+    //             }
+    //             ProjectionUpdate::TransactionBatch(transactions) => {
+    //                 tracing::info!(
+    //                     "[ProjectionStore] Received TransactionBatch of size {}",
+    //                     transactions.len()
+    //                 );
+    //                 transaction_batch.extend(transactions);
+    //             }
+    //         }
+
+    //         // Flush if batch size reached or timeout exceeded
+    //         if account_batch.len() >= config.batch_size
+    //             || transaction_batch.len() >= config.batch_size
+    //             || last_flush.elapsed() >= batch_timeout
+    //         {
+    //             let ids: Vec<_> = account_batch.iter().map(|a| a.id).collect();
+    //             tracing::info!("[ProjectionStore] Flushing batches: account_batch_size={}, transaction_batch_size={}, account_ids={:?}", account_batch.len(), transaction_batch.len(), ids);
+    //             if let Err(e) = Self::flush_batches(
+    //                 &pool,
+    //                 &mut account_batch,
+    //                 &mut transaction_batch,
+    //                 &account_cache,
+    //                 &transaction_cache,
+    //                 &cache_version,
+    //                 &metrics,
+    //             )
+    //             .await
+    //             {
+    //                 error!(
+    //                     "[ProjectionStore] Failed to flush batches: {} (account_ids={:?})",
+    //                     e, ids
+    //                 );
+    //             } else {
+    //                 tracing::info!(
+    //                     "[ProjectionStore] Successfully flushed batches (account_ids={:?})",
+    //                     ids
+    //                 );
+    //             }
+    //             last_flush = Instant::now();
+    //         }
+    //     }
+    //     tracing::warn!("[ProjectionStore] update_processor exiting: channel closed");
+    // }
     async fn update_processor(
-        pool: PgPool,
-        mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
-        account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
-        transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
-        config: ProjectionConfig,
-    ) {
-        let mut account_batch = Vec::with_capacity(config.batch_size);
-        let mut transaction_batch = Vec::with_capacity(config.batch_size);
-        let mut last_flush = Instant::now();
-        let batch_timeout = Duration::from_millis(config.batch_timeout_ms);
-        let cache_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let metrics = Arc::new(ProjectionMetrics::default());
-
-        tracing::info!("[ProjectionStore] Background update_processor started with batch_size={} batch_timeout_ms={}", config.batch_size, config.batch_timeout_ms);
-
-        while let Some(update) = receiver.recv().await {
-            match update {
-                ProjectionUpdate::AccountBatch(accounts) => {
-                    let ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
-                    tracing::info!(
-                        "[ProjectionStore] Received AccountBatch of size {}: ids={:?}",
-                        accounts.len(),
-                        ids
-                    );
-                    account_batch.extend(accounts);
-                }
-                ProjectionUpdate::TransactionBatch(transactions) => {
-                    tracing::info!(
-                        "[ProjectionStore] Received TransactionBatch of size {}",
-                        transactions.len()
-                    );
-                    transaction_batch.extend(transactions);
-                }
-            }
-
-            // Flush if batch size reached or timeout exceeded
-            if account_batch.len() >= config.batch_size
-                || transaction_batch.len() >= config.batch_size
-                || last_flush.elapsed() >= batch_timeout
-            {
-                let ids: Vec<_> = account_batch.iter().map(|a| a.id).collect();
-                tracing::info!("[ProjectionStore] Flushing batches: account_batch_size={}, transaction_batch_size={}, account_ids={:?}", account_batch.len(), transaction_batch.len(), ids);
-                if let Err(e) = Self::flush_batches(
-                    &pool,
-                    &mut account_batch,
-                    &mut transaction_batch,
-                    &account_cache,
-                    &transaction_cache,
-                    &cache_version,
-                    &metrics,
-                )
-                .await
-                {
-                    error!(
-                        "[ProjectionStore] Failed to flush batches: {} (account_ids={:?})",
-                        e, ids
-                    );
-                } else {
-                    tracing::info!(
-                        "[ProjectionStore] Successfully flushed batches (account_ids={:?})",
-                        ids
-                    );
-                }
-                last_flush = Instant::now();
-            }
-        }
-        tracing::warn!("[ProjectionStore] update_processor exiting: channel closed");
-    }
-
-    async fn batch_update_processor(
         pool: PgPool,
         mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
         account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
@@ -627,19 +632,33 @@ impl ProjectionStore {
         let mut transaction_batch = Vec::with_capacity(config.batch_size);
         let mut interval = tokio::time::interval(Duration::from_millis(config.batch_timeout_ms));
 
+        info!("[ProjectionStore] Background update_processor started with batch_size={} batch_timeout_ms={}", config.batch_size, config.batch_timeout_ms);
+
         loop {
             tokio::select! {
                 Some(update) = receiver.recv() => {
-                    match update {
-                        ProjectionUpdate::AccountBatch(accounts) => {
-                            account_batch.extend(accounts);
-                        }
-                        ProjectionUpdate::TransactionBatch(transactions) => {
-                            transaction_batch.extend(transactions);
-                        }
-                    }
+            match update {
+                ProjectionUpdate::AccountBatch(accounts) => {
+                            let ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
+                    tracing::info!(
+                                "[ProjectionStore] Received AccountBatch of size {}: ids={:?}",
+                                accounts.len(),
+                                ids
+                    );
+                    account_batch.extend(accounts);
+                }
+                ProjectionUpdate::TransactionBatch(transactions) => {
+                    tracing::info!(
+                        "[ProjectionStore] Received TransactionBatch of size {}",
+                        transactions.len()
+                    );
+                    transaction_batch.extend(transactions);
+                }
+            }
                     if account_batch.len() >= config.batch_size || transaction_batch.len() >= config.batch_size {
-                        Self::flush_batches(
+                        let ids: Vec<_> = account_batch.iter().map(|a| a.id).collect();
+                        tracing::info!("[ProjectionStore] Flushing batches due to size: account_batch_size={}, transaction_batch_size={}, account_ids={:?}", account_batch.len(), transaction_batch.len(), ids);
+                        if let Err(e) = Self::flush_batches(
                             &pool,
                             &mut account_batch,
                             &mut transaction_batch,
@@ -647,13 +666,16 @@ impl ProjectionStore {
                             &transaction_cache,
                             &cache_version,
                             &metrics,
-                        ).await.ok();
+                        ).await {
+                            error!("[ProjectionStore] Failed to flush batches: {} (ids={:?})", e, ids);
+                        }
                     }
                 }
                 _ = interval.tick() => {
-                    tracing::info!("[ProjectionStore] batch_update_processor interval tick: account_batch_size={}, transaction_batch_size={}", account_batch.len(), transaction_batch.len());
                     if !account_batch.is_empty() || !transaction_batch.is_empty() {
-                        Self::flush_batches(
+                        let ids: Vec<_> = account_batch.iter().map(|a| a.id).collect();
+                        tracing::info!("[ProjectionStore] Flushing batches due to timeout: account_batch_size={}, transaction_batch_size={}, account_ids={:?}", account_batch.len(), transaction_batch.len(), ids);
+                        if let Err(e) = Self::flush_batches(
                             &pool,
                             &mut account_batch,
                             &mut transaction_batch,
@@ -661,11 +683,120 @@ impl ProjectionStore {
                             &transaction_cache,
                             &cache_version,
                             &metrics,
-                        ).await.ok();
+                        ).await {
+                            error!("[ProjectionStore] Failed to flush batches: {} (ids={:?})", e, ids);
+                        }
                     }
                 }
             }
         }
+    }
+    async fn batch_update_processor(
+        pool: PgPool,
+        mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
+        account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
+        transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
+        cache_version: Arc<std::sync::atomic::AtomicU64>,
+        metrics: Arc<ProjectionMetrics>,
+        mut config: ProjectionConfig,
+    ) {
+        // Panic hook for batch processor
+        std::panic::set_hook(Box::new(|panic_info| {
+            eprintln!(
+                "[ProjectionStore] PANIC in batch_update_processor: {:?}",
+                panic_info
+            );
+        }));
+        tracing::info!(
+            "[ProjectionStore] batch_update_processor STARTED (only one instance should run)"
+        );
+        config.batch_timeout_ms = 50;
+        let mut account_batch = Vec::with_capacity(config.batch_size);
+        let mut transaction_batch = Vec::with_capacity(config.batch_size);
+        let mut interval = tokio::time::interval(Duration::from_millis(config.batch_timeout_ms));
+
+        loop {
+            tokio::select! {
+                maybe_update = receiver.recv() => {
+                    match maybe_update {
+                        Some(update) => {
+                            tracing::info!("[ProjectionStore] batch_update_processor received batch update");
+                            match update {
+                                ProjectionUpdate::AccountBatch(accounts) => {
+                                    tracing::info!("[ProjectionStore] batch_update_processor received AccountBatch: ids={:?}", accounts.iter().map(|a| a.id).collect::<Vec<_>>());
+                                    account_batch.extend(accounts);
+                                }
+                                ProjectionUpdate::TransactionBatch(transactions) => {
+                                    tracing::info!("[ProjectionStore] batch_update_processor received TransactionBatch: ids={:?}", transactions.iter().map(|t| t.id).collect::<Vec<_>>());
+                                    transaction_batch.extend(transactions);
+                                }
+                            }
+                            if account_batch.len() >= config.batch_size || transaction_batch.len() >= config.batch_size {
+                                tracing::info!("[ProjectionStore] batch_update_processor FLUSH (batch size reached): account_batch_size={}, transaction_batch_size={}", account_batch.len(), transaction_batch.len());
+                if let Err(e) = Self::flush_batches(
+                    &pool,
+                    &mut account_batch,
+                    &mut transaction_batch,
+                    &account_cache,
+                    &transaction_cache,
+                    &cache_version,
+                    &metrics,
+                                ).await {
+                                    tracing::error!("[ProjectionStore] batch_update_processor FLUSH ERROR: {}", e);
+                } else {
+                                    tracing::info!("[ProjectionStore] batch_update_processor FLUSH SUCCESS");
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::warn!("[ProjectionStore] batch_update_processor: receiver channel closed, exiting loop");
+                            // Flush any remaining batches before exit
+                            if !account_batch.is_empty() || !transaction_batch.is_empty() {
+                                tracing::info!("[ProjectionStore] batch_update_processor FINAL FLUSH before exit: account_batch_size={}, transaction_batch_size={}", account_batch.len(), transaction_batch.len());
+                                if let Err(e) = Self::flush_batches(
+                                    &pool,
+                                    &mut account_batch,
+                                    &mut transaction_batch,
+                                    &account_cache,
+                                    &transaction_cache,
+                                    &cache_version,
+                                    &metrics,
+                                ).await {
+                                    tracing::error!("[ProjectionStore] batch_update_processor FINAL FLUSH ERROR: {}", e);
+                                } else {
+                                    tracing::info!("[ProjectionStore] batch_update_processor FINAL FLUSH SUCCESS");
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    // Yield to allow interval to be polled
+                    tokio::task::yield_now().await;
+            }
+                _ = interval.tick() => {
+                    tracing::info!("[ProjectionStore] batch_update_processor interval tick: account_batch_size={}, transaction_batch_size={}", account_batch.len(), transaction_batch.len());
+                    if !account_batch.is_empty() || !transaction_batch.is_empty() {
+                        tracing::info!("[ProjectionStore] batch_update_processor FLUSH (interval): account_batch_size={}, transaction_batch_size={}", account_batch.len(), transaction_batch.len());
+                        if let Err(e) = Self::flush_batches(
+                            &pool,
+                            &mut account_batch,
+                            &mut transaction_batch,
+                            &account_cache,
+                            &transaction_cache,
+                            &cache_version,
+                            &metrics,
+                        ).await {
+                            tracing::error!("[ProjectionStore] batch_update_processor FLUSH ERROR (interval): {}", e);
+                        } else {
+                            tracing::info!("[ProjectionStore] batch_update_processor FLUSH SUCCESS (interval)");
+                        }
+                    }
+                    // Yield to allow other tasks to run
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        tracing::info!("[ProjectionStore] batch_update_processor EXITED");
     }
 
     async fn flush_batches(
