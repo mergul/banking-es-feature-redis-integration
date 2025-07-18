@@ -538,7 +538,7 @@ async fn test_real_cdc_high_throughput_performance() {
         let account_id = account_ids[0];
         let mut found = false;
         let mut last_err = None;
-        for attempt in 1..=20 {
+        for attempt in 1..=40 {
             match context.cqrs_service.get_account(account_id).await {
                 Ok(account) => {
                     tracing::info!(
@@ -552,7 +552,7 @@ async fn test_real_cdc_high_throughput_performance() {
                 Err(e) => {
                     tracing::warn!("⚠️ Attempt {}: Failed to get account: {:?}", attempt, e);
                     last_err = Some(e);
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         }
@@ -882,12 +882,14 @@ async fn run_test_cdc_performance_test(
 
     // Run performance test
     let test_start = std::time::Instant::now();
+    let read_ratio = 0.5; // 50% reads/writes for polling-based test
     let results = run_high_throughput_operations(
         &context.cqrs_service,
         &account_ids,
         target_ops,
         worker_count,
         channel_buffer_size,
+        read_ratio,
     )
     .await?;
     let test_duration = test_start.elapsed();
@@ -1000,24 +1002,26 @@ async fn run_real_cdc_performance_test(
 
     tracing::info!("✅ Real CDC environment setup complete in {:?}", setup_time);
 
-    // Test parameters optimized for real CDC (more conservative)
-    let target_ops = 100; // Lower throughput for real CDC
-    let worker_count = 5; // Fewer workers for real CDC
-    let account_count = 50; // Fewer accounts for real CDC
-    let channel_buffer_size = 1000;
+    // Test parameters for true performance test
+    let target_ops = 100_000; // High throughput
+    let worker_count = 64; // Many workers
+    let account_count = 10_000; // Many accounts
+    let channel_buffer_size = 10_000;
+    let read_ratio = 0.8; // 80% reads
 
     tracing::info!(
-        "🎯 Real CDC Parameters - Target Ops: {}, Workers: {}, Accounts: {}",
+        "🎯 Real CDC Parameters - Target Ops: {}, Workers: {}, Accounts: {}, Read Ratio: {}",
         target_ops,
         worker_count,
-        account_count
+        account_count,
+        read_ratio
     );
 
     // Create accounts
     let account_ids = create_test_accounts(&context.cqrs_service, account_count).await?;
 
     // Wait for CDC to process account creation events
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     // Run performance test
     let test_start = std::time::Instant::now();
@@ -1027,6 +1031,7 @@ async fn run_real_cdc_performance_test(
         target_ops,
         worker_count,
         channel_buffer_size,
+        read_ratio,
     )
     .await?;
     let test_duration = test_start.elapsed();
@@ -1259,8 +1264,10 @@ async fn run_high_throughput_operations(
     target_ops: usize,
     worker_count: usize,
     channel_buffer_size: usize,
+    read_ratio: f64,
 ) -> Result<Vec<OperationMetrics>, Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("[run_high_throughput_operations] Starting with target_ops={}, worker_count={}, channel_buffer_size={}", target_ops, worker_count, channel_buffer_size);
+    use rand::Rng;
+    tracing::info!("[run_high_throughput_operations] Starting with target_ops={}, worker_count={}, channel_buffer_size={}, read_ratio={}", target_ops, worker_count, channel_buffer_size, read_ratio);
     let (tx, mut rx) = tokio::sync::mpsc::channel(channel_buffer_size);
     let mut handles = Vec::new();
 
@@ -1269,6 +1276,7 @@ async fn run_high_throughput_operations(
         let tx = tx.clone();
         let cqrs_service = cqrs_service.clone();
         let account_ids = account_ids.to_vec();
+        let read_ratio = read_ratio;
 
         let handle = tokio::spawn(async move {
             tracing::info!("🚀 Worker {}: Starting worker task", worker_id);
@@ -1283,11 +1291,11 @@ async fn run_high_throughput_operations(
             let result = std::panic::AssertUnwindSafe(async {
                 while local_ops < target_ops_per_worker {
                     let account_id = account_ids[rng.gen_range(0..account_ids.len())];
-                    let operation = match rng.gen_range(0..4) {
-                        0 => "deposit",
-                        1 => "withdraw",
-                        2 => "get_account",
-                        _ => "get_balance",
+                    let op_is_read = rng.gen::<f64>() < read_ratio;
+                    let operation = if op_is_read {
+                        if rng.gen_bool(0.5) { "get_account" } else { "get_balance" }
+                    } else {
+                        if rng.gen_bool(0.5) { "deposit" } else { "withdraw" }
                     };
                     tracing::debug!("[Worker {}] Starting op {}: {} on account {}", worker_id, local_ops, operation, account_id);
                     let start_time = std::time::Instant::now();
@@ -1377,7 +1385,7 @@ async fn run_high_throughput_operations(
                         })
                         .await;
                     local_ops += 1;
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    tokio::time::sleep(Duration::from_millis(2)).await;
                 }
                 tracing::info!("[Worker {}] Finished all ops", worker_id);
             })

@@ -968,6 +968,10 @@ impl UltraOptimizedCDCEventProcessor {
             .unwrap_or(false);
 
         if is_deleted {
+            tracing::info!(
+                "CDC SKIP: Deleted event for aggregate_id={:?}",
+                event_data.get("aggregate_id")
+            );
             return Ok(None); // Skip deleted events
         }
 
@@ -995,6 +999,12 @@ impl UltraOptimizedCDCEventProcessor {
             })
             .ok_or_else(|| anyhow::anyhow!("Missing event_type"))?
             .to_string();
+        tracing::info!(
+            "CDC EXTRACTED: aggregate_id={}, event_id={}, event_type={}",
+            aggregate_id,
+            event_id,
+            event_type
+        );
         let payload_str = event_data
             .get("payload")
             .and_then(|v| match v {
@@ -1037,7 +1047,7 @@ impl UltraOptimizedCDCEventProcessor {
 
         // Check if this is a tombstone (null payload)
         if event_data.is_null() {
-            tracing::debug!("🔍 Skipping tombstone event (null payload)");
+            tracing::info!("CDC SKIP: Tombstone event");
             return Ok(None);
         }
 
@@ -1049,7 +1059,10 @@ impl UltraOptimizedCDCEventProcessor {
             .unwrap_or(false);
 
         if is_deleted {
-            tracing::debug!("🔍 Skipping deleted event (__deleted=true)");
+            tracing::info!(
+                "CDC SKIP: Deleted event for aggregate_id={:?}",
+                event_data.get("aggregate_id")
+            );
             return Ok(None);
         }
 
@@ -1073,6 +1086,12 @@ impl UltraOptimizedCDCEventProcessor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing event_type"))?
             .to_string();
+        tracing::info!(
+            "CDC EXTRACTED: aggregate_id={}, event_id={}, event_type={}",
+            aggregate_id,
+            event_id,
+            event_type
+        );
 
         let payload_str = event_data
             .get("payload")
