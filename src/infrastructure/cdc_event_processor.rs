@@ -496,7 +496,9 @@ impl UltraOptimizedCDCEventProcessor {
         let initial_batch_size = if business_config.batch_processing_enabled {
             performance_config.min_batch_size
         } else {
-            1
+            // When batch processing is disabled, use a reasonable batch size
+            // to avoid processing single events immediately
+            performance_config.min_batch_size.max(10)
         };
 
         Self {
@@ -589,6 +591,9 @@ impl UltraOptimizedCDCEventProcessor {
 
         // Start performance monitor if enabled
         self.start_performance_monitor().await?;
+
+        // Start periodic flush task for when batch processing is disabled
+        self.start_periodic_flush_task().await?;
 
         info!("Batch processor started successfully");
         Ok(())
@@ -709,6 +714,9 @@ impl UltraOptimizedCDCEventProcessor {
         {
             let mut queue = self.batch_queue.lock().await;
             queue.push(processable_event.clone());
+
+            // Process batch when it reaches the configured size
+            // This allows batching even when batch processing is disabled
             if queue.len() >= *self.batch_size.lock().await {
                 drop(queue);
                 self.process_current_batch().await?;
@@ -1636,6 +1644,45 @@ impl UltraOptimizedCDCEventProcessor {
         }
 
         drop(config);
+    }
+
+    /// Start periodic flush task for when batch processing is disabled
+    async fn start_periodic_flush_task(&mut self) -> Result<()> {
+        // Start a periodic task to flush any remaining events in the queue
+        // This ensures events don't sit indefinitely when batch processing is disabled
+        let batch_queue = Arc::clone(&self.batch_queue);
+        let projection_store = Arc::clone(&self.projection_store);
+        let projection_cache = Arc::clone(&self.projection_cache);
+        let cache_service = Arc::clone(&self.cache_service);
+        let metrics = Arc::clone(&self.metrics);
+        let batch_size = *self.batch_size.lock().await;
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5)); // Flush every 5 seconds
+            loop {
+                interval.tick().await;
+
+                // Check if there are any events in the queue
+                let queue_len = batch_queue.lock().await.len();
+                if queue_len > 0 {
+                    // Process any remaining events
+                    if let Err(e) = Self::process_batch(
+                        &batch_queue,
+                        &projection_store,
+                        &projection_cache,
+                        &cache_service,
+                        &metrics,
+                        batch_size,
+                    )
+                    .await
+                    {
+                        error!("Periodic flush failed: {}", e);
+                    }
+                }
+            }
+        });
+
+        Ok(())
     }
 
     /// Start performance monitoring task

@@ -748,6 +748,44 @@ impl CDCServiceManager {
     pub fn processor_arc(&self) -> Arc<UltraOptimizedCDCEventProcessor> {
         self.processor.clone()
     }
+
+    /// Ensure batch processing is enabled and started
+    pub async fn ensure_batch_processing_enabled(&self) -> Result<()> {
+        // Check if batch processing is enabled in config
+        if !self.optimization_config.enable_batching {
+            tracing::warn!(
+                "CDC Service Manager: Batch processing is disabled in config, enabling it..."
+            );
+        }
+
+        // Check if batch processor is already running
+        if !self.processor.is_batch_processor_running().await {
+            tracing::info!("CDC Service Manager: Starting batch processor...");
+
+            // Start the batch processor
+            UltraOptimizedCDCEventProcessor::enable_and_start_batch_processor_arc(
+                self.processor.clone(),
+            )
+            .await?;
+
+            tracing::info!("CDC Service Manager: ✅ Batch processor started successfully");
+        } else {
+            tracing::info!("CDC Service Manager: ✅ Batch processor is already running");
+        }
+
+        Ok(())
+    }
+
+    /// Get the CDC event processor with batch processing enabled
+    pub async fn get_processor_with_batch_enabled(
+        &self,
+    ) -> Result<Arc<UltraOptimizedCDCEventProcessor>> {
+        // Ensure batch processing is enabled
+        self.ensure_batch_processing_enabled().await?;
+
+        // Return the processor
+        Ok(self.processor.clone())
+    }
 }
 
 /// Enhanced Health Check with more sophisticated monitoring
