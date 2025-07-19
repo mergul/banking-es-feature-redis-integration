@@ -5,8 +5,20 @@ use banking_es::infrastructure::projections::ProjectionStore;
 use std::sync::Arc;
 
 /// Comprehensive example demonstrating the enhanced CDC system with all integrated components
+///
+/// NOTE: This example is currently INACTIVE and has been commented out.
+/// The code is preserved for reference but will not execute.
+/// To reactivate, uncomment the main function below.
 #[tokio::main]
 async fn main() -> Result<()> {
+    println!("🚫 Enhanced CDC Example is currently INACTIVE");
+    println!("📝 This example has been disabled but the code is preserved for reference.");
+    println!("🔧 To reactivate, uncomment the main function implementation below.");
+
+    // Example is inactive - returning early
+    return Ok(());
+
+    /*
     println!("🚀 Starting Enhanced CDC Integration Example");
 
     // 1. Configuration Setup
@@ -30,7 +42,14 @@ async fn main() -> Result<()> {
         .await
         .expect("Failed to connect to database");
 
-    let outbox_repo = Arc::new(CDCOutboxRepository::new(pool.clone()));
+    let config =
+        banking_es::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default();
+    let partitioned_pools = Arc::new(
+        banking_es::infrastructure::connection_pool_partitioning::PartitionedPools::new(config)
+            .await
+            .expect("Failed to create partitioned pools"),
+    );
+    let outbox_repo = Arc::new(CDCOutboxRepository::new(partitioned_pools));
 
     // Initialize Kafka components
     let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
@@ -159,4 +178,5 @@ async fn main() -> Result<()> {
     println!("   - Graceful shutdown and cleanup");
 
     Ok(())
+    */
 }

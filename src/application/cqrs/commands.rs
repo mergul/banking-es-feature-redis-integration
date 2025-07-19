@@ -1,13 +1,16 @@
 use crate::domain::{Account, AccountCommand, AccountError, AccountEvent};
 use crate::infrastructure::{
     cdc_debezium::OutboxBatcher, // Added for batched outbox processing
+    connection_pool_partitioning::PoolSelector, // Added for pool selection trait
     // cache_service::CacheServiceTrait, // No longer directly used by command handlers
     event_store::EventStoreTrait,
     kafka_abstraction::KafkaConfig, // For topic names
-    OutboxMessage,                  // Added for outbox pattern
+    OperationType,
+    OutboxMessage, // Added for outbox pattern
     // projections::{AccountProjection, ProjectionStoreTrait, TransactionProjection}, // No longer directly used
     // repository::AccountRepositoryTrait, // Not used by this specific handler
     OutboxRepositoryTrait, // Added for outbox pattern
+    PartitionedPools,
 };
 use anyhow::Result; // Result from anyhow
 use async_trait::async_trait;
@@ -37,16 +40,16 @@ impl CommandBus {
         // projection_store: Arc<dyn ProjectionStoreTrait>, // Removed
         // cache_service: Arc<dyn CacheServiceTrait>,       // Removed
         outbox_repository: Arc<dyn OutboxRepositoryTrait>,
-        db_pool: Arc<PgPool>,
+        pools: Arc<PartitionedPools>,
         kafka_config: Arc<KafkaConfig>,
     ) -> Self {
-        // Create OutboxBatcher for efficient batching
-        let outbox_batcher = OutboxBatcher::new_default(outbox_repository, db_pool.clone());
+        // Create OutboxBatcher for efficient batching with write pool
+        let outbox_batcher = OutboxBatcher::new_default(outbox_repository, pools.clone());
 
         let account_command_handler = Arc::new(AccountCommandHandler::new(
             event_store,
             outbox_batcher,
-            db_pool,
+            pools,
             kafka_config,
         ));
 
@@ -89,7 +92,7 @@ impl From<CommandResult> for () {
 pub struct AccountCommandHandler {
     event_store: Arc<dyn EventStoreTrait>,
     outbox_batcher: OutboxBatcher,
-    db_pool: Arc<PgPool>,
+    pools: Arc<PartitionedPools>,
     kafka_config: Arc<KafkaConfig>,
 }
 
@@ -97,13 +100,13 @@ impl AccountCommandHandler {
     pub fn new(
         event_store: Arc<dyn EventStoreTrait>,
         outbox_batcher: OutboxBatcher,
-        db_pool: Arc<PgPool>,
+        pools: Arc<PartitionedPools>,
         kafka_config: Arc<KafkaConfig>,
     ) -> Self {
         Self {
             event_store,
             outbox_batcher,
-            db_pool,
+            pools,
             kafka_config,
         }
     }
@@ -177,9 +180,14 @@ impl AccountCommandHandler {
             });
         }
 
-        let mut tx = self.db_pool.begin().await.map_err(|e| {
-            AccountError::InfrastructureError(format!("DB Error starting transaction: {}", e))
-        })?;
+        let mut tx = self
+            .pools
+            .select_pool(OperationType::Write)
+            .begin()
+            .await
+            .map_err(|e| {
+                AccountError::InfrastructureError(format!("DB Error starting transaction: {}", e))
+            })?;
 
         match self
             .event_store

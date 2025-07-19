@@ -118,6 +118,95 @@ pub struct EnhancedCDCMetrics {
     pub integration_helper_initialized: std::sync::atomic::AtomicBool,
 }
 
+impl Clone for EnhancedCDCMetrics {
+    fn clone(&self) -> Self {
+        Self {
+            events_processed: std::sync::atomic::AtomicU64::new(
+                self.events_processed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            events_failed: std::sync::atomic::AtomicU64::new(
+                self.events_failed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            total_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.total_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            cache_invalidations: std::sync::atomic::AtomicU64::new(
+                self.cache_invalidations
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            projection_updates: std::sync::atomic::AtomicU64::new(
+                self.projection_updates
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            batches_processed: std::sync::atomic::AtomicU64::new(
+                self.batches_processed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            circuit_breaker_trips: std::sync::atomic::AtomicU64::new(
+                self.circuit_breaker_trips
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            consumer_restarts: std::sync::atomic::AtomicU64::new(
+                self.consumer_restarts
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            cleanup_cycles: std::sync::atomic::AtomicU64::new(
+                self.cleanup_cycles
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            memory_usage_bytes: std::sync::atomic::AtomicU64::new(
+                self.memory_usage_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            active_connections: std::sync::atomic::AtomicU64::new(
+                self.active_connections
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            queue_depth: std::sync::atomic::AtomicU64::new(
+                self.queue_depth.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            avg_batch_size: std::sync::atomic::AtomicU64::new(
+                self.avg_batch_size
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            p95_processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.p95_processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            p99_processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.p99_processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            throughput_per_second: std::sync::atomic::AtomicU64::new(
+                self.throughput_per_second
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            consecutive_failures: std::sync::atomic::AtomicU64::new(
+                self.consecutive_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            last_error_time: std::sync::atomic::AtomicU64::new(
+                self.last_error_time
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            error_rate: std::sync::atomic::AtomicU64::new(
+                self.error_rate.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            integration_helper_initialized: std::sync::atomic::AtomicBool::new(
+                self.integration_helper_initialized
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
+}
+
 impl CDCServiceManager {
     pub fn new(
         config: DebeziumConfig,
@@ -138,6 +227,7 @@ impl CDCServiceManager {
             projection_store,
             metrics.clone(), // <-- pass shared metrics Arc
             None,
+            None, // Use default performance config
         ));
         Ok(Self {
             config,
@@ -235,12 +325,6 @@ impl CDCServiceManager {
                     return Err(e);
                 }
             }
-        }
-
-        // Start CDC service manager's own batch processor if enabled (for additional processing)
-        if self.optimization_config.enable_batching {
-            let batch_handle = self.start_batch_processor().await?;
-            tasks.push(batch_handle);
         }
 
         tracing::info!("CDC Service Manager: ✅ Core services started");
@@ -358,49 +442,6 @@ impl CDCServiceManager {
             }
 
             tracing::info!("CDC Consumer: Task completed");
-        });
-
-        Ok(handle)
-    }
-
-    /// Start batch processor for improved throughput
-    async fn start_batch_processor(&self) -> Result<tokio::task::JoinHandle<()>> {
-        let processor = self.processor.clone();
-        let metrics = self.metrics.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let optimization_config = self.optimization_config.clone();
-
-        let handle = tokio::spawn(async move {
-            let mut batch_buffer: Vec<serde_json::Value> = Vec::new();
-            let mut last_flush = std::time::Instant::now();
-
-            loop {
-                tokio::select! {
-                    _ = shutdown_rx.changed() => {
-                        // Flush remaining batch before shutdown
-                        if !batch_buffer.is_empty() {
-                            tracing::info!("Batch Processor: Flushing {} items before shutdown", batch_buffer.len());
-                            // Process remaining batch
-                            batch_buffer.clear();
-                        }
-                        break;
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(optimization_config.batch_timeout_ms)) => {
-                        if !batch_buffer.is_empty() && last_flush.elapsed() > Duration::from_millis(optimization_config.batch_timeout_ms) {
-                            tracing::info!("Batch Processor: Timeout flush of {} items", batch_buffer.len());
-                            // Process batch
-                            let batch_size = batch_buffer.len() as u64;
-                            metrics.batches_processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            metrics.avg_batch_size.store(batch_size, std::sync::atomic::Ordering::Relaxed);
-
-                            batch_buffer.clear();
-                            last_flush = std::time::Instant::now();
-                        }
-                    }
-                }
-            }
-
-            tracing::info!("Batch Processor: Task completed");
         });
 
         Ok(handle)

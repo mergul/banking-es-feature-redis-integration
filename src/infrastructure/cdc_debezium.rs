@@ -1,4 +1,7 @@
 use crate::infrastructure::cache_service::CacheServiceTrait;
+use crate::infrastructure::connection_pool_partitioning::{
+    OperationType, PartitionedPools, PoolSelector,
+};
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
@@ -123,16 +126,18 @@ pub trait CDCOutboxRepositoryTrait: Send + Sync {
 /// This allows seamless integration with the current CQRS system
 #[derive(Clone)]
 pub struct CDCOutboxRepository {
-    pool: sqlx::PgPool,
+    pools: Arc<PartitionedPools>,
 }
 
 impl CDCOutboxRepository {
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+    pub fn new(pools: Arc<PartitionedPools>) -> Self {
+        Self { pools }
     }
 
     /// Create optimized outbox table for CDC
     pub async fn create_cdc_outbox_table(&self) -> Result<()> {
+        let write_pool = self.pools.select_pool(OperationType::Write);
+
         // Create the table
         sqlx::query(
             r#"
@@ -149,29 +154,29 @@ impl CDCOutboxRepository {
             )
             "#,
         )
-        .execute(&self.pool)
+        .execute(write_pool)
         .await?;
 
         // Create indexes separately
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_outbox_cdc_created_at ON kafka_outbox_cdc(created_at)",
         )
-        .execute(&self.pool)
+        .execute(write_pool)
         .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_outbox_cdc_aggregate_id ON kafka_outbox_cdc(aggregate_id)")
-            .execute(&self.pool)
+            .execute(write_pool)
             .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_outbox_cdc_event_id ON kafka_outbox_cdc(event_id)",
         )
-        .execute(&self.pool)
+        .execute(write_pool)
         .await?;
 
         // Enable logical replication
         sqlx::query("ALTER TABLE kafka_outbox_cdc REPLICA IDENTITY FULL")
-            .execute(&self.pool)
+            .execute(write_pool)
             .await?;
 
         Ok(())
@@ -215,7 +220,7 @@ impl CDCOutboxRepository {
             "DELETE FROM kafka_outbox_cdc WHERE created_at < $1",
             cutoff_time
         )
-        .execute(&self.pool)
+        .execute(self.pools.select_pool(OperationType::Write))
         .await?;
 
         Ok(result.rows_affected() as usize)
@@ -231,44 +236,40 @@ pub struct OutboxBatcher {
 impl OutboxBatcher {
     pub fn new(
         repo: Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait + Send + Sync>,
-        pool: Arc<sqlx::PgPool>,
+        pools: Arc<PartitionedPools>,
         batch_size: usize,
         batch_timeout: Duration,
     ) -> Self {
-        let (sender, mut receiver) =
-            mpsc::channel::<crate::infrastructure::outbox::OutboxMessage>(batch_size * 2);
+        let (sender, mut receiver) = mpsc::channel(1000);
+        let mut buffer = Vec::new();
+        let mut last_flush = tokio::time::Instant::now();
 
-        // Spawn background task for batching and flushing
         tokio::spawn(async move {
-            let mut buffer = Vec::with_capacity(batch_size);
-            let mut last_flush = tokio::time::Instant::now();
-
-            tracing::info!(
-                "OutboxBatcher: Started with batch_size={}, batch_timeout={:?}",
-                batch_size,
-                batch_timeout
-            );
-
             loop {
                 tokio::select! {
-                    Some(msg) = receiver.recv() => {
-                        buffer.push(msg);
-                        if buffer.len() >= batch_size {
-                            tracing::debug!(
-                                "OutboxBatcher: Flushing {} messages (size threshold reached)",
-                                buffer.len()
-                            );
-                            Self::flush(&repo, &pool, &mut buffer).await;
-                            last_flush = tokio::time::Instant::now();
+                    msg = receiver.recv() => {
+                        match msg {
+                            Some(msg) => {
+                                buffer.push(msg);
+                                if buffer.len() >= batch_size {
+                                    Self::flush(&repo, &pools, &mut buffer).await;
+                                    last_flush = tokio::time::Instant::now();
+                                }
+                            }
+                            None => {
+                                // Channel closed, flush remaining messages
+                                if !buffer.is_empty() {
+                                    Self::flush(&repo, &pools, &mut buffer).await;
+                                }
+                                break;
+                            }
                         }
                     }
-                    _ = tokio::time::sleep_until(last_flush + batch_timeout), if !buffer.is_empty() => {
-                        tracing::debug!(
-                            "OutboxBatcher: Flushing {} messages (timeout reached)",
-                            buffer.len()
-                        );
-                        Self::flush(&repo, &pool, &mut buffer).await;
-                        last_flush = tokio::time::Instant::now();
+                    _ = tokio::time::sleep_until(last_flush + batch_timeout) => {
+                        if !buffer.is_empty() {
+                            Self::flush(&repo, &pools, &mut buffer).await;
+                            last_flush = tokio::time::Instant::now();
+                        }
                     }
                 }
             }
@@ -277,75 +278,50 @@ impl OutboxBatcher {
         Self { sender }
     }
 
-    /// Submit a message to the batcher
     pub async fn submit(&self, msg: crate::infrastructure::outbox::OutboxMessage) -> Result<()> {
         self.sender
             .send(msg)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to submit message to outbox batcher: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to send message: {}", e))
     }
 
-    /// Flush the current buffer to the database
     async fn flush(
         repo: &Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait + Send + Sync>,
-        pool: &Arc<sqlx::PgPool>,
+        pools: &Arc<PartitionedPools>,
         buffer: &mut Vec<crate::infrastructure::outbox::OutboxMessage>,
     ) {
         if buffer.is_empty() {
             return;
         }
 
-        let start_time = std::time::Instant::now();
-        let message_count = buffer.len();
-
-        // Begin transaction
-        let mut transaction = match pool.begin().await {
-            Ok(t) => t,
+        let write_pool = pools.select_pool(OperationType::Write);
+        let mut transaction = match write_pool.begin().await {
+            Ok(tx) => tx,
             Err(e) => {
-                tracing::error!("OutboxBatcher: Failed to begin transaction: {}", e);
+                error!("Failed to begin transaction for outbox batch flush: {}", e);
                 return;
             }
         };
 
-        // Add messages to outbox
-        match repo
-            .add_pending_messages(&mut transaction, buffer.clone())
-            .await
-        {
-            Ok(_) => {
-                // Commit transaction
-                match transaction.commit().await {
-                    Ok(_) => {
-                        let duration = start_time.elapsed();
-                        tracing::info!(
-                            "OutboxBatcher: Successfully flushed {} messages in {:?}",
-                            message_count,
-                            duration
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("OutboxBatcher: Failed to commit outbox batch: {}", e);
-                    }
-                }
+        let messages = std::mem::replace(buffer, Vec::new());
+        if let Err(e) = repo.add_pending_messages(&mut transaction, messages).await {
+            error!("Failed to add outbox messages: {}", e);
+            if let Err(e) = transaction.rollback().await {
+                error!("Failed to rollback transaction: {}", e);
             }
-            Err(e) => {
-                tracing::error!(
-                    "OutboxBatcher: Failed to batch insert outbox messages: {}",
-                    e
-                );
-            }
+            return;
         }
 
-        // Clear buffer after flush (successful or not)
-        buffer.clear();
+        if let Err(e) = transaction.commit().await {
+            error!("Failed to commit outbox batch: {}", e);
+        }
     }
 
-    /// Create a default OutboxBatcher with 1000 messages batch size and 100ms timeout
     pub fn new_default(
         repo: Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait + Send + Sync>,
-        pool: Arc<sqlx::PgPool>,
+        pools: Arc<PartitionedPools>,
     ) -> Self {
-        Self::new(repo, pool, 1000, Duration::from_millis(100))
+        Self::new(repo, pools, 1000, Duration::from_millis(100))
     }
 }
 
@@ -508,6 +484,7 @@ impl EnhancedCDCEventProcessor {
             projection_store,
             metrics.clone(), // <-- pass metrics as required
             business_config,
+            None, // Use default performance config
         );
 
         Self {

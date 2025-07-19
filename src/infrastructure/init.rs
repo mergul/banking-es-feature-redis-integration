@@ -281,7 +281,9 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     );
 
     // Initialize UserRepository
-    let user_repository = Arc::new(UserRepository::new(event_store.get_pool().clone()));
+    let user_repository = Arc::new(UserRepository::new(
+        event_store.get_partitioned_pools().clone(),
+    ));
 
     // Initialize AuthService with config from environment
     let auth_config = AuthConfig {

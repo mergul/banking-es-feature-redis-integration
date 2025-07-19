@@ -2,6 +2,9 @@ use crate::domain::{Account, AccountEvent};
 use crate::infrastructure::connection_pool_monitor::{
     ConnectionPoolMonitor, PoolHealth, PoolMonitorConfig, PoolMonitorTrait,
 };
+use crate::infrastructure::connection_pool_partitioning::{
+    OperationType, PartitionedPools, PoolSelector,
+};
 use crate::infrastructure::deadlock_detector::{DeadlockConfig, DeadlockDetector, DeadlockStats};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -167,7 +170,7 @@ pub struct EventValidationResult {
 
 #[derive(Clone)]
 pub struct EventStore {
-    pool: PgPool,
+    pools: Arc<PartitionedPools>,
     batch_sender: mpsc::UnboundedSender<BatchedEvent>,
     snapshot_cache: Arc<RwLock<HashMap<Uuid, CachedSnapshot>>>,
     config: EventStoreConfig,
@@ -188,6 +191,27 @@ struct BatchedEvent {
     response_tx: tokio::sync::oneshot::Sender<Result<(), EventStoreError>>,
     created_at: Instant,
     priority: EventPriority,
+}
+
+// Optimized batch processing structures
+#[derive(Debug)]
+struct OptimizedBatch {
+    events: Vec<Event>,
+    aggregate_id: Uuid,
+    expected_version: i64,
+    response_txs: Vec<tokio::sync::oneshot::Sender<Result<(), EventStoreError>>>,
+    priority: EventPriority,
+    created_at: Instant,
+}
+
+#[derive(Debug)]
+struct BatchProcessorMetrics {
+    batches_processed: AtomicU64,
+    events_processed: AtomicU64,
+    events_failed: AtomicU64,
+    avg_batch_size: AtomicU64,
+    processing_time: AtomicU64,
+    queue_depth: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -259,11 +283,23 @@ pub trait EventHandler: Send + Sync {
 impl EventStore {
     /// Create EventStore with an existing PgPool
     pub fn new(pool: PgPool) -> Self {
-        let deadlock_detector = DeadlockDetector::new(DeadlockConfig::default());
-        let pool_monitor = ConnectionPoolMonitor::new(pool.clone(), PoolMonitorConfig::default());
+        // Create partitioned pools from the single pool
+        let pools = Arc::new(PartitionedPools {
+            write_pool: pool.clone(),
+            read_pool: pool,
+            config:
+                crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default(
+                ),
+        });
 
-        Self::new_with_config_and_pool(
-            pool,
+        let deadlock_detector = DeadlockDetector::new(DeadlockConfig::default());
+        let pool_monitor = ConnectionPoolMonitor::new(
+            pools.select_pool(OperationType::Write).clone(),
+            PoolMonitorConfig::default(),
+        );
+
+        Self::new_with_config_and_pools(
+            pools,
             EventStoreConfig::default(),
             deadlock_detector,
             pool_monitor,
@@ -277,6 +313,25 @@ impl EventStore {
         deadlock_detector: DeadlockDetector,
         pool_monitor: ConnectionPoolMonitor,
     ) -> Self {
+        // Create partitioned pools from the single pool
+        let pools = Arc::new(PartitionedPools {
+            write_pool: pool.clone(),
+            read_pool: pool,
+            config:
+                crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default(
+                ),
+        });
+
+        Self::new_with_config_and_pools(pools, config, deadlock_detector, pool_monitor)
+    }
+
+    /// Create EventStore with custom config and partitioned pools
+    pub fn new_with_config_and_pools(
+        pools: Arc<PartitionedPools>,
+        config: EventStoreConfig,
+        deadlock_detector: DeadlockDetector,
+        pool_monitor: ConnectionPoolMonitor,
+    ) -> Self {
         let (batch_sender, batch_receiver) = mpsc::unbounded_channel();
         let snapshot_cache = Arc::new(RwLock::new(HashMap::new()));
         let batch_semaphore = Arc::new(Semaphore::new(config.max_batch_queue_size));
@@ -286,7 +341,7 @@ impl EventStore {
         let version_cache = Arc::new(DashMap::new());
 
         let store = Self {
-            pool: pool.clone(),
+            pools: pools.clone(),
             batch_sender,
             snapshot_cache: snapshot_cache.clone(),
             config: config.clone(),
@@ -301,7 +356,7 @@ impl EventStore {
 
         // Start multiple batch processors for better throughput
         Self::start_batch_processors(
-            pool.clone(),
+            pools.clone(),
             batch_receiver,
             config.clone(),
             batch_semaphore.clone(),
@@ -312,7 +367,7 @@ impl EventStore {
 
         // Start periodic snapshot creation
         tokio::spawn(Self::snapshot_worker(
-            pool.clone(),
+            pools.clone(),
             snapshot_cache.clone(),
             config.clone(),
         ));
@@ -353,54 +408,29 @@ impl EventStore {
 
     /// Create EventStore with full configuration options
     pub async fn new_with_config(config: EventStoreConfig) -> Result<Self, EventStoreError> {
-        let pool = DB_POOL
-            .get_or_try_init(|| async {
-                Ok::<_, EventStoreError>(Arc::new(
-                    PgPoolOptions::new()
-                        .max_connections(config.max_connections)
-                        .min_connections(config.min_connections)
-                        .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
-                        .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-                        .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-                        .after_connect(|conn, _meta| {
-                            Box::pin(async move {
-                                sqlx::query("SET SESSION synchronous_commit = 'off'")
-                                    .execute(&mut *conn)
-                                    .await?;
-                                sqlx::query("SET SESSION work_mem = '64MB'")
-                                    .execute(&mut *conn)
-                                    .await?;
-                                sqlx::query("SET SESSION maintenance_work_mem = '256MB'")
-                                    .execute(&mut *conn)
-                                    .await?;
-                                sqlx::query("SET SESSION effective_cache_size = '4GB'")
-                                    .execute(&mut *conn)
-                                    .await?;
-                                sqlx::query("SET SESSION random_page_cost = 1.1")
-                                    .execute(&mut *conn)
-                                    .await?;
-                                sqlx::query("SET SESSION effective_io_concurrency = 200")
-                                    .execute(&mut *conn)
-                                    .await?;
-                                sqlx::query("SET SESSION statement_timeout = '10s'")
-                                    .execute(&mut *conn)
-                                    .await?;
-                                Ok(())
-                            })
-                        })
-                        .connect(&config.database_url)
-                        .await
-                        .map_err(EventStoreError::DatabaseError)?,
-                ))
-            })
-            .await?
-            .clone();
+        // Create partitioned pools for read/write separation
+        let pool_config =
+            crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig {
+                database_url: config.database_url.clone(),
+                write_pool_max_connections: config.max_connections / 3, // Smaller write pool
+                write_pool_min_connections: config.min_connections / 3,
+                read_pool_max_connections: config.max_connections * 2 / 3, // Larger read pool
+                read_pool_min_connections: config.min_connections * 2 / 3,
+                acquire_timeout_secs: config.acquire_timeout_secs,
+                write_idle_timeout_secs: config.idle_timeout_secs,
+                read_idle_timeout_secs: config.idle_timeout_secs * 2, // Longer idle time for reads
+                write_max_lifetime_secs: config.max_lifetime_secs,
+                read_max_lifetime_secs: config.max_lifetime_secs * 2, // Longer lifetime for reads
+            };
 
-        Ok(Self::new_with_config_and_pool(
-            pool.as_ref().clone(),
+        let pools = Arc::new(PartitionedPools::new(pool_config).await?);
+        let write_pool = pools.select_pool(OperationType::Write).clone();
+
+        Ok(Self::new_with_config_and_pools(
+            pools,
             config,
             DeadlockDetector::new(DeadlockConfig::default()),
-            ConnectionPoolMonitor::new(pool.as_ref().clone(), PoolMonitorConfig::default()),
+            ConnectionPoolMonitor::new(write_pool, PoolMonitorConfig::default()),
         ))
     }
 
@@ -557,7 +587,7 @@ impl EventStore {
 
     // Start multiple batch processors for parallel processing
     fn start_batch_processors(
-        pool: PgPool,
+        pools: Arc<PartitionedPools>,
         receiver: mpsc::UnboundedReceiver<BatchedEvent>,
         config: EventStoreConfig,
         semaphore: Arc<Semaphore>,
@@ -565,44 +595,146 @@ impl EventStore {
         event_handlers: Arc<DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>>,
         version_cache: Arc<DashMap<Uuid, i64>>,
     ) {
-        // Start background batch processor
-        let version_cache_for_processor = version_cache.clone();
-        tokio::spawn(Self::batch_processor(
-            pool.clone(),
+        let processor_count = config.batch_processor_count;
+
+        // Create optimized batch processors with work stealing
+        let (work_sender, work_receiver) = mpsc::unbounded_channel();
+        let shared_work_receiver = Arc::new(Mutex::new(work_receiver));
+
+        // Start work distributor
+        tokio::spawn(Self::optimized_work_distributor(
             receiver,
-            config.clone(),
-            semaphore,
-            metrics.clone(),
-            event_handlers.clone(),
-            version_cache_for_processor,
-            0,
+            work_sender,
+            processor_count,
         ));
-    }
 
-    /// Work distributor that distributes events across multiple processors
-    async fn work_distributor(
-        mut receiver: mpsc::UnboundedReceiver<BatchedEvent>,
-        work_sender: mpsc::UnboundedSender<BatchedEvent>,
-        processor_count: usize,
-    ) {
-        let mut processor_index = 0;
+        // Start multiple optimized batch processors
+        for worker_id in 0..processor_count {
+            let worker_pools = pools.clone();
+            let worker_receiver = shared_work_receiver.clone();
+            let worker_config = config.clone();
+            let worker_semaphore = semaphore.clone();
+            let worker_metrics = metrics.clone();
+            let worker_event_handlers = event_handlers.clone();
+            let worker_version_cache = version_cache.clone();
 
-        while let Some(event) = receiver.recv().await {
-            // Simple round-robin distribution
-            if let Err(e) = work_sender.send(event) {
-                error!(
-                    "Failed to distribute work to processor {}: {}",
-                    processor_index, e
-                );
-            }
-            processor_index = (processor_index + 1) % processor_count;
+            tokio::spawn(async move {
+                Self::optimized_batch_processor(
+                    worker_pools,
+                    worker_receiver,
+                    worker_config,
+                    worker_semaphore,
+                    worker_metrics,
+                    worker_event_handlers,
+                    worker_version_cache,
+                    worker_id,
+                )
+                .await;
+            });
         }
     }
 
-    // Multi-threaded batch processor with priority queuing
-    async fn batch_processor(
-        pool: PgPool,
+    // Optimized work distributor with priority-aware distribution
+    async fn optimized_work_distributor(
         mut receiver: mpsc::UnboundedReceiver<BatchedEvent>,
+        work_sender: mpsc::UnboundedSender<OptimizedBatch>,
+        processor_count: usize,
+    ) {
+        let mut processor_index = 0;
+        let mut priority_queues: Vec<Vec<BatchedEvent>> = Vec::new();
+        for _ in 0..4 {
+            priority_queues.push(Vec::new());
+        }
+
+        while let Some(event) = receiver.recv().await {
+            // Add to appropriate priority queue
+            priority_queues[event.priority as usize].push(event);
+
+            // Process high priority events immediately
+            if !priority_queues[EventPriority::Critical as usize].is_empty() {
+                let critical_events = std::mem::replace(
+                    &mut priority_queues[EventPriority::Critical as usize],
+                    Vec::new(),
+                );
+                for event in critical_events {
+                    if let Err(e) = work_sender.send(Self::create_optimized_batch(event)) {
+                        error!("Failed to send critical event: {}", e);
+                    }
+                }
+            }
+
+            // Process other priority levels in batches
+            for priority in [
+                EventPriority::High,
+                EventPriority::Normal,
+                EventPriority::Low,
+            ] {
+                if priority_queues[priority as usize].len() >= 10 {
+                    // Batch size threshold
+                    let events =
+                        std::mem::replace(&mut priority_queues[priority as usize], Vec::new());
+                    let optimized_batch = Self::merge_events_into_batch(events, priority);
+                    if let Err(e) = work_sender.send(optimized_batch) {
+                        error!("Failed to send batch: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    // Create optimized batch from single event
+    fn create_optimized_batch(event: BatchedEvent) -> OptimizedBatch {
+        let events =
+            Self::prepare_events_for_insert_optimized(&event).unwrap_or_else(|_| Vec::new());
+
+        OptimizedBatch {
+            events,
+            aggregate_id: event.aggregate_id,
+            expected_version: event.expected_version,
+            response_txs: vec![event.response_tx],
+            priority: event.priority,
+            created_at: event.created_at,
+        }
+    }
+
+    // Merge multiple events into a single optimized batch
+    fn merge_events_into_batch(
+        events: Vec<BatchedEvent>,
+        priority: EventPriority,
+    ) -> OptimizedBatch {
+        let mut all_events = Vec::new();
+        let mut response_txs = Vec::new();
+        let mut aggregate_id = Uuid::nil();
+        let mut expected_version = 0;
+        let mut created_at = Instant::now();
+
+        for event in events {
+            if aggregate_id == Uuid::nil() {
+                aggregate_id = event.aggregate_id;
+                expected_version = event.expected_version;
+                created_at = event.created_at;
+            }
+
+            if let Ok(prepared_events) = Self::prepare_events_for_insert_optimized(&event) {
+                all_events.extend(prepared_events);
+                response_txs.push(event.response_tx);
+            }
+        }
+
+        OptimizedBatch {
+            events: all_events,
+            aggregate_id,
+            expected_version,
+            response_txs,
+            priority,
+            created_at,
+        }
+    }
+
+    // Optimized batch processor with improved performance
+    async fn optimized_batch_processor(
+        pools: Arc<PartitionedPools>,
+        receiver: Arc<Mutex<mpsc::UnboundedReceiver<OptimizedBatch>>>,
         config: EventStoreConfig,
         semaphore: Arc<Semaphore>,
         metrics: Arc<EventStoreMetrics>,
@@ -610,50 +742,53 @@ impl EventStore {
         version_cache: Arc<DashMap<Uuid, i64>>,
         worker_id: usize,
     ) {
-        let mut batch = Vec::new();
+        let mut batch_buffer = Vec::new();
         let mut last_flush = Instant::now();
         let mut processed_events = 0u64;
 
-        info!("Batch processor worker {} started", worker_id);
+        info!("Optimized batch processor worker {} started", worker_id);
 
         loop {
-            let timeout = tokio::time::sleep(Duration::from_millis(config.batch_timeout_ms));
+            // Collect batches with timeout
+            let batch_opt = {
+                let mut receiver_guard = receiver.lock().await;
+                tokio::time::timeout(
+                    Duration::from_millis(config.batch_timeout_ms),
+                    receiver_guard.recv(),
+                )
+                .await
+            };
 
-            // Use manual async/await instead of tokio::select!
-            let event_result = receiver.recv();
+            match batch_opt {
+                Ok(Some(batch)) => {
+                    batch_buffer.push(batch);
 
-            // Wait for either an event or timeout
-            let event_opt =
-                tokio::time::timeout(Duration::from_millis(config.batch_timeout_ms), event_result)
-                    .await;
-
-            match event_opt {
-                Ok(Some(event)) => {
-                    batch.push(event);
-
-                    if batch.len() >= config.batch_size {
-                        let batch_len = batch.len();
-                        let batch_to_process = std::mem::replace(&mut batch, Vec::new());
-                        let pool = pool.clone();
+                    // Flush when buffer is full or timeout
+                    if batch_buffer.len() >= config.batch_size / 10 {
+                        // Smaller threshold for better responsiveness
+                        let batches_to_process = std::mem::replace(&mut batch_buffer, Vec::new());
+                        let pools = pools.clone();
                         let metrics = metrics.clone();
                         let event_handlers = event_handlers.clone();
                         let version_cache = version_cache.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = Self::flush_batch(
-                                &pool,
-                                batch_to_process,
+                            if let Err(e) = Self::flush_optimized_batches(
+                                &pools,
+                                batches_to_process,
                                 &metrics,
                                 &event_handlers,
                                 &version_cache,
                             )
                             .await
                             {
-                                error!("Worker {} failed to flush batch: {}", worker_id, e);
+                                error!(
+                                    "Worker {} failed to flush optimized batches: {}",
+                                    worker_id, e
+                                );
                             }
                         });
                         last_flush = Instant::now();
-                        processed_events += batch_len as u64;
                     }
                 }
                 Ok(None) => {
@@ -661,53 +796,59 @@ impl EventStore {
                     break;
                 }
                 Err(_) => {
-                    // Timeout occurred, flush if we have events
-                    if !batch.is_empty() {
-                        let batch_len = batch.len();
-                        let batch_to_process = std::mem::replace(&mut batch, Vec::new());
-                        let pool = pool.clone();
+                    // Timeout occurred, flush if we have batches
+                    if !batch_buffer.is_empty() {
+                        let batches_to_process = std::mem::replace(&mut batch_buffer, Vec::new());
+                        let pools = pools.clone();
                         let metrics = metrics.clone();
                         let event_handlers = event_handlers.clone();
                         let version_cache = version_cache.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = Self::flush_batch(
-                                &pool,
-                                batch_to_process,
+                            if let Err(e) = Self::flush_optimized_batches(
+                                &pools,
+                                batches_to_process,
                                 &metrics,
                                 &event_handlers,
                                 &version_cache,
                             )
                             .await
                             {
-                                error!("Worker {} failed to flush batch: {}", worker_id, e);
+                                error!(
+                                    "Worker {} failed to flush optimized batches: {}",
+                                    worker_id, e
+                                );
                             }
                         });
                         last_flush = Instant::now();
-                        processed_events += batch_len as u64;
                     }
                 }
             }
 
             // Log worker statistics periodically
             if processed_events > 0 && processed_events % 1000 == 0 {
-                info!("Worker {} processed {} events", worker_id, processed_events);
+                info!(
+                    "Optimized worker {} processed {} events",
+                    worker_id, processed_events
+                );
             }
         }
     }
 
-    // Enhanced batch flushing with deadlock detection
-    async fn flush_batch(
-        pool: &PgPool,
-        batch: Vec<BatchedEvent>,
+    // Optimized batch flushing with improved error handling
+    async fn flush_optimized_batches(
+        pools: &Arc<PartitionedPools>,
+        batches: Vec<OptimizedBatch>,
         metrics: &EventStoreMetrics,
         event_handlers: &DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>,
         version_cache: &DashMap<Uuid, i64>,
     ) -> Result<(), EventStoreError> {
-        let operation_id = "flush_batch_{}".to_string() + &(Uuid::new_v4().to_string());
+        if batches.is_empty() {
+            return Ok(());
+        }
 
-        // Execute the operation directly without the track_operation macro
-        let mut tx = tokio::time::timeout(Duration::from_secs(10), pool.begin())
+        let write_pool = pools.select_pool(OperationType::Write);
+        let mut tx = tokio::time::timeout(Duration::from_secs(10), write_pool.begin())
             .await
             .map_err(|_| {
                 EventStoreError::DatabaseError(sqlx::Error::Configuration(
@@ -716,67 +857,75 @@ impl EventStore {
             })?
             .map_err(EventStoreError::DatabaseError)?;
 
-        for batched_event in batch {
-            let event_data = Self::prepare_events_for_insert_optimized(&batched_event)
-                .map_err(EventStoreError::SerializationErrorBincode)?;
+        // Collect all events and response channels
+        let mut all_events = Vec::new();
+        let mut all_response_txs = Vec::new();
 
-            // Validate events
-            let mut validation_error = None;
-            for event in &event_data {
-                let validation = Self::validate_event(event).await;
-                if !validation.is_valid {
-                    metrics
-                        .events_failed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    validation_error = Some(EventStoreError::ValidationError(validation.errors));
-                    break;
-                }
-            }
-
-            // Handle events
-            let mut handling_error = None;
-            if validation_error.is_none() {
-                for event in &event_data {
-                    if let Err(e) = Self::handle_event(event, event_handlers).await {
-                        metrics
-                            .events_failed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        handling_error = Some(EventStoreError::EventHandlingError(
-                            "Failed to handle event ".to_string()
-                                + &event.event_type
-                                + " for aggregate "
-                                + &event.aggregate_id.to_string()
-                                + ": "
-                                + &e.to_string(),
-                        ));
-                        break;
-                    }
-                }
-            }
-
-            // Insert events
-            let insert_result = if validation_error.is_none() && handling_error.is_none() {
-                Self::bulk_insert_events_optimized(
-                    &mut tx,
-                    event_data.clone(),
-                    metrics,
-                    version_cache,
-                )
-                .await
-            } else {
-                Err(validation_error.unwrap_or_else(|| handling_error.unwrap()))
-            };
-
-            // Update metrics and send response
-            if insert_result.is_ok() {
-                metrics.events_processed.fetch_add(
-                    event_data.len() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-            }
-            let _ = batched_event.response_tx.send(insert_result);
+        for batch in batches {
+            all_events.extend(batch.events);
+            all_response_txs.extend(batch.response_txs);
         }
 
+        // Early validation - fail fast if any event is invalid
+        let validation_result = Self::bulk_validate_events(&all_events).await;
+        if let Err(validation_error) = validation_result {
+            metrics.events_failed.fetch_add(
+                all_events.len() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            // Send error responses
+            for response_tx in all_response_txs {
+                let _ = response_tx.send(Err(EventStoreError::InternalError(
+                    validation_error.to_string(),
+                )));
+            }
+            return Err(validation_error);
+        }
+
+        // Bulk event handling - fail fast if any handler fails
+        let handling_result = Self::bulk_handle_events(&all_events, event_handlers).await;
+        if let Err(handling_error) = handling_result {
+            metrics.events_failed.fetch_add(
+                all_events.len() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            // Send error responses
+            for response_tx in all_response_txs {
+                let _ = response_tx.send(Err(EventStoreError::InternalError(
+                    handling_error.to_string(),
+                )));
+            }
+            return Err(handling_error);
+        }
+
+        // Bulk insert all events
+        let events_count = all_events.len();
+        let insert_result =
+            Self::bulk_insert_events_optimized(&mut tx, all_events, metrics, version_cache).await;
+
+        // Send responses based on insert result
+        match &insert_result {
+            Ok(_) => {
+                metrics
+                    .events_processed
+                    .fetch_add(events_count as u64, std::sync::atomic::Ordering::Relaxed);
+                // Send success responses
+                for response_tx in all_response_txs {
+                    let _ = response_tx.send(Ok(()));
+                }
+            }
+            Err(e) => {
+                metrics
+                    .events_failed
+                    .fetch_add(events_count as u64, std::sync::atomic::Ordering::Relaxed);
+                // Send error responses
+                for response_tx in all_response_txs {
+                    let _ = response_tx.send(Err(EventStoreError::InternalError(e.to_string())));
+                }
+            }
+        }
+
+        // Commit transaction
         tokio::time::timeout(Duration::from_secs(5), tx.commit())
             .await
             .map_err(|_| {
@@ -784,6 +933,30 @@ impl EventStore {
             })?
             .map_err(EventStoreError::DatabaseError)?;
 
+        Ok(())
+    }
+
+    // Bulk validation helper
+    async fn bulk_validate_events(events: &[Event]) -> Result<(), EventStoreError> {
+        for event in events {
+            let validation = Self::validate_event(event).await;
+            if !validation.is_valid {
+                return Err(EventStoreError::ValidationError(validation.errors));
+            }
+        }
+        Ok(())
+    }
+
+    // Bulk event handling helper
+    async fn bulk_handle_events(
+        events: &[Event],
+        event_handlers: &DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>,
+    ) -> Result<(), EventStoreError> {
+        for event in events {
+            if let Err(e) = Self::handle_event(event, event_handlers).await {
+                return Err(EventStoreError::EventHandlingError(e.to_string()));
+            }
+        }
         Ok(())
     }
 
@@ -1033,18 +1206,20 @@ impl EventStore {
             from_version
         );
 
+        let read_pool = self.pools.select_pool(OperationType::Read);
+
         // Log pool state before acquisition
         tracing::info!(
             "🔍 EventStore::get_events: Pool state before acquisition - size: {}, idle: {}, active: {}",
-            self.pool.size(),
-            self.pool.num_idle(),
-            (self.pool.size() as usize).saturating_sub(self.pool.num_idle())
+            read_pool.size(),
+            read_pool.num_idle(),
+            (read_pool.size() as usize).saturating_sub(read_pool.num_idle())
         );
 
         tracing::info!("🔍 EventStore::get_events: About to acquire connection from pool");
         let connection_result = tokio::time::timeout(
             Duration::from_secs(30), // Increased timeout for debugging
-            self.pool.acquire(),
+            read_pool.acquire(),
         )
         .await;
 
@@ -1137,7 +1312,7 @@ impl EventStore {
 
     // Async snapshot worker with better batching
     async fn snapshot_worker(
-        pool: PgPool,
+        pools: Arc<PartitionedPools>,
         cache: Arc<RwLock<HashMap<Uuid, CachedSnapshot>>>,
         config: EventStoreConfig,
     ) {
@@ -1150,6 +1325,7 @@ impl EventStore {
 
             // Query to find aggregates that might need a new snapshot
             // This query now directly compares the max event version with the last snapshot version.
+            let read_pool = pools.select_pool(OperationType::Read);
             let candidates_result = sqlx::query!(
                 r#"
                 SELECT
@@ -1167,7 +1343,7 @@ impl EventStore {
                 config.snapshot_threshold as i64,
                 config.max_snapshots_per_run as i64
             )
-            .fetch_all(&pool)
+            .fetch_all(read_pool)
             .await;
 
             match candidates_result {
@@ -1184,13 +1360,13 @@ impl EventStore {
 
                         // Only create a snapshot if there are new events since the last snapshot
                         if max_version > last_snapshot_version {
-                            let pool_clone = pool.clone();
+                            let pools_clone = pools.clone();
                             let cache_clone = cache.clone();
                             let config_clone = config.clone();
 
                             snapshot_tasks.push(tokio::spawn(async move {
                                 if let Err(e) = Self::create_snapshot(
-                                    &pool_clone,
+                                    &pools_clone,
                                     &cache_clone,
                                     aggregate_id,
                                     &config_clone,
@@ -1222,11 +1398,13 @@ impl EventStore {
         }
     }
     async fn create_snapshot(
-        pool: &PgPool,
+        pools: &Arc<PartitionedPools>,
         cache: &Arc<RwLock<HashMap<Uuid, CachedSnapshot>>>,
         aggregate_id: Uuid,
         config: &EventStoreConfig,
     ) -> Result<()> {
+        let read_pool = pools.select_pool(OperationType::Read);
+        let write_pool = pools.select_pool(OperationType::Write);
         let events = sqlx::query_as!(
             EventRow,
             r#"
@@ -1237,7 +1415,7 @@ impl EventStore {
             "#,
             aggregate_id
         )
-        .fetch_all(pool)
+        .fetch_all(read_pool)
         .await
         .context("Failed to fetch events for snapshot")?;
 
@@ -1271,7 +1449,7 @@ impl EventStore {
         .bind(aggregate_id)
         .bind(&snapshot_data)
         .bind(max_version)
-        .execute(pool)
+        .execute(write_pool)
         .await
         .context("Failed to save snapshot to database")?;
 
@@ -1396,7 +1574,12 @@ impl EventStore {
     }
 
     pub fn pool_stats(&self) -> (u32, u32) {
-        (self.pool.size(), self.pool.num_idle() as u32)
+        let read_pool = self.pools.select_pool(OperationType::Read);
+        let write_pool = self.pools.select_pool(OperationType::Write);
+        (
+            read_pool.size() + write_pool.size(),
+            read_pool.num_idle() as u32 + write_pool.num_idle() as u32,
+        )
     }
 
     /// Health check with detailed diagnostics including deadlock detection
@@ -1418,7 +1601,7 @@ impl EventStore {
                 WHERE datname = current_database()
                 "#,
             )
-            .fetch_one(&self.pool)
+            .fetch_one(self.pools.select_pool(OperationType::Read))
         ).await {
             Ok(Ok(row)) => {
                 let active_connections: i64 = row.get("active_connections");
@@ -1522,6 +1705,7 @@ impl EventStore {
 
     pub async fn get_all_accounts(&self) -> Result<Vec<Account>, EventStoreError> {
         let mut accounts = Vec::new();
+        let read_pool = self.pools.select_pool(OperationType::Read);
         let account_ids = sqlx::query!(
             r#"
             SELECT DISTINCT aggregate_id
@@ -1529,7 +1713,7 @@ impl EventStore {
             ORDER BY aggregate_id
             "#
         )
-        .fetch_all(&self.pool)
+        .fetch_all(read_pool)
         .await
         .map_err(|e| EventStoreError::DatabaseError(e))?;
 
@@ -1682,6 +1866,7 @@ impl EventStore {
     }
 
     pub async fn get_current_version(&self, aggregate_id: Uuid) -> Result<i64, EventStoreError> {
+        let read_pool = self.pools.select_pool(OperationType::Read);
         let version = sqlx::query!(
             r#"
             SELECT COALESCE(MAX(version), 0) as version
@@ -1690,7 +1875,7 @@ impl EventStore {
             "#,
             aggregate_id
         )
-        .fetch_one(&self.pool)
+        .fetch_one(read_pool)
         .await
         .map_err(|e| EventStoreError::DatabaseError(e))?
         .version
@@ -1707,6 +1892,95 @@ impl EventStore {
     ) -> Result<(), EventStoreError> {
         self.version_cache.insert(aggregate_id, version);
         Ok(())
+    }
+
+    // Optimized batch processing configuration
+    pub fn optimized_batch_config() -> EventStoreConfig {
+        EventStoreConfig {
+            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+            }),
+            max_connections: 100,    // Increased for better concurrency
+            min_connections: 20,     // Increased for better responsiveness
+            acquire_timeout_secs: 5, // Reduced for faster failure detection
+            idle_timeout_secs: 300,  // Reduced for better connection reuse
+            max_lifetime_secs: 1800, // Optimized for performance
+
+            // Optimized batching settings for high throughput
+            batch_size: 500,             // Smaller batches for better responsiveness
+            batch_timeout_ms: 5,         // Faster timeouts for lower latency
+            max_batch_queue_size: 50000, // Increased for high throughput
+            batch_processor_count: 16,   // More processors for better parallelism
+
+            // Snapshot configuration optimized for performance
+            snapshot_threshold: 1000,      // Increased threshold
+            snapshot_interval_secs: 600,   // Longer intervals
+            snapshot_cache_ttl_secs: 3600, // Longer TTL
+            max_snapshots_per_run: 50,     // More snapshots per run
+        }
+    }
+
+    // High-performance configuration for production
+    pub fn high_performance_config() -> EventStoreConfig {
+        EventStoreConfig {
+            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+            }),
+            max_connections: 200,    // High connection count
+            min_connections: 50,     // High minimum connections
+            acquire_timeout_secs: 3, // Very fast timeout
+            idle_timeout_secs: 180,  // Aggressive connection reuse
+            max_lifetime_secs: 900,  // Shorter lifetime for fresh connections
+
+            // Ultra-optimized batching for maximum throughput
+            batch_size: 1000,             // Large batches for efficiency
+            batch_timeout_ms: 2,          // Very fast timeouts
+            max_batch_queue_size: 100000, // Very large queue
+            batch_processor_count: 32,    // Many processors
+
+            // Aggressive snapshot settings
+            snapshot_threshold: 2000,      // High threshold
+            snapshot_interval_secs: 300,   // Frequent snapshots
+            snapshot_cache_ttl_secs: 7200, // Long TTL
+            max_snapshots_per_run: 100,    // Many snapshots per run
+        }
+    }
+
+    // Backward compatibility method for old batch format
+    async fn flush_batch(
+        pools: &Arc<PartitionedPools>,
+        batch: Vec<BatchedEvent>,
+        metrics: &EventStoreMetrics,
+        event_handlers: &DashMap<String, Vec<Box<dyn EventHandler + Send + Sync>>>,
+        version_cache: &DashMap<Uuid, i64>,
+    ) -> Result<(), EventStoreError> {
+        // Convert old format to new optimized format
+        let optimized_batches: Vec<OptimizedBatch> = batch
+            .into_iter()
+            .map(|event| Self::create_optimized_batch(event))
+            .collect();
+
+        Self::flush_optimized_batches(
+            pools,
+            optimized_batches,
+            metrics,
+            event_handlers,
+            version_cache,
+        )
+        .await
+    }
+
+    fn get_pool(&self) -> PgPool {
+        // Return the write pool as the default pool for backward compatibility
+        self.pools.select_pool(OperationType::Write).clone()
+    }
+
+    fn get_partitioned_pools(&self) -> Arc<PartitionedPools> {
+        self.pools.clone()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -1873,6 +2147,7 @@ pub trait EventStoreTrait: Send + Sync + 'static {
     async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>, EventStoreError>;
     async fn get_all_accounts(&self) -> Result<Vec<Account>, EventStoreError>;
     fn get_pool(&self) -> PgPool;
+    fn get_partitioned_pools(&self) -> Arc<PartitionedPools>;
     fn as_any(&self) -> &dyn std::any::Any;
 
     async fn save_events_in_transaction(
@@ -1933,7 +2208,12 @@ impl EventStoreTrait for EventStore {
     }
 
     fn get_pool(&self) -> PgPool {
-        self.pool.clone()
+        // Return the write pool as the default pool for backward compatibility
+        self.pools.select_pool(OperationType::Write).clone()
+    }
+
+    fn get_partitioned_pools(&self) -> Arc<PartitionedPools> {
+        self.pools.clone()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

@@ -1,6 +1,10 @@
+use crate::infrastructure::connection_pool_partitioning::{
+    OperationType, PartitionedPools, PoolSelector,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize}; // Added for potential future use, not strictly required by sqlx::FromRow
 use sqlx::{postgres::PgDatabaseError, FromRow, PgPool};
+use std::sync::Arc;
 use uuid::Uuid;
 
 // Custom module for bincode-compatible DateTime<Utc> serialization
@@ -120,12 +124,12 @@ impl From<sqlx::Error> for UserRepositoryError {
 
 #[derive(Clone)]
 pub struct UserRepository {
-    pool: PgPool,
+    pools: Arc<PartitionedPools>,
 }
 
 impl UserRepository {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pools: Arc<PartitionedPools>) -> Self {
+        Self { pools }
     }
 
     pub async fn create(&self, new_user: &NewUser<'_>) -> Result<User, UserRepositoryError> {
@@ -147,7 +151,7 @@ impl UserRepository {
             new_user.password_hash,
             &new_user.roles // Pass as slice for TEXT[]
         )
-        .fetch_one(&self.pool)
+        .fetch_one(self.pools.select_pool(OperationType::Write))
         .await
         .map_err(|e: sqlx::Error| {
             if let Some(db_err) = e.as_database_error() {
@@ -192,7 +196,7 @@ impl UserRepository {
             "#,
             username
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.pools.select_pool(OperationType::Read))
         .await
         .map_err(UserRepositoryError::DatabaseError)
     }
@@ -210,7 +214,7 @@ impl UserRepository {
             "#,
             user_id
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.pools.select_pool(OperationType::Read))
         .await
         .map_err(UserRepositoryError::DatabaseError)
     }
@@ -222,27 +226,21 @@ impl UserRepository {
         failed_login_attempts: i32,
         locked_until: Option<DateTime<Utc>>,
     ) -> Result<(), UserRepositoryError> {
-        let result = sqlx::query!(
+        sqlx::query!(
             r#"
             UPDATE users
-            SET
-                last_login_at = $1,
-                failed_login_attempts = $2,
-                locked_until = $3
-            WHERE id = $4
+            SET last_login_at = $2, failed_login_attempts = $3, locked_until = $4
+            WHERE id = $1
             "#,
-            Some(last_login_at),
+            user_id,
+            last_login_at,
             failed_login_attempts,
-            locked_until,
-            user_id
+            locked_until
         )
-        .execute(&self.pool)
+        .execute(self.pools.select_pool(OperationType::Write))
         .await
         .map_err(UserRepositoryError::DatabaseError)?;
 
-        if result.rows_affected() == 0 {
-            return Err(UserRepositoryError::NotFoundById(user_id));
-        }
         Ok(())
     }
 
@@ -251,22 +249,19 @@ impl UserRepository {
         user_id: Uuid,
         new_password_hash: &str,
     ) -> Result<(), UserRepositoryError> {
-        let result = sqlx::query!(
+        sqlx::query!(
             r#"
             UPDATE users
-            SET password_hash = $1
-            WHERE id = $2
+            SET password_hash = $2
+            WHERE id = $1
             "#,
-            new_password_hash,
-            user_id
+            user_id,
+            new_password_hash
         )
-        .execute(&self.pool)
+        .execute(self.pools.select_pool(OperationType::Write))
         .await
         .map_err(UserRepositoryError::DatabaseError)?;
 
-        if result.rows_affected() == 0 {
-            return Err(UserRepositoryError::NotFoundById(user_id));
-        }
         Ok(())
     }
 
@@ -275,22 +270,19 @@ impl UserRepository {
         user_id: Uuid,
         is_active: bool,
     ) -> Result<(), UserRepositoryError> {
-        let result = sqlx::query!(
+        sqlx::query!(
             r#"
             UPDATE users
-            SET is_active = $1
-            WHERE id = $2
+            SET is_active = $2
+            WHERE id = $1
             "#,
-            is_active,
-            user_id
+            user_id,
+            is_active
         )
-        .execute(&self.pool)
+        .execute(self.pools.select_pool(OperationType::Write))
         .await
         .map_err(UserRepositoryError::DatabaseError)?;
 
-        if result.rows_affected() == 0 {
-            return Err(UserRepositoryError::NotFoundById(user_id));
-        }
         Ok(())
     }
 
@@ -298,7 +290,7 @@ impl UserRepository {
         &self,
         user_id: Uuid,
     ) -> Result<i32, UserRepositoryError> {
-        let record = sqlx::query!(
+        let result = sqlx::query!(
             r#"
             UPDATE users
             SET failed_login_attempts = failed_login_attempts + 1
@@ -307,12 +299,12 @@ impl UserRepository {
             "#,
             user_id
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.pools.select_pool(OperationType::Write))
         .await
         .map_err(UserRepositoryError::DatabaseError)?;
 
-        match record {
-            Some(rec) => Ok(rec.failed_login_attempts),
+        match result {
+            Some(row) => Ok(row.failed_login_attempts),
             None => Err(UserRepositoryError::NotFoundById(user_id)),
         }
     }
@@ -323,31 +315,26 @@ impl UserRepository {
         locked_until: Option<DateTime<Utc>>,
         failed_attempts_value: i32,
     ) -> Result<(), UserRepositoryError> {
-        let result = sqlx::query!(
+        sqlx::query!(
             r#"
             UPDATE users
-            SET
-                locked_until = $1,
-                failed_login_attempts = $2
-            WHERE id = $3
+            SET locked_until = $2, failed_login_attempts = $3
+            WHERE id = $1
             "#,
+            user_id,
             locked_until,
-            failed_attempts_value,
-            user_id
+            failed_attempts_value
         )
-        .execute(&self.pool)
+        .execute(self.pools.select_pool(OperationType::Write))
         .await
         .map_err(UserRepositoryError::DatabaseError)?;
 
-        if result.rows_affected() == 0 {
-            return Err(UserRepositoryError::NotFoundById(user_id));
-        }
         Ok(())
     }
 
     pub async fn delete(&self, user_id: Uuid) -> Result<u64, UserRepositoryError> {
         let result = sqlx::query!("DELETE FROM users WHERE id = $1", user_id)
-            .execute(&self.pool)
+            .execute(self.pools.select_pool(OperationType::Write))
             .await
             .map_err(UserRepositoryError::DatabaseError)?;
 

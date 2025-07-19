@@ -1,4 +1,7 @@
 use crate::domain::events::AccountEvent;
+use crate::infrastructure::connection_pool_partitioning::{
+    OperationType, PartitionedPools, PoolSelector,
+};
 use crate::infrastructure::event_store::DB_POOL;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -87,7 +90,7 @@ struct CacheEntry<T> {
 
 #[derive(Clone)]
 pub struct ProjectionStore {
-    pool: PgPool,
+    pools: Arc<PartitionedPools>,
     account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
     transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
     update_sender: mpsc::UnboundedSender<ProjectionUpdate>,
@@ -129,8 +132,8 @@ enum ProjectionUpdate {
     TransactionBatch(Vec<TransactionProjection>),
 }
 
-// Global connection pool
-static PROJECTION_POOL: OnceCell<Arc<PgPool>> = OnceCell::const_new();
+// Global connection pool (deprecated - now using partitioned pools)
+// static PROJECTION_POOL: OnceCell<Arc<PgPool>> = OnceCell::const_new();
 
 #[async_trait]
 pub trait ProjectionStoreTrait: Send + Sync {
@@ -207,18 +210,43 @@ impl ProjectionStoreTrait for ProjectionStore {
 
 impl ProjectionStore {
     pub fn new(pool: PgPool) -> Self {
-        Self::from_pool_with_config(pool, ProjectionConfig::default())
+        // Create partitioned pools from the single pool
+        let pools = Arc::new(PartitionedPools {
+            write_pool: pool.clone(),
+            read_pool: pool,
+            config:
+                crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default(
+                ),
+        });
+        Self::from_pools_with_config(pools, ProjectionConfig::default())
     }
 
     pub fn new_test(pool: PgPool) -> Self {
         let mut config = ProjectionConfig::default();
         config.batch_size = 1; // Process immediately in test mode
         config.batch_timeout_ms = 0; // No batching in test mode
-        let store = Self::from_pool_with_config(pool, config);
-        store
+        let pools = Arc::new(PartitionedPools {
+            write_pool: pool.clone(),
+            read_pool: pool,
+            config:
+                crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default(
+                ),
+        });
+        Self::from_pools_with_config(pools, config)
     }
 
     pub fn from_pool_with_config(pool: PgPool, config: ProjectionConfig) -> Self {
+        let pools = Arc::new(PartitionedPools {
+            write_pool: pool.clone(),
+            read_pool: pool,
+            config:
+                crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default(
+                ),
+        });
+        Self::from_pools_with_config(pools, config)
+    }
+
+    pub fn from_pools_with_config(pools: Arc<PartitionedPools>, config: ProjectionConfig) -> Self {
         let account_cache = Arc::new(RwLock::new(HashMap::new()));
         let transaction_cache = Arc::new(RwLock::new(HashMap::new()));
         let (update_sender, update_receiver) = mpsc::unbounded_channel();
@@ -230,7 +258,7 @@ impl ProjectionStore {
         let processor_metrics = metrics.clone();
 
         let store = Self {
-            pool: pool.clone(),
+            pools: pools.clone(),
             account_cache: account_cache.clone(),
             transaction_cache: transaction_cache.clone(),
             update_sender,
@@ -240,13 +268,13 @@ impl ProjectionStore {
         };
 
         // Start background processor
-        let processor_pool = pool.clone();
+        let processor_pools = pools.clone();
         let processor_account_cache = account_cache.clone();
         let processor_transaction_cache = transaction_cache.clone();
         let processor_config = config.clone();
         tokio::spawn(async move {
             Self::update_processor(
-                processor_pool,
+                processor_pools,
                 update_receiver,
                 processor_account_cache,
                 processor_transaction_cache,
@@ -265,54 +293,27 @@ impl ProjectionStore {
     }
 
     pub async fn new_with_config(config: ProjectionConfig) -> Result<Self> {
-        // Get or initialize the global connection pool
-        let pool = PROJECTION_POOL
-            .get_or_try_init(|| async {
-                let database_url = std::env::var("DATABASE_URL").map_err(|_| {
-                    anyhow::Error::msg("DATABASE_URL environment variable is required")
-                })?;
+        // Create partitioned pools for read/write separation
+        let database_url = std::env::var("DATABASE_URL")
+            .map_err(|_| anyhow::Error::msg("DATABASE_URL environment variable is required"))?;
 
-                let pool = PgPoolOptions::new()
-                    .max_connections(config.max_connections)
-                    .min_connections(config.min_connections)
-                    .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
-                    .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-                    .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-                    .after_connect(|conn, _meta| {
-                        Box::pin(async move {
-                            // Set only essential and well-supported PostgreSQL parameters
-                            sqlx::query("SET SESSION synchronous_commit = 'off'")
-                                .execute(&mut *conn)
-                                .await?;
-                            sqlx::query("SET SESSION work_mem = '32MB'")
-                                .execute(&mut *conn)
-                                .await?;
-                            sqlx::query("SET SESSION maintenance_work_mem = '128MB'")
-                                .execute(&mut *conn)
-                                .await?;
-                            sqlx::query("SET SESSION effective_cache_size = '2GB'")
-                                .execute(&mut *conn)
-                                .await?;
-                            sqlx::query("SET SESSION random_page_cost = 1.1")
-                                .execute(&mut *conn)
-                                .await?;
-                            // sqlx::query("SET SESSION effective_io_concurrency = 2")
-                            //     .execute(&mut *conn)
-                            //     .await?;
-                            sqlx::query("SET SESSION statement_timeout = '5s'")
-                                .execute(&mut *conn)
-                                .await?;
-                            Ok(())
-                        })
-                    })
-                    .connect(&database_url)
-                    .await?;
+        let pool_config =
+            crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig {
+                database_url,
+                write_pool_max_connections: config.max_connections / 3, // Smaller write pool
+                write_pool_min_connections: config.min_connections / 3,
+                read_pool_max_connections: config.max_connections * 2 / 3, // Larger read pool
+                read_pool_min_connections: config.min_connections * 2 / 3,
+                acquire_timeout_secs: config.acquire_timeout_secs,
+                write_idle_timeout_secs: config.idle_timeout_secs,
+                read_idle_timeout_secs: config.idle_timeout_secs * 2, // Longer idle time for reads
+                write_max_lifetime_secs: config.max_lifetime_secs,
+                read_max_lifetime_secs: config.max_lifetime_secs * 2, // Longer lifetime for reads
+            };
 
-                Ok::<_, anyhow::Error>(Arc::new(pool))
-            })
-            .await?;
+        let pools = Arc::new(PartitionedPools::new(pool_config).await?);
 
-        Ok(Self::from_pool_with_config(pool.as_ref().clone(), config))
+        Ok(Self::from_pools_with_config(pools, config))
     }
 
     pub async fn get_account(&self, account_id: Uuid) -> Result<Option<AccountProjection>> {
@@ -354,11 +355,12 @@ impl ProjectionStore {
         );
 
         // Log pool state before query
+        let read_pool = self.pools.select_pool(OperationType::Read);
         tracing::info!(
             "🔍 ProjectionStore::get_account: Pool state before query - size: {}, idle: {}, active: {}",
-            self.pool.size(),
-            self.pool.num_idle(),
-            (self.pool.size() as usize).saturating_sub(self.pool.num_idle())
+            read_pool.size(),
+            read_pool.num_idle(),
+            (read_pool.size() as usize).saturating_sub(read_pool.num_idle())
         );
 
         let account: Option<AccountProjection> = sqlx::query_as!(
@@ -370,7 +372,7 @@ impl ProjectionStore {
             "#,
             account_id
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(read_pool)
         .await?;
         tracing::info!(
             "🔍 ProjectionStore::get_account: SQL query completed for account {}: {:?}",
@@ -437,7 +439,7 @@ impl ProjectionStore {
             "#,
             account_id
         )
-        .fetch_all(&self.pool)
+        .fetch_all(self.pools.select_pool(OperationType::Read))
         .await?;
 
         // Update cache
@@ -479,7 +481,7 @@ impl ProjectionStore {
             LIMIT 10000
             "#
         )
-        .fetch_all(&self.pool)
+        .fetch_all(self.pools.select_pool(OperationType::Read))
         .await?;
 
         self.metrics.query_duration.fetch_add(
@@ -511,7 +513,7 @@ impl ProjectionStore {
             min_balance,
             max_balance
         )
-        .fetch_all(&self.pool)
+        .fetch_all(self.pools.select_pool(OperationType::Read))
         .await?;
 
         self.metrics.query_duration.fetch_add(
@@ -537,7 +539,7 @@ impl ProjectionStore {
             "#,
             limit
         )
-        .fetch_all(&self.pool)
+        .fetch_all(self.pools.select_pool(OperationType::Read))
         .await?;
 
         self.metrics.query_duration.fetch_add(
@@ -618,7 +620,7 @@ impl ProjectionStore {
     //     tracing::warn!("[ProjectionStore] update_processor exiting: channel closed");
     // }
     async fn update_processor(
-        pool: PgPool,
+        pools: Arc<PartitionedPools>,
         mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
         account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
         transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
@@ -659,7 +661,7 @@ impl ProjectionStore {
                         let ids: Vec<_> = account_batch.iter().map(|a| a.id).collect();
                         tracing::info!("[ProjectionStore] Flushing batches due to size: account_batch_size={}, transaction_batch_size={}, account_ids={:?}", account_batch.len(), transaction_batch.len(), ids);
                         if let Err(e) = Self::flush_batches(
-                            &pool,
+                            &pools,
                             &mut account_batch,
                             &mut transaction_batch,
                             &account_cache,
@@ -676,7 +678,7 @@ impl ProjectionStore {
                         let ids: Vec<_> = account_batch.iter().map(|a| a.id).collect();
                         tracing::info!("[ProjectionStore] Flushing batches due to timeout: account_batch_size={}, transaction_batch_size={}, account_ids={:?}", account_batch.len(), transaction_batch.len(), ids);
                         if let Err(e) = Self::flush_batches(
-                            &pool,
+                            &pools,
                             &mut account_batch,
                             &mut transaction_batch,
                             &account_cache,
@@ -692,7 +694,7 @@ impl ProjectionStore {
         }
     }
     async fn batch_update_processor(
-        pool: PgPool,
+        pools: Arc<PartitionedPools>,
         mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
         account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
         transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
@@ -708,53 +710,39 @@ impl ProjectionStore {
             );
         }));
         tracing::info!(
-            "[ProjectionStore] batch_update_processor STARTED (only one instance should run)"
+            "[ProjectionStore] Optimized batch_update_processor STARTED (only one instance should run)"
         );
-        config.batch_timeout_ms = 50;
+
+        // Optimized batch timeout for better performance
+        config.batch_timeout_ms = 25; // Reduced from 50ms for lower latency
         let mut account_batch = Vec::with_capacity(config.batch_size);
         let mut transaction_batch = Vec::with_capacity(config.batch_size);
         let mut interval = tokio::time::interval(Duration::from_millis(config.batch_timeout_ms));
+        let mut last_flush_time = std::time::Instant::now();
 
         loop {
             tokio::select! {
                 maybe_update = receiver.recv() => {
                     match maybe_update {
                         Some(update) => {
-                            tracing::info!("[ProjectionStore] batch_update_processor received batch update");
                             match update {
                                 ProjectionUpdate::AccountBatch(accounts) => {
-                                    tracing::info!("[ProjectionStore] batch_update_processor received AccountBatch: ids={:?}", accounts.iter().map(|a| a.id).collect::<Vec<_>>());
+                                    tracing::debug!("[ProjectionStore] Received AccountBatch: {} accounts", accounts.len());
                                     account_batch.extend(accounts);
                                 }
                                 ProjectionUpdate::TransactionBatch(transactions) => {
-                                    tracing::info!("[ProjectionStore] batch_update_processor received TransactionBatch: ids={:?}", transactions.iter().map(|t| t.id).collect::<Vec<_>>());
+                                    tracing::debug!("[ProjectionStore] Received TransactionBatch: {} transactions", transactions.len());
                                     transaction_batch.extend(transactions);
                                 }
                             }
+
+                            // Flush if batch size reached (optimized threshold)
                             if account_batch.len() >= config.batch_size || transaction_batch.len() >= config.batch_size {
-                                tracing::info!("[ProjectionStore] batch_update_processor FLUSH (batch size reached): account_batch_size={}, transaction_batch_size={}", account_batch.len(), transaction_batch.len());
-                if let Err(e) = Self::flush_batches(
-                    &pool,
-                    &mut account_batch,
-                    &mut transaction_batch,
-                    &account_cache,
-                    &transaction_cache,
-                    &cache_version,
-                    &metrics,
-                                ).await {
-                                    tracing::error!("[ProjectionStore] batch_update_processor FLUSH ERROR: {}", e);
-                } else {
-                                    tracing::info!("[ProjectionStore] batch_update_processor FLUSH SUCCESS");
-                                }
-                            }
-                        }
-                        None => {
-                            tracing::warn!("[ProjectionStore] batch_update_processor: receiver channel closed, exiting loop");
-                            // Flush any remaining batches before exit
-                            if !account_batch.is_empty() || !transaction_batch.is_empty() {
-                                tracing::info!("[ProjectionStore] batch_update_processor FINAL FLUSH before exit: account_batch_size={}, transaction_batch_size={}", account_batch.len(), transaction_batch.len());
-                                if let Err(e) = Self::flush_batches(
-                                    &pool,
+                                tracing::info!("[ProjectionStore] FLUSH (size threshold): accounts={}, transactions={}",
+                                    account_batch.len(), transaction_batch.len());
+
+                                if let Err(e) = Self::flush_batches_optimized(
+                                    &pools,
                                     &mut account_batch,
                                     &mut transaction_batch,
                                     &account_cache,
@@ -762,23 +750,48 @@ impl ProjectionStore {
                                     &cache_version,
                                     &metrics,
                                 ).await {
-                                    tracing::error!("[ProjectionStore] batch_update_processor FINAL FLUSH ERROR: {}", e);
+                                    tracing::error!("[ProjectionStore] FLUSH ERROR: {}", e);
+                                    metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 } else {
-                                    tracing::info!("[ProjectionStore] batch_update_processor FINAL FLUSH SUCCESS");
+                                    tracing::info!("[ProjectionStore] FLUSH SUCCESS");
+                                    last_flush_time = std::time::Instant::now();
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::warn!("[ProjectionStore] Receiver channel closed, exiting loop");
+                            // Final flush before exit
+                            if !account_batch.is_empty() || !transaction_batch.is_empty() {
+                                tracing::info!("[ProjectionStore] FINAL FLUSH: accounts={}, transactions={}",
+                                    account_batch.len(), transaction_batch.len());
+                                if let Err(e) = Self::flush_batches_optimized(
+                                    &pools,
+                                    &mut account_batch,
+                                    &mut transaction_batch,
+                                    &account_cache,
+                                    &transaction_cache,
+                                    &cache_version,
+                                    &metrics,
+                                ).await {
+                                    tracing::error!("[ProjectionStore] FINAL FLUSH ERROR: {}", e);
+                                    metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                } else {
+                                    tracing::info!("[ProjectionStore] FINAL FLUSH SUCCESS");
                                 }
                             }
                             break;
                         }
                     }
-                    // Yield to allow interval to be polled
-                    tokio::task::yield_now().await;
-            }
+                }
                 _ = interval.tick() => {
-                    tracing::info!("[ProjectionStore] batch_update_processor interval tick: account_batch_size={}, transaction_batch_size={}", account_batch.len(), transaction_batch.len());
-                    if !account_batch.is_empty() || !transaction_batch.is_empty() {
-                        tracing::info!("[ProjectionStore] batch_update_processor FLUSH (interval): account_batch_size={}, transaction_batch_size={}", account_batch.len(), transaction_batch.len());
-                        if let Err(e) = Self::flush_batches(
-                            &pool,
+                    // Flush on timeout only if we have data and enough time has passed
+                    if (!account_batch.is_empty() || !transaction_batch.is_empty()) &&
+                       last_flush_time.elapsed() > Duration::from_millis(config.batch_timeout_ms) {
+                        tracing::info!("[ProjectionStore] FLUSH (timeout): accounts={}, transactions={}",
+                            account_batch.len(), transaction_batch.len());
+
+                        if let Err(e) = Self::flush_batches_optimized(
+                            &pools,
                             &mut account_batch,
                             &mut transaction_batch,
                             &account_cache,
@@ -786,21 +799,21 @@ impl ProjectionStore {
                             &cache_version,
                             &metrics,
                         ).await {
-                            tracing::error!("[ProjectionStore] batch_update_processor FLUSH ERROR (interval): {}", e);
+                            tracing::error!("[ProjectionStore] FLUSH ERROR (timeout): {}", e);
+                            metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         } else {
-                            tracing::info!("[ProjectionStore] batch_update_processor FLUSH SUCCESS (interval)");
+                            tracing::info!("[ProjectionStore] FLUSH SUCCESS (timeout)");
+                            last_flush_time = std::time::Instant::now();
                         }
                     }
-                    // Yield to allow other tasks to run
-                    tokio::task::yield_now().await;
                 }
             }
         }
-        tracing::info!("[ProjectionStore] batch_update_processor EXITED");
+        tracing::info!("[ProjectionStore] Optimized batch_update_processor EXITED");
     }
 
     async fn flush_batches(
-        pool: &PgPool,
+        pools: &Arc<PartitionedPools>,
         account_batch: &mut Vec<AccountProjection>,
         transaction_batch: &mut Vec<TransactionProjection>,
         account_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
@@ -808,7 +821,8 @@ impl ProjectionStore {
         cache_version: &Arc<std::sync::atomic::AtomicU64>,
         metrics: &Arc<ProjectionMetrics>,
     ) -> Result<()> {
-        let mut tx = pool.begin().await?;
+        let write_pool = pools.select_pool(OperationType::Write);
+        let mut tx = write_pool.begin().await?;
 
         // Process account updates
         if !account_batch.is_empty() {
@@ -889,6 +903,154 @@ impl ProjectionStore {
         }
 
         tx.commit().await?;
+        Ok(())
+    }
+
+    async fn flush_batches_optimized(
+        pools: &Arc<PartitionedPools>,
+        account_batch: &mut Vec<AccountProjection>,
+        transaction_batch: &mut Vec<TransactionProjection>,
+        account_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
+        transaction_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
+        cache_version: &Arc<std::sync::atomic::AtomicU64>,
+        metrics: &Arc<ProjectionMetrics>,
+    ) -> Result<()> {
+        let flush_start = std::time::Instant::now();
+
+        // Use a transaction with optimized settings
+        let write_pool = pools.select_pool(OperationType::Write);
+        let mut tx = write_pool.begin().await?;
+
+        // Process account updates with optimized deduplication
+        if !account_batch.is_empty() {
+            let account_start = std::time::Instant::now();
+
+            // Optimized deduplication using HashMap
+            let mut deduped = std::collections::HashMap::new();
+            for acc in account_batch.iter() {
+                deduped.insert(acc.id, acc.clone());
+            }
+            let mut unique_accounts: Vec<_> = deduped.into_values().collect();
+            let ids: Vec<_> = unique_accounts.iter().map(|a| a.id).collect();
+
+            tracing::debug!(
+                "[ProjectionStore] Optimized upsert: {} accounts (deduped from {})",
+                unique_accounts.len(),
+                account_batch.len()
+            );
+
+            if let Err(e) = Self::bulk_upsert_accounts(&mut tx, &unique_accounts).await {
+                let _ = tx.rollback().await;
+                error!(
+                    "[ProjectionStore] Optimized bulk_upsert_accounts failed: {} (ids={:?})",
+                    e, ids
+                );
+                metrics
+                    .errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(e.into());
+            }
+
+            // Optimized cache update with batch operations
+            {
+                let mut cache = account_cache.write().await;
+                let version = cache_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let now = Instant::now();
+
+                for account in unique_accounts.drain(..) {
+                    cache.insert(
+                        account.id,
+                        CacheEntry {
+                            data: account,
+                            last_accessed: now,
+                            version,
+                            ttl: Duration::from_secs(300), // 5 minutes TTL
+                        },
+                    );
+                }
+            }
+
+            account_batch.clear();
+            metrics
+                .batch_updates
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            let account_time = account_start.elapsed().as_millis() as u64;
+            tracing::debug!(
+                "[ProjectionStore] Account batch processed in {}ms",
+                account_time
+            );
+        }
+
+        // Process transaction updates with optimized batch size
+        if !transaction_batch.is_empty() {
+            let transaction_start = std::time::Instant::now();
+
+            tracing::debug!(
+                "[ProjectionStore] Optimized transaction insert: {} transactions",
+                transaction_batch.len()
+            );
+
+            if let Err(e) = Self::bulk_insert_transactions(&mut tx, transaction_batch).await {
+                let _ = tx.rollback().await;
+                error!(
+                    "[ProjectionStore] Optimized bulk_insert_transactions failed: {}",
+                    e
+                );
+                metrics
+                    .errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(e.into());
+            }
+
+            // Optimized cache invalidation
+            {
+                let mut cache = transaction_cache.write().await;
+                for transaction in transaction_batch.drain(..) {
+                    cache.remove(&transaction.account_id);
+                }
+            }
+
+            metrics
+                .batch_updates
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            let transaction_time = transaction_start.elapsed().as_millis() as u64;
+            tracing::debug!(
+                "[ProjectionStore] Transaction batch processed in {}ms",
+                transaction_time
+            );
+        }
+
+        // Commit transaction with timeout
+        match tokio::time::timeout(Duration::from_secs(10), tx.commit()).await {
+            Ok(commit_result) => {
+                if let Err(e) = commit_result {
+                    error!("[ProjectionStore] Transaction commit failed: {}", e);
+                    metrics
+                        .errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Err(e.into());
+                }
+            }
+            Err(_) => {
+                error!("[ProjectionStore] Transaction commit timeout");
+                metrics
+                    .errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(anyhow::anyhow!("Transaction commit timeout"));
+            }
+        }
+
+        let total_time = flush_start.elapsed().as_millis() as u64;
+        metrics
+            .query_duration
+            .fetch_add(total_time, std::sync::atomic::Ordering::Relaxed);
+
+        tracing::debug!(
+            "[ProjectionStore] Optimized flush completed in {}ms",
+            total_time
+        );
         Ok(())
     }
 

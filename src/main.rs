@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Using CDC Debezium for data capture");
         let cdc_outbox_repo = Arc::new(
             crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
-                Arc::clone(DB_POOL.get().unwrap()).as_ref().clone(),
+                service_context.event_store.get_partitioned_pools().clone(),
             ),
         );
 
@@ -181,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if app_config.data_capture.method == DataCaptureMethod::OutboxPoller {
         info!("Using Outbox Poller for data capture");
         let outbox_repo = Arc::new(PostgresOutboxRepository::new(
-            Arc::clone(DB_POOL.get().unwrap()).as_ref().clone(),
+            service_context.event_store.get_partitioned_pools().clone(),
         ));
         let kafka_producer = Arc::new(KafkaProducer::new(kafka_config.clone())?);
         let poller_config = OutboxPollerConfig::default();

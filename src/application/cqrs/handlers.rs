@@ -34,7 +34,7 @@ impl CQRSHandler {
         // Create CDC outbox repository for command bus
         let outbox_repository = Arc::new(
             crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
-                event_store.get_pool().clone(),
+                event_store.get_partitioned_pools().clone(),
             ),
         )
             as Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait>;
@@ -42,7 +42,7 @@ impl CQRSHandler {
         let command_bus = CommandBus::new(
             event_store.clone(),
             outbox_repository,
-            Arc::new(event_store.get_pool().clone()),
+            event_store.get_partitioned_pools().clone(),
             Arc::new(kafka_config),
         );
         let query_bus = QueryBus::new(projection_store, cache_service);

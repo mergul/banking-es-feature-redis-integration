@@ -1,8 +1,12 @@
+use crate::infrastructure::connection_pool_partitioning::{
+    OperationType, PartitionedPools, PoolSelector,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json; // For JSONB metadata
 use sqlx::{Postgres, Transaction};
+use std::sync::Arc;
 use std::time::Duration; // Required for find_stuck_processing_messages
 use uuid::Uuid;
 
@@ -101,12 +105,12 @@ use sqlx::PgPool;
 
 #[derive(Clone)]
 pub struct PostgresOutboxRepository {
-    pool: PgPool,
+    pools: Arc<PartitionedPools>,
 }
 
 impl PostgresOutboxRepository {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pools: Arc<PartitionedPools>) -> Self {
+        Self { pools }
     }
 }
 
@@ -150,7 +154,7 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         &self,
         limit: i64,
     ) -> Result<Vec<PersistedOutboxMessage>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pools.select_pool(OperationType::Write).begin().await?;
 
         // Select PENDING messages, lock them, and update their status to PROCESSING
         // The RETURNING clause gets the updated rows, including their original values before the update.
@@ -205,7 +209,7 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
 
     async fn mark_as_processed(&self, outbox_message_id: Uuid) -> Result<()> {
         sqlx::query!("DELETE FROM kafka_outbox WHERE id = $1", outbox_message_id)
-            .execute(&self.pool)
+            .execute(self.pools.select_pool(OperationType::Write))
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -234,7 +238,7 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
             "DELETE FROM kafka_outbox WHERE id = ANY($1)",
             outbox_message_ids
         )
-        .execute(&self.pool)
+        .execute(self.pools.select_pool(OperationType::Write))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to delete processed outbox messages batch: {}", e))?;
         Ok(result.rows_affected() as usize)
@@ -246,7 +250,7 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         max_retries: i32,
         error_message: Option<String>,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pools.select_pool(OperationType::Write).begin().await?;
 
         let current: Option<(i32, String)> =
             sqlx::query_as("SELECT retry_count, status FROM kafka_outbox WHERE id = $1 FOR UPDATE")
@@ -330,7 +334,7 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
             error_message,
             outbox_message_id,
         )
-        .execute(&self.pool)
+        .execute(self.pools.select_pool(OperationType::Write))
         .await
         .map_err(|e| {
             tracing::error!("Failed to mark outbox message {} as FAILED: {}", outbox_message_id, e);
@@ -350,15 +354,15 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
         limit: i32,
     ) -> Result<Vec<PersistedOutboxMessage>> {
         let threshold_timestamp = Utc::now() - chrono::Duration::from_std(stuck_threshold)?;
-        sqlx::query_as!(
+        let messages = sqlx::query_as!(
             PersistedOutboxMessage,
             "SELECT id, aggregate_id, event_id, event_type, payload, topic, status, created_at, updated_at, last_attempt_at, retry_count, metadata, error_details FROM kafka_outbox WHERE status = 'PROCESSING' AND updated_at < $1 ORDER BY updated_at ASC LIMIT $2",
             threshold_timestamp,
             limit as i64
         )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Into::into)
+        .fetch_all(self.pools.select_pool(OperationType::Read))
+        .await?;
+        Ok(messages)
     }
 
     async fn reset_stuck_messages(&self, outbox_message_ids: &[Uuid]) -> Result<usize> {
@@ -369,9 +373,8 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
             "UPDATE kafka_outbox SET status = 'PENDING', updated_at = NOW(), retry_count = retry_count + 1 WHERE id = ANY($1) AND status = 'PROCESSING'",
             outbox_message_ids
         )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to reset stuck outbox messages: {}", e))?;
+        .execute(self.pools.select_pool(OperationType::Write))
+        .await?;
         Ok(result.rows_affected() as usize)
     }
 }

@@ -7,6 +7,7 @@ pub mod cdc_producer;
 pub mod cdc_service_manager;
 pub mod config;
 pub mod connection_pool_monitor;
+pub mod connection_pool_partitioning; // Added connection pool partitioning
 pub mod deadlock_detector;
 pub mod event_processor;
 pub mod event_store;
@@ -40,6 +41,7 @@ pub use auth::*;
 pub use cache_service::*;
 pub use cdc_debezium::*; // Added CDC exports
 pub use config::*;
+pub use connection_pool_partitioning::*; // Added connection pool partitioning exports
 pub use event_store::{EventStore, EventStoreConfig};
 pub use kafka_abstraction::KafkaConfig;
 pub use kafka_dlq::*;
