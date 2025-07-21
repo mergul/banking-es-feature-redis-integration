@@ -1,0 +1,177 @@
+use banking_es::{
+    application::services::CQRSAccountService,
+    infrastructure::{
+        cache_service::{CacheConfig, CacheService},
+        event_store::EventStore,
+        projections::ProjectionStore,
+        RealRedisClient,
+    },
+};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::Duration;
+use uuid::Uuid;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🔍 Simple Read Operations Test with Consistency Manager");
+    println!("======================================================");
+
+    // Set the database URL
+    std::env::set_var(
+        "DATABASE_URL",
+        "postgresql://postgres:Francisco1@localhost:5432/banking_es",
+    );
+
+    // Initialize services
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+    });
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("Failed to connect to database");
+
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_client = redis::Client::open(redis_url).expect("Failed to create Redis client");
+    let redis_client_trait = RealRedisClient::new(redis_client, None);
+
+    let event_store = Arc::new(EventStore::new(pool.clone()));
+    let cache_config = CacheConfig::default();
+    let cache_service = Arc::new(CacheService::new(redis_client_trait, cache_config));
+    let projection_store = Arc::new(ProjectionStore::new(pool.clone()));
+
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let cqrs_service = Arc::new(CQRSAccountService::new(
+        event_store.clone(),
+        projection_store.clone(),
+        cache_service.clone(),
+        kafka_config,
+        50,                     // max_concurrent_operations
+        25,                     // batch_size
+        Duration::from_secs(2), // batch_timeout
+        true,                   // enable_write_batching
+    ));
+
+    // Start write batching service
+    cqrs_service
+        .start_write_batching()
+        .await
+        .expect("Failed to start write batching service");
+
+    println!("✅ Services initialized");
+
+    // Get existing accounts from projections table
+    println!("\n📋 Getting existing accounts...");
+    let accounts = match cqrs_service.get_all_accounts().await {
+        Ok(accounts) => {
+            println!("✅ Found {} accounts in the system", accounts.len());
+            accounts
+        }
+        Err(e) => {
+            println!("❌ Failed to get accounts: {:?}", e);
+            return Ok(());
+        }
+    };
+
+    if accounts.is_empty() {
+        println!("⚠️  No accounts available for testing. Creating one test account...");
+
+        // Create a test account
+        let account_id = match cqrs_service
+            .create_account("ReadTestUser".to_string(), Decimal::new(1000, 0))
+            .await
+        {
+            Ok(id) => {
+                println!("✅ Created test account: {}", id);
+                id
+            }
+            Err(e) => {
+                println!("❌ Failed to create test account: {:?}", e);
+                return Ok(());
+            }
+        };
+
+        // Wait a bit for CDC processing
+        println!("⏳ Waiting for CDC processing...");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Test read operations on the new account
+        test_read_operations_on_account(&cqrs_service, account_id).await;
+    } else {
+        // Test read operations on existing accounts
+        println!("\n🔍 Testing read operations on existing accounts...");
+        let test_accounts: Vec<_> = accounts.iter().take(3).collect();
+
+        for (i, account) in test_accounts.iter().enumerate() {
+            println!("\n--- Testing Account {}: {} ---", i + 1, account.id);
+            test_read_operations_on_account(&cqrs_service, account.id).await;
+        }
+    }
+
+    println!("\n✅ Read operations test completed!");
+    Ok(())
+}
+
+async fn test_read_operations_on_account(cqrs_service: &Arc<CQRSAccountService>, account_id: Uuid) {
+    println!("🔍 Testing read operations for account: {}", account_id);
+
+    // Test 1: Get account details
+    println!("  📖 Testing get_account...");
+    match tokio::time::timeout(Duration::from_secs(8), cqrs_service.get_account(account_id)).await {
+        Ok(Ok(Some(account))) => {
+            println!(
+                "    ✅ Success - Owner: {}, Balance: {}, Active: {}",
+                account.owner_name, account.balance, account.is_active
+            );
+        }
+        Ok(Ok(None)) => {
+            println!("    ⚠️  Account not found in projections");
+        }
+        Ok(Err(e)) => {
+            println!("    ❌ Error: {:?}", e);
+        }
+        Err(_) => {
+            println!("    ❌ Timeout (8s)");
+        }
+    }
+
+    // Test 2: Get account balance
+    println!("  💰 Testing get_account_balance...");
+    match tokio::time::timeout(
+        Duration::from_secs(8),
+        cqrs_service.get_account_balance(account_id),
+    )
+    .await
+    {
+        Ok(Ok(balance)) => {
+            println!("    ✅ Success - Balance: {}", balance);
+        }
+        Ok(Err(e)) => {
+            println!("    ❌ Error: {:?}", e);
+        }
+        Err(_) => {
+            println!("    ❌ Timeout (8s)");
+        }
+    }
+
+    // Test 3: Check if account is active
+    println!("  ✅ Testing is_account_active...");
+    match tokio::time::timeout(
+        Duration::from_secs(8),
+        cqrs_service.is_account_active(account_id),
+    )
+    .await
+    {
+        Ok(Ok(is_active)) => {
+            println!("    ✅ Success - Active: {}", is_active);
+        }
+        Ok(Err(e)) => {
+            println!("    ❌ Error: {:?}", e);
+        }
+        Err(_) => {
+            println!("    ❌ Timeout (8s)");
+        }
+    }
+}

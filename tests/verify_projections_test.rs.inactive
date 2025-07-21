@@ -1,0 +1,127 @@
+use banking_es::{application::services::CQRSAccountService, infrastructure::init};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::Duration;
+use uuid::Uuid;
+
+#[tokio::test]
+async fn test_verify_projections_exist() {
+    println!("🔍 Verify Projections Exist Test");
+    println!("=================================");
+
+    // Initialize services
+    let service_context = match banking_es::infrastructure::init::init_all_services().await {
+        Ok(ctx) => {
+            println!("✅ Services initialized");
+            ctx
+        }
+        Err(e) => {
+            println!("❌ Service initialization failed: {:?}", e);
+            return;
+        }
+    };
+
+    // Create CQRS service
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let cqrs_service = Arc::new(CQRSAccountService::new(
+        service_context.event_store.clone(),
+        service_context.projection_store.clone(),
+        service_context.cache_service.clone(),
+        kafka_config.clone(),
+        5,
+        10,
+        Duration::from_millis(50),
+        false, // Disable write batching
+    ));
+
+    println!("✅ CQRS service created");
+
+    // Test 1: Create a new account
+    println!("\n📝 Test 1: Create Account");
+    let account_id = match cqrs_service
+        .create_account("VerifyUser".to_string(), Decimal::new(1000, 0))
+        .await
+    {
+        Ok(id) => {
+            println!("✅ Account created: {}", id);
+            id
+        }
+        Err(e) => {
+            println!("❌ Failed to create account: {:?}", e);
+            return;
+        }
+    };
+
+    // Wait a bit for CDC to process
+    println!("⏳ Waiting for CDC to process...");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Test 2: Try to read directly from projection store (bypassing consistency manager)
+    println!("\n📖 Test 2: Read Directly from Projection Store");
+    match service_context
+        .projection_store
+        .get_account(account_id)
+        .await
+    {
+        Ok(Some(account)) => {
+            println!(
+                "✅ Success! Found account in projection store: {} (balance: {})",
+                account.owner_name, account.balance
+            );
+        }
+        Ok(None) => {
+            println!("❌ Account not found in projection store");
+        }
+        Err(e) => {
+            println!("❌ Error reading from projection store: {:?}", e);
+        }
+    }
+
+    // Test 3: Try to read through CQRS service (with consistency manager)
+    println!("\n📖 Test 3: Read Through CQRS Service (with consistency manager)");
+    match cqrs_service.get_account(account_id).await {
+        Ok(Some(account)) => {
+            println!(
+                "✅ Success! Found account through CQRS: {} (balance: {})",
+                account.owner_name, account.balance
+            );
+        }
+        Ok(None) => {
+            println!("❌ Account not found through CQRS (consistency manager issue)");
+        }
+        Err(e) => {
+            println!("❌ Error reading through CQRS: {:?}", e);
+        }
+    }
+
+    // Test 4: Check balance directly
+    println!("\n💰 Test 4: Check Balance Directly");
+    match service_context
+        .projection_store
+        .get_account(account_id)
+        .await
+    {
+        Ok(Some(account)) => {
+            println!("✅ Balance from projection store: {}", account.balance);
+        }
+        Ok(None) => {
+            println!("❌ Account not found for balance check");
+        }
+        Err(e) => {
+            println!("❌ Error checking balance: {:?}", e);
+        }
+    }
+
+    // Test 5: Check balance through CQRS
+    println!("\n💰 Test 5: Check Balance Through CQRS");
+    match cqrs_service.get_account_balance(account_id).await {
+        Ok(balance) => {
+            println!("✅ Balance through CQRS: {}", balance);
+        }
+        Err(e) => {
+            println!("❌ Error checking balance through CQRS: {:?}", e);
+        }
+    }
+
+    println!("🎯 Projection verification test completed!");
+}

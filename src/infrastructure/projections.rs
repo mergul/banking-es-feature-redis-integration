@@ -97,6 +97,8 @@ pub struct ProjectionStore {
     cache_version: Arc<std::sync::atomic::AtomicU64>,
     metrics: Arc<ProjectionMetrics>,
     config: ProjectionConfig,
+    consistency_manager:
+        Option<Arc<crate::infrastructure::consistency_manager::ConsistencyManager>>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,14 +116,35 @@ pub struct ProjectionConfig {
 impl Default for ProjectionConfig {
     fn default() -> Self {
         Self {
-            cache_ttl_secs: 300,      // 5 minutes
-            batch_size: 1000,         // Reduced from 5000
-            batch_timeout_ms: 50,     // Increased from 20
-            max_connections: 30,      // Reduced from 100
-            min_connections: 5,       // Reduced from 20
-            acquire_timeout_secs: 15, // Reduced from 30
-            idle_timeout_secs: 300,   // Reduced from 600
-            max_lifetime_secs: 900,   // Reduced from 1800
+            cache_ttl_secs: std::env::var("CACHE_DEFAULT_TTL")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .unwrap_or(300),
+            batch_size: std::env::var("DB_BATCH_SIZE")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .unwrap_or(1000),
+            batch_timeout_ms: 100, // Increased from 25ms to 100ms
+            max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "80".to_string())
+                .parse()
+                .unwrap_or(80),
+            min_connections: std::env::var("PROJECTION_MIN_CONNECTIONS")
+                .unwrap_or_else(|_| "20".to_string())
+                .parse()
+                .unwrap_or(20),
+            acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30),
+            idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()
+                .unwrap_or(600),
+            max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
+                .unwrap_or_else(|_| "1800".to_string())
+                .parse()
+                .unwrap_or(1800),
         }
     }
 }
@@ -247,6 +270,16 @@ impl ProjectionStore {
     }
 
     pub fn from_pools_with_config(pools: Arc<PartitionedPools>, config: ProjectionConfig) -> Self {
+        Self::from_pools_with_config_and_consistency_manager(pools, config, None)
+    }
+
+    pub fn from_pools_with_config_and_consistency_manager(
+        pools: Arc<PartitionedPools>,
+        config: ProjectionConfig,
+        consistency_manager: Option<
+            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+        >,
+    ) -> Self {
         let account_cache = Arc::new(RwLock::new(HashMap::new()));
         let transaction_cache = Arc::new(RwLock::new(HashMap::new()));
         let (update_sender, update_receiver) = mpsc::unbounded_channel();
@@ -256,6 +289,7 @@ impl ProjectionStore {
         // Clone before move
         let processor_cache_version = cache_version.clone();
         let processor_metrics = metrics.clone();
+        let processor_consistency_manager = consistency_manager.clone();
 
         let store = Self {
             pools: pools.clone(),
@@ -265,6 +299,7 @@ impl ProjectionStore {
             cache_version,
             metrics,
             config: config.clone(),
+            consistency_manager,
         };
 
         // Start background processor
@@ -281,6 +316,7 @@ impl ProjectionStore {
                 processor_cache_version,
                 processor_metrics,
                 processor_config,
+                processor_consistency_manager,
             )
             .await;
         });
@@ -292,77 +328,62 @@ impl ProjectionStore {
         store
     }
 
-    pub async fn new_with_config(config: ProjectionConfig) -> Result<Self> {
-        // Create partitioned pools for read/write separation
-        let database_url = std::env::var("DATABASE_URL")
-            .map_err(|_| anyhow::Error::msg("DATABASE_URL environment variable is required"))?;
-
-        let pool_config =
-            crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig {
-                database_url,
-                write_pool_max_connections: config.max_connections / 3, // Smaller write pool
-                write_pool_min_connections: config.min_connections / 3,
-                read_pool_max_connections: config.max_connections * 2 / 3, // Larger read pool
-                read_pool_min_connections: config.min_connections * 2 / 3,
-                acquire_timeout_secs: config.acquire_timeout_secs,
-                write_idle_timeout_secs: config.idle_timeout_secs,
-                read_idle_timeout_secs: config.idle_timeout_secs * 2, // Longer idle time for reads
-                write_max_lifetime_secs: config.max_lifetime_secs,
-                read_max_lifetime_secs: config.max_lifetime_secs * 2, // Longer lifetime for reads
-            };
-
-        let pools = Arc::new(PartitionedPools::new(pool_config).await?);
-
-        Ok(Self::from_pools_with_config(pools, config))
+    pub async fn new_with_config(
+        config: ProjectionConfig,
+        consistency_manager: Option<
+            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+        >,
+    ) -> Result<Self> {
+        panic!("ProjectionStore::new_with_config is not supported. Please use ProjectionStore::from_pool_with_config(pool, config) and pass a shared PgPool instance.");
     }
 
     pub async fn get_account(&self, account_id: Uuid) -> Result<Option<AccountProjection>> {
         let start_time = Instant::now();
-        tracing::info!(
-            "🔍 ProjectionStore::get_account: Starting query for account {}",
-            account_id
-        );
+        println!("[DEBUG] get_account: start for {}", account_id);
 
         // Try cache first
         {
+            println!(
+                "[DEBUG] get_account: acquiring cache read lock for {}",
+                account_id
+            );
             let cache = self.account_cache.read().await;
+            println!(
+                "[DEBUG] get_account: acquired cache read lock for {}",
+                account_id
+            );
             if let Some(entry) = cache.get(&account_id) {
                 if entry.last_accessed.elapsed() < entry.ttl {
+                    println!("[DEBUG] get_account: cache hit for {}", account_id);
                     self.metrics
                         .cache_hits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::info!(
-                        "🔍 ProjectionStore::get_account: Cache hit for account {}",
-                        account_id
-                    );
                     return Ok(Some(entry.data.clone()));
                 }
             }
         }
+        println!("[DEBUG] get_account: cache miss for {}", account_id);
 
         self.metrics
             .cache_misses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tracing::info!(
-            "🔍 ProjectionStore::get_account: Cache miss for account {}, querying database",
+
+        // Add debug print before DB query
+        println!(
+            "[DEBUG] ProjectionStore: About to query DB for account_id={}",
             account_id
         );
+        // Print pool status if possible
+        #[cfg(feature = "sqlx")] // Only if sqlx PgPool is used
+        {
+            println!(
+                "[DEBUG] Pool status: size={}, num_idle={}",
+                self.pools.write_pool.size(),
+                self.pools.write_pool.num_idle()
+            );
+        }
 
         // Cache miss - fetch from database with prepared statement
-        tracing::info!(
-            "🔍 ProjectionStore::get_account: About to execute SQL query for account {}",
-            account_id
-        );
-
-        // Log pool state before query
-        let read_pool = self.pools.select_pool(OperationType::Read);
-        tracing::info!(
-            "🔍 ProjectionStore::get_account: Pool state before query - size: {}, idle: {}, active: {}",
-            read_pool.size(),
-            read_pool.num_idle(),
-            (read_pool.size() as usize).saturating_sub(read_pool.num_idle())
-        );
-
         let account: Option<AccountProjection> = sqlx::query_as!(
             AccountProjection,
             r#"
@@ -372,12 +393,13 @@ impl ProjectionStore {
             "#,
             account_id
         )
-        .fetch_optional(read_pool)
+        .fetch_optional(&self.pools.write_pool)
         .await?;
-        tracing::info!(
-            "🔍 ProjectionStore::get_account: SQL query completed for account {}: {:?}",
-            account_id,
-            account.as_ref().map(|a| a.id)
+
+        // Add debug print after DB query
+        println!(
+            "[DEBUG] ProjectionStore: Finished DB query for account_id={}",
+            account_id
         );
 
         // Update cache if found
@@ -627,6 +649,9 @@ impl ProjectionStore {
         cache_version: Arc<std::sync::atomic::AtomicU64>,
         metrics: Arc<ProjectionMetrics>,
         mut config: ProjectionConfig,
+        consistency_manager: Option<
+            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+        >,
     ) {
         // Force batch timeout to 50ms for test/debug
         config.batch_timeout_ms = 50;
@@ -668,6 +693,7 @@ impl ProjectionStore {
                             &transaction_cache,
                             &cache_version,
                             &metrics,
+                            consistency_manager.clone(),
                         ).await {
                             error!("[ProjectionStore] Failed to flush batches: {} (ids={:?})", e, ids);
                         }
@@ -685,6 +711,7 @@ impl ProjectionStore {
                             &transaction_cache,
                             &cache_version,
                             &metrics,
+                            consistency_manager.clone(),
                         ).await {
                             error!("[ProjectionStore] Failed to flush batches: {} (ids={:?})", e, ids);
                         }
@@ -701,6 +728,9 @@ impl ProjectionStore {
         cache_version: Arc<std::sync::atomic::AtomicU64>,
         metrics: Arc<ProjectionMetrics>,
         mut config: ProjectionConfig,
+        consistency_manager: Option<
+            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+        >,
     ) {
         // Panic hook for batch processor
         std::panic::set_hook(Box::new(|panic_info| {
@@ -749,6 +779,7 @@ impl ProjectionStore {
                                     &transaction_cache,
                                     &cache_version,
                                     &metrics,
+                                    consistency_manager.clone(),
                                 ).await {
                                     tracing::error!("[ProjectionStore] FLUSH ERROR: {}", e);
                                     metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -772,6 +803,7 @@ impl ProjectionStore {
                                     &transaction_cache,
                                     &cache_version,
                                     &metrics,
+                                    consistency_manager.clone(),
                                 ).await {
                                     tracing::error!("[ProjectionStore] FINAL FLUSH ERROR: {}", e);
                                     metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -798,6 +830,7 @@ impl ProjectionStore {
                             &transaction_cache,
                             &cache_version,
                             &metrics,
+                            consistency_manager.clone(),
                         ).await {
                             tracing::error!("[ProjectionStore] FLUSH ERROR (timeout): {}", e);
                             metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -820,6 +853,9 @@ impl ProjectionStore {
         transaction_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
         cache_version: &Arc<std::sync::atomic::AtomicU64>,
         metrics: &Arc<ProjectionMetrics>,
+        consistency_manager: Option<
+            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+        >,
     ) -> Result<()> {
         let write_pool = pools.select_pool(OperationType::Write);
         let mut tx = write_pool.begin().await?;
@@ -874,6 +910,22 @@ impl ProjectionStore {
             metrics
                 .batch_updates
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            // Notify consistency manager about completed projections
+            if let Some(cm) = consistency_manager.as_ref() {
+                for account_id in ids.iter() {
+                    tracing::info!(
+                        "[ProjectionStore] Notifying consistency manager for account {} (projection+cdc)",
+                        account_id
+                    );
+                    cm.mark_projection_completed(*account_id).await;
+                    cm.mark_completed(*account_id).await;
+                    tracing::info!(
+                        "[ProjectionStore] Notified consistency manager for account {} (projection+cdc)",
+                        account_id
+                    );
+                }
+            }
         }
 
         // Process transaction updates
@@ -914,6 +966,9 @@ impl ProjectionStore {
         transaction_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
         cache_version: &Arc<std::sync::atomic::AtomicU64>,
         metrics: &Arc<ProjectionMetrics>,
+        consistency_manager: Option<
+            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+        >,
     ) -> Result<()> {
         let flush_start = std::time::Instant::now();
 
@@ -974,6 +1029,18 @@ impl ProjectionStore {
             metrics
                 .batch_updates
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            // Notify consistency manager about completed projections
+            if let Some(cm) = consistency_manager.as_ref() {
+                for account_id in ids {
+                    cm.mark_projection_completed(account_id).await;
+                    cm.mark_completed(account_id).await;
+                    tracing::info!(
+                        "[ProjectionStore] Notified consistency manager for account {} (optimized)",
+                        account_id
+                    );
+                }
+            }
 
             let account_time = account_start.elapsed().as_millis() as u64;
             tracing::debug!(
@@ -1216,14 +1283,7 @@ impl ProjectionStore {
 // Add Default implementation for ProjectionStore
 impl Default for ProjectionStore {
     fn default() -> Self {
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
-        });
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect_lazy(&database_url)
-            .expect("Failed to connect to database");
-        ProjectionStore::new(pool)
+        panic!("ProjectionStore::default() is not supported. Please use ProjectionStore::new(pool) and pass a shared PgPool instance.");
     }
 }
 

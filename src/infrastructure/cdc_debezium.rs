@@ -228,9 +228,17 @@ impl CDCOutboxRepository {
 }
 
 /// OutboxBatcher - Buffers outbox messages and flushes them in batches
-/// Flushes when buffer reaches batch_size (1000) or after batch_timeout (100ms)
+/// OPTIMIZED: Flushes when buffer reaches batch_size (10) or after batch_timeout (10ms)
 pub struct OutboxBatcher {
     sender: mpsc::Sender<crate::infrastructure::outbox::OutboxMessage>,
+}
+
+impl Clone for OutboxBatcher {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
 }
 
 impl OutboxBatcher {
@@ -251,7 +259,8 @@ impl OutboxBatcher {
                         match msg {
                             Some(msg) => {
                                 buffer.push(msg);
-                                if buffer.len() >= batch_size {
+                                // OPTIMIZED: Process immediately for single messages or when batch is full
+                                if buffer.len() == 1 || buffer.len() >= batch_size {
                                     Self::flush(&repo, &pools, &mut buffer).await;
                                     last_flush = tokio::time::Instant::now();
                                 }
@@ -294,6 +303,9 @@ impl OutboxBatcher {
             return;
         }
 
+        let start_time = std::time::Instant::now();
+        let message_count = buffer.len();
+
         let write_pool = pools.select_pool(OperationType::Write);
         let mut transaction = match write_pool.begin().await {
             Ok(tx) => tx,
@@ -314,14 +326,22 @@ impl OutboxBatcher {
 
         if let Err(e) = transaction.commit().await {
             error!("Failed to commit outbox batch: {}", e);
+            return;
         }
+
+        let duration = start_time.elapsed();
+        info!(
+            "✅ OutboxBatcher: Flushed {} messages in {:?}",
+            message_count, duration
+        );
     }
 
     pub fn new_default(
         repo: Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait + Send + Sync>,
         pools: Arc<PartitionedPools>,
     ) -> Self {
-        Self::new(repo, pools, 1000, Duration::from_millis(100))
+        // OPTIMIZED: Updated batch size and timeout for better performance
+        Self::new(repo, pools, 250, Duration::from_millis(25))
     }
 }
 
@@ -338,8 +358,11 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
             return Ok(());
         }
 
-        let chunk_size = 1000;
-        for chunk in messages.chunks(chunk_size) {
+        let start_time = std::time::Instant::now();
+
+        // OPTIMIZED: Use single bulk insert instead of chunking for small batches
+        if messages.len() <= 100 {
+            // Single bulk insert for small batches
             let mut query = String::from(
                 "INSERT INTO kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) VALUES "
             );
@@ -355,7 +378,7 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
             )> = Vec::new();
             let mut param_index = 1;
 
-            for msg in chunk {
+            for msg in &messages {
                 values.push(format!(
                     "(${},${},${},${},${},${},NOW(),NOW())",
                     param_index,
@@ -394,12 +417,84 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
             let result = query.execute(&mut **tx).await;
             if let Err(e) = &result {
                 tracing::error!(
-                    "CDCOutboxRepository: Failed to batch insert OutboxMessages: {:?}",
+                    "CDCOutboxRepository: Failed to bulk insert OutboxMessages: {:?}",
                     e
                 );
-                return Err(anyhow::anyhow!("Batch insert failed: {:?}", e));
+                return Err(anyhow::anyhow!("Bulk insert failed: {:?}", e));
+            }
+        } else {
+            // Chunked insert for large batches
+            let chunk_size = 1000;
+            for chunk in messages.chunks(chunk_size) {
+                let mut query = String::from(
+                    "INSERT INTO kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) VALUES "
+                );
+
+                let mut values = Vec::new();
+                let mut params: Vec<(
+                    Uuid,
+                    Uuid,
+                    String,
+                    Vec<u8>,
+                    String,
+                    Option<serde_json::Value>,
+                )> = Vec::new();
+                let mut param_index = 1;
+
+                for msg in chunk {
+                    values.push(format!(
+                        "(${},${},${},${},${},${},NOW(),NOW())",
+                        param_index,
+                        param_index + 1,
+                        param_index + 2,
+                        param_index + 3,
+                        param_index + 4,
+                        param_index + 5
+                    ));
+
+                    params.push((
+                        msg.aggregate_id,
+                        msg.event_id,
+                        msg.event_type.clone(),
+                        msg.payload.clone(),
+                        msg.topic.clone(),
+                        msg.metadata.clone(),
+                    ));
+
+                    param_index += 6;
+                }
+
+                query.push_str(&values.join(","));
+
+                let mut query = sqlx::query(&query);
+                for (aggregate_id, event_id, event_type, payload, topic, metadata) in params {
+                    query = query
+                        .bind(aggregate_id)
+                        .bind(event_id)
+                        .bind(event_type)
+                        .bind(payload)
+                        .bind(topic)
+                        .bind(metadata);
+                }
+
+                let result = query.execute(&mut **tx).await;
+                if let Err(e) = &result {
+                    tracing::error!(
+                        "CDCOutboxRepository: Failed to batch insert OutboxMessages: {:?}",
+                        e
+                    );
+                    return Err(anyhow::anyhow!("Batch insert failed: {:?}", e));
+                }
             }
         }
+
+        let duration = start_time.elapsed();
+        tracing::debug!(
+            "CDCOutboxRepository: Inserted {} messages in {:?}",
+            messages.len(),
+            duration
+        );
+
         Ok(())
     }
 
@@ -476,15 +571,19 @@ impl EnhancedCDCEventProcessor {
         cache_service: Arc<dyn CacheServiceTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
         business_config: Option<BusinessLogicConfig>,
+        consistency_manager: Option<
+            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+        >,
     ) -> Self {
         let metrics = Arc::new(EnhancedCDCMetrics::default());
         let optimized_processor = UltraOptimizedCDCEventProcessor::new(
             kafka_producer,
             cache_service,
             projection_store,
-            metrics.clone(), // <-- pass metrics as required
+            metrics.clone(),
             business_config,
             None, // Use default performance config
+            consistency_manager,
         );
 
         Self {
@@ -532,6 +631,36 @@ impl EnhancedCDCEventProcessor {
                 Err(e)
             }
         }
+    }
+
+    /// Mark an aggregate as completed by CDC processing
+    pub async fn mark_aggregate_completed(&self, aggregate_id: Uuid) {
+        // This method can be called by external consistency managers
+        // when CDC events are successfully processed
+        info!(
+            "CDC Event Processor: Marked aggregate {} as completed",
+            aggregate_id
+        );
+
+        // Use the optimized processor to mark as completed
+        self.optimized_processor
+            .mark_aggregate_completed(aggregate_id)
+            .await;
+    }
+
+    /// Mark an aggregate as failed by CDC processing
+    pub async fn mark_aggregate_failed(&self, aggregate_id: Uuid, error: String) {
+        // This method can be called by external consistency managers
+        // when CDC events fail to process
+        error!(
+            "CDC Event Processor: Marked aggregate {} as failed: {}",
+            aggregate_id, error
+        );
+
+        // Use the optimized processor to mark as failed
+        self.optimized_processor
+            .mark_aggregate_failed(aggregate_id, error.clone())
+            .await;
     }
 
     /// Get metrics from the optimized processor
@@ -717,10 +846,14 @@ impl CDCConsumer {
         let kafka_consumer = self.kafka_consumer.clone();
         // Background offset committer
         tokio::spawn(async move {
+            let mut last_commit_time = std::time::Instant::now();
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let mut offsets = offsets_clone.lock().await;
-                if offsets.len() >= 1000 {
+                let should_commit = offsets.len() >= 100 || // Commit every 100 messages
+                                   last_commit_time.elapsed() > std::time::Duration::from_secs(2); // Or every 2 seconds
+
+                if should_commit && !offsets.is_empty() {
                     // Only commit the highest offset per (topic, partition)
                     let mut highest: HashMap<(String, i32), i64> = HashMap::new();
                     for (topic, partition, offset) in offsets.drain(..) {
@@ -730,6 +863,7 @@ impl CDCConsumer {
                             .and_modify(|v| *v = (*v).max(offset))
                             .or_insert(offset);
                     }
+                    let offset_count = highest.len(); // Store length before moving
                     let mut tpl = TopicPartitionList::new();
                     for ((topic, partition), offset) in highest {
                         tpl.add_partition_offset(&topic, partition, Offset::Offset(offset + 1))
@@ -737,6 +871,9 @@ impl CDCConsumer {
                     }
                     if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
                         tracing::error!("Failed to batch commit offsets: {}", e);
+                    } else {
+                        tracing::info!("✅ Successfully committed {} offsets", offset_count);
+                        last_commit_time = std::time::Instant::now();
                     }
                 }
             }

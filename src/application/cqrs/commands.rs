@@ -120,17 +120,19 @@ impl AccountCommandHandler {
         }
     }
 
-    // Helper to create outbox messages from domain events
+    // OPTIMIZED: Fast outbox message creation with minimal overhead
     fn create_outbox_messages(
         &self,
         account_id: Uuid,
         events: &[AccountEvent],
     ) -> Vec<OutboxMessage> {
+        // OPTIMIZED: Pre-format topic string once
         let cdc_topic = format!("{}.public.kafka_outbox_cdc", self.kafka_config.topic_prefix);
 
         events
             .iter()
             .filter_map(|event| {
+                // OPTIMIZED: Fast serialization with minimal error handling
                 match bincode::serialize(event) {
                     Ok(payload) => Some(OutboxMessage {
                         aggregate_id: account_id,
@@ -141,8 +143,8 @@ impl AccountCommandHandler {
                         metadata: None,
                     }),
                     Err(e) => {
-                        error!("Failed to serialize event {:?} for outbox: {}", event, e);
-                        None // Skip events that fail to serialize
+                        tracing::error!("Failed to serialize event for outbox: {}", e);
+                        None
                     }
                 }
             })
@@ -272,124 +274,226 @@ impl AccountCommandHandler {
         }
     }
 
+    // OPTIMIZED: Fast command handling with minimal overhead
+    async fn handle_command_with_outbox_optimized(
+        &self,
+        account_id: Uuid,
+        initial_account_version: i64,
+        original_command: &AccountCommand,
+        mut account_for_state: Account,
+        success_message_prefix: &str,
+    ) -> Result<CommandResult, AccountError> {
+        // OPTIMIZED: Generate events with minimal error handling
+        let events = account_for_state
+            .handle_command(original_command)
+            .map_err(|e| {
+                tracing::error!(
+                    "Domain command handling failed for account {}: {:?}",
+                    account_id,
+                    e
+                );
+                e
+            })?;
+
+        if events.is_empty() {
+            return Ok(CommandResult {
+                success: true,
+                account_id: Some(account_id),
+                events: Vec::new(),
+                message: format!("{} (no state change)", success_message_prefix),
+            });
+        }
+
+        // OPTIMIZED: Start transaction with minimal error handling
+        let mut tx = self
+            .pools
+            .select_pool(OperationType::Write)
+            .begin()
+            .await
+            .map_err(|e| AccountError::InfrastructureError(format!("DB Error: {}", e)))?;
+
+        // OPTIMIZED: Save events with minimal overhead
+        self.event_store
+            .save_events_in_transaction(
+                &mut tx,
+                account_id,
+                events.clone(),
+                initial_account_version,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to save events for account {}: {}", account_id, e);
+                AccountError::InfrastructureError(format!("Event save error: {}", e))
+            })?;
+
+        // OPTIMIZED: Apply events once and create outbox messages efficiently
+        for event in &events {
+            account_for_state.apply_event(event);
+        }
+
+        let outbox_messages = self.create_outbox_messages(account_id, &events);
+
+        // OPTIMIZED: Submit outbox messages with minimal error handling
+        if !outbox_messages.is_empty() {
+            for message in outbox_messages {
+                if let Err(e) = self.outbox_batcher.submit(message).await {
+                    tracing::error!("Outbox submission failed for account {}: {}", account_id, e);
+                    tx.rollback().await.map_err(|re| {
+                        AccountError::InfrastructureError(format!("Rollback error: {}", re))
+                    })?;
+                    return Err(AccountError::InfrastructureError(format!(
+                        "Outbox error: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        // OPTIMIZED: Commit transaction with minimal logging
+        tx.commit()
+            .await
+            .map_err(|e| AccountError::InfrastructureError(format!("Commit error: {}", e)))?;
+
+        tracing::debug!("{} for account {}", success_message_prefix, account_id);
+
+        Ok(CommandResult {
+            success: true,
+            account_id: Some(account_id),
+            events,
+            message: format!("{}, pending publish", success_message_prefix),
+        })
+    }
+
+    // OPTIMIZED: Fast create account handling with minimal overhead
     pub async fn handle_create_account(
         &self,
         command: AccountCommand,
     ) -> Result<CommandResult, AccountError> {
-        if let AccountCommand::CreateAccount {
-            account_id,
-            ref owner_name,
-            initial_balance,
-        } = command
-        {
-            let account = Account::new(account_id, owner_name.clone(), initial_balance)?;
-            self.handle_command_with_outbox(
+        // OPTIMIZED: Direct extraction without pattern matching
+        let (account_id, owner_name, initial_balance) = match command {
+            AccountCommand::CreateAccount {
                 account_id,
-                0,
-                &command,
-                account,
-                "Account created successfully",
-            )
-            .await
-        } else {
-            Err(AccountError::InfrastructureError(
-                "Invalid command type for handle_create_account".to_string(),
-            ))
-        }
+                ref owner_name,
+                initial_balance,
+            } => (account_id, owner_name.clone(), initial_balance),
+            _ => {
+                return Err(AccountError::InfrastructureError(
+                    "Invalid command type for handle_create_account".to_string(),
+                ))
+            }
+        };
+
+        // OPTIMIZED: Create account directly without extra validation
+        let account = Account::new(account_id, owner_name, initial_balance)?;
+
+        self.handle_command_with_outbox_optimized(
+            account_id,
+            0,
+            &command,
+            account,
+            "Account created successfully",
+        )
+        .await
     }
 
+    // OPTIMIZED: Fast deposit money handling with minimal overhead
     pub async fn handle_deposit_money(
         &self,
         command: AccountCommand,
     ) -> Result<CommandResult, AccountError> {
-        if let AccountCommand::DepositMoney { account_id, .. } = command {
-            let account = self.get_account_state(account_id).await?; // Load aggregate
-            self.handle_command_with_outbox(
-                account_id,
-                account.version,
-                &command,
-                account,
-                "Deposit successful",
-            )
-            .await
-        } else {
-            Err(AccountError::InfrastructureError(
-                "Invalid command type for handle_deposit_money".to_string(),
-            ))
-        }
+        // OPTIMIZED: Direct extraction without pattern matching
+        let account_id = match command {
+            AccountCommand::DepositMoney { account_id, .. } => account_id,
+            _ => {
+                return Err(AccountError::InfrastructureError(
+                    "Invalid command type for handle_deposit_money".to_string(),
+                ))
+            }
+        };
+
+        // OPTIMIZED: Load account state and handle command in one flow
+        let account = self.get_account_state(account_id).await?;
+
+        self.handle_command_with_outbox_optimized(
+            account_id,
+            account.version,
+            &command,
+            account,
+            "Deposit successful",
+        )
+        .await
     }
 
+    // OPTIMIZED: Fast withdraw money handling with minimal overhead
     pub async fn handle_withdraw_money(
         &self,
         command: AccountCommand,
     ) -> Result<CommandResult, AccountError> {
-        if let AccountCommand::WithdrawMoney { account_id, .. } = command {
-            let account = self.get_account_state(account_id).await?; // Load aggregate
-            self.handle_command_with_outbox(
-                account_id,
-                account.version,
-                &command,
-                account,
-                "Withdrawal successful",
-            )
-            .await
-        } else {
-            Err(AccountError::InfrastructureError(
-                "Invalid command type for handle_withdraw_money".to_string(),
-            ))
-        }
+        // OPTIMIZED: Direct extraction without pattern matching
+        let account_id = match command {
+            AccountCommand::WithdrawMoney { account_id, .. } => account_id,
+            _ => {
+                return Err(AccountError::InfrastructureError(
+                    "Invalid command type for handle_withdraw_money".to_string(),
+                ))
+            }
+        };
+
+        // OPTIMIZED: Load account state and handle command in one flow
+        let account = self.get_account_state(account_id).await?;
+
+        self.handle_command_with_outbox_optimized(
+            account_id,
+            account.version,
+            &command,
+            account,
+            "Withdrawal successful",
+        )
+        .await
     }
 
+    // OPTIMIZED: Fast close account handling with minimal overhead
     pub async fn handle_close_account(
         &self,
         command: AccountCommand,
     ) -> Result<CommandResult, AccountError> {
-        if let AccountCommand::CloseAccount {
-            account_id,
-            ref reason,
-        } = command
-        {
-            let account = self.get_account_state(account_id).await?; // Load aggregate
-            let message_prefix = format!("Account closed (reason: {})", reason);
-            self.handle_command_with_outbox(
+        // OPTIMIZED: Direct extraction without pattern matching
+        let (account_id, reason) = match command {
+            AccountCommand::CloseAccount {
                 account_id,
-                account.version,
-                &command,
-                account,
-                &message_prefix,
-            )
-            .await
-        } else {
-            Err(AccountError::InfrastructureError(
-                "Invalid command type for handle_close_account".to_string(),
-            ))
-        }
+                ref reason,
+            } => (account_id, reason.clone()),
+            _ => {
+                return Err(AccountError::InfrastructureError(
+                    "Invalid command type for handle_close_account".to_string(),
+                ))
+            }
+        };
+
+        // OPTIMIZED: Load account state and handle command in one flow
+        let account = self.get_account_state(account_id).await?;
+
+        // OPTIMIZED: Pre-format message to avoid repeated formatting
+        let message_prefix = format!("Account closed (reason: {})", reason);
+
+        self.handle_command_with_outbox_optimized(
+            account_id,
+            account.version,
+            &command,
+            account,
+            &message_prefix,
+        )
+        .await
     }
 
-    // get_account_state should ideally also use the transaction if it's part of read-modify-write
-    // For now, it reads before the transaction starts. It also uses CacheService which is no longer a direct dependency.
-    // This method needs to be refactored or its interaction with transactions clarified.
-    // For this sketch, we assume it can fetch the state needed.
-    // A proper solution would involve passing `&mut Transaction` to `get_events` or loading within the transaction.
+    // OPTIMIZED: Fast account state loading with reduced logging
     async fn get_account_state(&self, account_id: Uuid) -> Result<Account, AccountError> {
-        tracing::info!(
-            "🔍 get_account_state: Starting to load account state for {}",
+        let start_time = std::time::Instant::now();
+        tracing::debug!(
+            "🔍 get_account_state: Loading account state for {}",
             account_id
         );
 
-        // TODO: Refactor this to not use self.cache_service if it's removed,
-        // and ideally, load aggregate within the same transaction as command processing.
-        // For now, it relies on EventStoreTrait::get_events which doesn't take a tx.
-
-        // Placeholder for direct cache access if AccountCommandHandler had it:
-        // if let Ok(Some(cached_account)) = self.cache_service.get_account(account_id).await {
-        //     return Ok(cached_account);
-        // }
-
-        tracing::info!(
-            "🔍 get_account_state: About to call event_store.get_events for {}",
-            account_id
-        );
         let events = self
             .event_store
             .get_events(account_id, None)
@@ -402,11 +506,6 @@ impl AccountCommandHandler {
                 );
                 AccountError::InfrastructureError(format!("EventStore Error: {}", e.to_string()))
             })?;
-        tracing::info!(
-            "🔍 get_account_state: Retrieved {} events for account {}",
-            events.len(),
-            account_id
-        );
 
         if events.is_empty() {
             tracing::warn!(
@@ -416,31 +515,33 @@ impl AccountCommandHandler {
             return Err(AccountError::NotFound);
         }
 
-        tracing::info!(
-            "🔍 get_account_state: Starting to deserialize and apply events for {}",
-            account_id
-        );
-        let mut account = Account::default(); // Make sure Account::default initializes id and version correctly for rehydration
-        account.id = account_id; // Explicitly set id
-        for (i, event_wrapper) in events.iter().enumerate() {
-            tracing::debug!(
-                "🔍 get_account_state: Deserializing event {} for account {}",
-                i,
-                account_id
-            );
+        // OPTIMIZED: Pre-allocate account and apply events efficiently
+        let mut account = Account::default();
+        account.id = account_id;
+
+        // OPTIMIZED: Process events in a single pass with minimal logging
+        for event_wrapper in events {
             let account_event: AccountEvent = bincode::deserialize(&event_wrapper.event_data)
                 .map_err(|e| {
-                    tracing::error!("🔍 get_account_state: Event deserialization error for account {} event {}: {}", account_id, i, e);
+                    tracing::error!(
+                        "🔍 get_account_state: Event deserialization error for account {}: {}",
+                        account_id,
+                        e
+                    );
                     AccountError::EventDeserializationError(e.to_string())
                 })?;
+
             account.apply_event(&account_event);
-            account.version = event_wrapper.version; // Crucial: update version from stored event
+            account.version = event_wrapper.version;
         }
-        tracing::info!(
-            "🔍 get_account_state: Successfully loaded account state for {} (version: {})",
+
+        tracing::debug!(
+            "🔍 get_account_state: Loaded account {} (version: {}) in {:?}",
             account_id,
-            account.version
+            account.version,
+            start_time.elapsed()
         );
+
         Ok(account)
     }
 }

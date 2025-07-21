@@ -149,30 +149,72 @@ impl CacheService {
 #[async_trait]
 impl CacheServiceTrait for CacheService {
     async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>> {
+        println!(
+            "[DEBUG] CacheService::get_account: start for {}",
+            account_id
+        );
         let shard_index = self.get_shard_index(account_id);
         let shard = &self.account_shards[shard_index];
 
         // Try L1 cache first
+        println!(
+            "[DEBUG] CacheService::get_account: before L1 cache lookup for {}",
+            account_id
+        );
         if let Some(entry) = shard.get(&account_id) {
+            println!(
+                "[DEBUG] CacheService::get_account: found entry in L1 for {}",
+                account_id
+            );
             if !entry.is_expired() {
-                // Clone the value before updating the entry
+                println!(
+                    "[DEBUG] CacheService::get_account: before clone for {}",
+                    account_id
+                );
                 let value = entry.value.clone();
+                println!(
+                    "[DEBUG] CacheService::get_account: after clone for {}",
+                    account_id
+                );
+                drop(entry); // Drop the DashMap reference before get_mut
 
-                // Update access time
-                let mut entry = entry.clone();
-                entry.last_accessed = Instant::now();
-                entry.access_count += 1;
-                shard.insert(account_id, entry);
+                // Now update access time safely
+                if let Some(mut entry_ref) = shard.get_mut(&account_id) {
+                    entry_ref.last_accessed = Instant::now();
+                    entry_ref.access_count += 1;
+                    println!(
+                        "[DEBUG] CacheService::get_account: after entry update for {}",
+                        account_id
+                    );
+                } else {
+                    println!(
+                        "[DEBUG] CacheService::get_account: get_mut failed for {}",
+                        account_id
+                    );
+                }
 
                 self.metrics
                     .shard_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 info!("[CacheService] L1 cache hit for account: {}", account_id);
+                println!(
+                    "[DEBUG] CacheService::get_account: L1 cache hit for {}",
+                    account_id
+                );
                 return Ok(Some(value));
             } else {
+                println!(
+                    "[DEBUG] CacheService::get_account: L1 entry expired for {}",
+                    account_id
+                );
                 // Remove expired entry
                 shard.remove(&account_id);
             }
+        } else {
+            println!(
+                "[DEBUG] CacheService::get_account: L1 cache miss for {}",
+                account_id
+            );
         }
 
         self.metrics
@@ -181,8 +223,16 @@ impl CacheServiceTrait for CacheService {
 
         // L1 cache miss, try L2 cache (Redis)
         let key = format!("account:{}", account_id);
+        println!(
+            "[DEBUG] CacheService::get_account: before Redis lookup for {}",
+            account_id
+        );
         match self.redis_get_bin(&key).await {
             Ok(Some(data_bytes)) => {
+                println!(
+                    "[DEBUG] CacheService::get_account: Redis hit for {}",
+                    account_id
+                );
                 let account: Account = bincode::deserialize(&data_bytes)?;
 
                 // Store in L1 cache
@@ -199,18 +249,38 @@ impl CacheServiceTrait for CacheService {
                     .hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 info!("[CacheService] L2 cache hit for account: {}", account_id);
+                println!(
+                    "[DEBUG] CacheService::get_account: returning from Redis for {}",
+                    account_id
+                );
                 Ok(Some(account))
             }
             Ok(None) => {
+                println!(
+                    "[DEBUG] CacheService::get_account: Redis miss for {}",
+                    account_id
+                );
                 self.metrics
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                println!(
+                    "[DEBUG] CacheService::get_account: returning None for {}",
+                    account_id
+                );
                 Ok(None)
             }
-            Err(_) => {
+            Err(e) => {
+                println!(
+                    "[DEBUG] CacheService::get_account: Redis error for {}: {:?}",
+                    account_id, e
+                );
                 self.metrics
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                println!(
+                    "[DEBUG] CacheService::get_account: returning None (error) for {}",
+                    account_id
+                );
                 Ok(None)
             }
         }

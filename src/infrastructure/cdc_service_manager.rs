@@ -39,6 +39,10 @@ pub struct CDCServiceManager {
 
     // Configuration for optimizations
     optimization_config: OptimizationConfig,
+
+    // Consistency manager for projection synchronization
+    consistency_manager:
+        Option<Arc<crate::infrastructure::consistency_manager::ConsistencyManager>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,8 +57,6 @@ pub enum ServiceState {
 
 #[derive(Debug, Clone)]
 pub struct OptimizationConfig {
-    pub max_batch_size: usize,
-    pub batch_timeout_ms: u64,
     pub health_check_interval_secs: u64,
     pub cleanup_interval_secs: u64,
     pub metrics_flush_interval_secs: u64,
@@ -69,8 +71,6 @@ pub struct OptimizationConfig {
 impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 100,
-            batch_timeout_ms: 1000,
             health_check_interval_secs: 30,
             cleanup_interval_secs: 3600,
             metrics_flush_interval_secs: 60,
@@ -215,7 +215,10 @@ impl CDCServiceManager {
         kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
         cache_service: Arc<dyn CacheServiceTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
-        metrics: Option<Arc<EnhancedCDCMetrics>>, // <-- add this param
+        metrics: Option<Arc<EnhancedCDCMetrics>>,
+        consistency_manager: Option<
+            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+        >,
     ) -> Result<Self> {
         let optimization_config = OptimizationConfig::default();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -225,10 +228,14 @@ impl CDCServiceManager {
             kafka_producer,
             cache_service,
             projection_store,
-            metrics.clone(), // <-- pass shared metrics Arc
+            metrics.clone(),
             None,
             None, // Use default performance config
+            consistency_manager.clone(),
         ));
+
+        // Consistency manager is set on the processor during construction
+
         Ok(Self {
             config,
             outbox_repo,
@@ -240,6 +247,7 @@ impl CDCServiceManager {
             metrics,
             health_checker,
             optimization_config,
+            consistency_manager,
         })
     }
 
@@ -253,6 +261,15 @@ impl CDCServiceManager {
             "CDC Service Manager: Initializing with config: {:?}",
             self.optimization_config
         );
+
+        // Consistency manager is already set in the processor during construction
+        if let Some(consistency_manager) = &self.consistency_manager {
+            tracing::info!(
+                "CDCServiceManager: Consistency manager is available and set on processor"
+            );
+        } else {
+            tracing::warn!("CDCServiceManager: No consistency manager provided - projection synchronization will not work");
+        }
 
         // Initialize infrastructure
         tracing::info!("CDCServiceManager: Initializing infrastructure...");
@@ -324,6 +341,26 @@ impl CDCServiceManager {
                     tracing::error!("CDC Service Manager: Failed to start event processor's batch processor: {}", e);
                     return Err(e);
                 }
+            }
+        }
+
+        // Force start batch processor regardless of config
+        tracing::info!("CDC Service Manager: Force starting batch processor...");
+        let processor_clone = self.processor.clone();
+        match UltraOptimizedCDCEventProcessor::enable_and_start_batch_processor_arc(processor_clone)
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    "CDC Service Manager: ✅ Batch processor force started successfully"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "CDC Service Manager: Failed to force start batch processor: {}",
+                    e
+                );
+                return Err(e);
             }
         }
 
@@ -668,7 +705,6 @@ impl CDCServiceManager {
             "active_tasks": active_tasks,
             "total_tasks": tasks.len(),
             "optimization_config": {
-                "batch_size": self.optimization_config.max_batch_size,
                 "batching_enabled": self.optimization_config.enable_batching,
                 "compression_enabled": self.optimization_config.enable_compression,
                 "circuit_breaker_threshold": self.optimization_config.circuit_breaker_threshold

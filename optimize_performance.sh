@@ -1,76 +1,81 @@
 #!/bin/bash
 
-echo "🚀 Optimizing Redis and PostgreSQL for maximum concurrency..."
+echo "🚀 Setting up optimized performance configuration..."
 
-# Redis optimizations
-echo "📊 Optimizing Redis settings..."
-redis-cli CONFIG SET maxmemory 2gb
-redis-cli CONFIG SET maxmemory-policy allkeys-lru
-redis-cli CONFIG SET save ""
-redis-cli CONFIG SET appendonly no
-redis-cli CONFIG SET tcp-keepalive 300
-redis-cli CONFIG SET timeout 0
-redis-cli CONFIG SET tcp-backlog 511
-redis-cli CONFIG SET databases 16
-redis-cli CONFIG SET hash-max-ziplist-entries 512
-redis-cli CONFIG SET hash-max-ziplist-value 64
-redis-cli CONFIG SET list-max-ziplist-size -2
-redis-cli CONFIG SET set-max-intset-entries 512
-redis-cli CONFIG SET zset-max-ziplist-entries 128
-redis-cli CONFIG SET zset-max-ziplist-value 64
-redis-cli CONFIG SET hll-sparse-max-bytes 3000
-redis-cli CONFIG SET activerehashing yes
-redis-cli CONFIG SET client-output-buffer-limit normal 0 0 0
-redis-cli CONFIG SET client-output-buffer-limit slave 256mb 64mb 60
-redis-cli CONFIG SET client-output-buffer-limit pubsub 32mb 8mb 60
-redis-cli CONFIG SET hz 10
-redis-cli CONFIG SET aof-rewrite-incremental-fsync yes
-redis-cli CONFIG SET rdb-save-incremental-fsync yes
+# Database Connection Pool Optimization
+export DB_MAX_CONNECTIONS=200
+export DB_MIN_CONNECTIONS=50
+export DB_ACQUIRE_TIMEOUT=5
+export DB_IDLE_TIMEOUT=600
+export DB_MAX_LIFETIME=1800
 
-echo "✅ Redis optimizations applied"
+# Database Operation Timeouts
+export DB_OPERATION_TIMEOUT=15
+export TRANSACTION_TIMEOUT=15
+export CONNECTION_ACQUIRE_TIMEOUT=5
+export LOCK_TIMEOUT=10
+export RETRY_TIMEOUT=3
 
-# PostgreSQL optimizations
-echo "📊 Optimizing PostgreSQL settings..."
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET max_connections = 1000;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET shared_buffers = '2GB';"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET effective_cache_size = '8GB';"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET maintenance_work_mem = '512MB';"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET checkpoint_completion_target = 0.9;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET wal_buffers = '16MB';"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET default_statistics_target = 100;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET random_page_cost = 1.1;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET effective_io_concurrency = 200;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET work_mem = '64MB';"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET min_wal_size = '1GB';"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET max_wal_size = '4GB';"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET max_worker_processes = 8;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET max_parallel_workers_per_gather = 4;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET max_parallel_workers = 8;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET max_parallel_maintenance_workers = 4;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET synchronous_commit = off;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET fsync = off;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET full_page_writes = off;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET commit_delay = 1000;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET commit_siblings = 5;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET autovacuum = on;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET autovacuum_max_workers = 3;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET autovacuum_naptime = 10;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET autovacuum_vacuum_threshold = 50;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET autovacuum_analyze_threshold = 50;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET autovacuum_vacuum_scale_factor = 0.1;"
-psql -U postgres -d banking_es -c "ALTER SYSTEM SET autovacuum_analyze_scale_factor = 0.05;"
+# Batch Processing Optimization
+export DB_BATCH_SIZE=500
+export DB_BATCH_TIMEOUT_MS=50
+export DB_MAX_BATCH_QUEUE_SIZE=5000
+export DB_BATCH_PROCESSOR_COUNT=8
 
-echo "✅ PostgreSQL optimizations applied"
+# Redis Optimization
+export REDIS_MAX_CONNECTIONS=100
+export REDIS_MIN_CONNECTIONS=20
+export REDIS_CONNECTION_TIMEOUT=5
+export REDIS_IDLE_TIMEOUT=300
+export REDIS_OPERATION_TIMEOUT=5
 
-# Reload PostgreSQL configuration
-echo "🔄 Reloading PostgreSQL configuration..."
-psql -U postgres -d banking_es -c "SELECT pg_reload_conf();"
+# Kafka Optimization
+export KAFKA_OPERATION_TIMEOUT=10
+export KAFKA_MAX_POLL_INTERVAL_MS=300000
+export KAFKA_SESSION_TIMEOUT_MS=10000
+export KAFKA_MAX_POLL_RECORDS=100
 
-echo "🎉 Performance optimizations completed!"
+# Cache Optimization
+export CACHE_OPERATION_TIMEOUT=5
+export CACHE_MAX_SIZE=2000
+export CACHE_DEFAULT_TTL=300
+
+# Projection Optimization
+export PROJECTION_MAX_CONNECTIONS=100
+export PROJECTION_MIN_CONNECTIONS=20
+export PROJECTION_ACQUIRE_TIMEOUT=5
+export PROJECTION_BATCH_SIZE=1000
+export PROJECTION_BATCH_TIMEOUT_MS=25
+
+# Pool Monitoring
+export POOL_HEALTH_CHECK_INTERVAL=10
+export POOL_CONNECTION_TIMEOUT=15
+export POOL_MAX_WAIT_TIME=5
+export POOL_EXHAUSTION_THRESHOLD=0.8
+export POOL_AUTO_SCALING=true
+
+# Deadlock Detection
+export DEADLOCK_CHECK_INTERVAL=5
+export DEADLOCK_OPERATION_TIMEOUT=30
+export MAX_CONCURRENT_OPERATIONS=1000
+export ENABLE_AUTO_RESOLUTION=true
+
+# General Application Settings
+export MAX_CONCURRENT_OPERATIONS=500
+export MAX_REQUESTS_PER_SECOND=2000
+export BATCH_FLUSH_INTERVAL_MS=50
+
+# Logging
+export RUST_LOG=info
+export RUST_BACKTRACE=1
+
+echo "✅ Performance configuration applied:"
+echo "   📊 DB Max Connections: $DB_MAX_CONNECTIONS"
+echo "   ⏱️  DB Operation Timeout: $DB_OPERATION_TIMEOUT"
+echo "   🔄 Batch Size: $DB_BATCH_SIZE"
+echo "   🚀 Max Concurrent Operations: $MAX_CONCURRENT_OPERATIONS"
+echo "   📈 Max Requests/Second: $MAX_REQUESTS_PER_SECOND"
+
 echo ""
-echo "📋 Summary of optimizations:"
-echo "  - Redis: Increased memory, optimized eviction, disabled persistence"
-echo "  - PostgreSQL: Increased connections, optimized buffers, disabled fsync"
-echo "  - Application: Increased account count to 5000, optimized cache and batch sizes"
-echo ""
-echo "🚀 Ready for high-throughput testing!" 
+echo "🎯 Ready to run optimized stress test!"
+echo "   Run: cargo test test_batch_processing_stress --test working_stress_test -- --nocapture" 

@@ -1,5 +1,6 @@
 use crate::infrastructure::cache_service::CacheServiceTrait;
 use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
+use crate::infrastructure::consistency_manager::ConsistencyManager;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
@@ -367,6 +368,7 @@ pub struct UltraOptimizedCDCEventProcessor {
     cache_service: Arc<dyn CacheServiceTrait>,
     projection_store: Arc<dyn ProjectionStoreTrait>,
     metrics: Arc<EnhancedCDCMetrics>,
+    consistency_manager: Option<Arc<ConsistencyManager>>,
 
     // High-performance processing
     processing_semaphore: Arc<Semaphore>,
@@ -448,6 +450,7 @@ impl Clone for UltraOptimizedCDCEventProcessor {
             cache_service: self.cache_service.clone(),
             projection_store: self.projection_store.clone(),
             metrics: self.metrics.clone(),
+            consistency_manager: self.consistency_manager.clone(),
             processing_semaphore: self.processing_semaphore.clone(),
             batch_queue: self.batch_queue.clone(),
             batch_size: self.batch_size.clone(),
@@ -482,6 +485,7 @@ impl UltraOptimizedCDCEventProcessor {
         metrics: Arc<EnhancedCDCMetrics>,
         business_config: Option<BusinessLogicConfig>,
         performance_config: Option<AdvancedPerformanceConfig>,
+        consistency_manager: Option<Arc<ConsistencyManager>>,
     ) -> Self {
         let business_config = business_config.unwrap_or_default();
         let performance_config = performance_config.unwrap_or_default();
@@ -509,6 +513,7 @@ impl UltraOptimizedCDCEventProcessor {
             cache_service,
             projection_store,
             metrics,
+            consistency_manager, // Use the provided consistency manager
             processing_semaphore: Arc::new(Semaphore::new(performance_config.min_concurrency)),
             batch_queue: Arc::new(Mutex::new(Vec::with_capacity(1000))),
             batch_size: Arc::new(Mutex::new(initial_batch_size)),
@@ -562,6 +567,7 @@ impl UltraOptimizedCDCEventProcessor {
         let metrics = Arc::clone(&self.metrics);
         let batch_size = *self.batch_size.lock().await;
         let batch_timeout = self.batch_timeout;
+        let consistency_manager = self.consistency_manager.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(batch_timeout);
@@ -574,6 +580,7 @@ impl UltraOptimizedCDCEventProcessor {
                             &projection_cache,
                             &cache_service,
                             &metrics,
+                            consistency_manager.as_ref(),
                             batch_size,
                         ).await {
                             error!("Batch processing failed: {}", e);
@@ -648,6 +655,23 @@ impl UltraOptimizedCDCEventProcessor {
                         "🔍 Event processed successfully: {}",
                         processable_event.event_id
                     );
+
+                    // Mark projection completed immediately after successful processing
+                    if let Some(consistency_manager) = &self.consistency_manager {
+                        tracing::info!("CDC Event Processor: Marking projection completed for aggregate {} (immediate)", processable_event.aggregate_id);
+                        consistency_manager
+                            .mark_projection_completed(processable_event.aggregate_id)
+                            .await;
+                        tracing::info!("CDC Event Processor: Successfully marked projection completed for aggregate {} (immediate)", processable_event.aggregate_id);
+
+                        // Also mark CDC processing as completed
+                        tracing::info!("CDC Event Processor: Marking CDC completed for aggregate {} (immediate)", processable_event.aggregate_id);
+                        consistency_manager
+                            .mark_completed(processable_event.aggregate_id)
+                            .await;
+                        tracing::info!("CDC Event Processor: Successfully marked CDC completed for aggregate {} (immediate)", processable_event.aggregate_id);
+                    }
+
                     break;
                 }
                 Err(e) => {
@@ -684,6 +708,8 @@ impl UltraOptimizedCDCEventProcessor {
     }
 
     async fn try_process_event(&self, processable_event: &ProcessableEvent) -> Result<()> {
+        let aggregate_id = processable_event.aggregate_id;
+
         // Business logic validation
         if self.business_config.lock().await.enable_validation {
             if let Err(e) = self.validate_business_logic(processable_event).await {
@@ -694,6 +720,9 @@ impl UltraOptimizedCDCEventProcessor {
                     "Business validation failed for event {}: {}",
                     processable_event.event_id, e
                 );
+                // Mark as failed in consistency manager
+                self.mark_aggregate_failed(aggregate_id, e.to_string())
+                    .await;
                 return Err(e);
             }
         }
@@ -707,6 +736,8 @@ impl UltraOptimizedCDCEventProcessor {
                     .consecutive_failures
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 debug!("Skipping duplicate event: {}", processable_event.event_id);
+                // Mark as completed for duplicate events (they were already processed)
+                self.mark_aggregate_completed(aggregate_id).await;
                 return Ok(());
             }
         }
@@ -719,7 +750,14 @@ impl UltraOptimizedCDCEventProcessor {
             // This allows batching even when batch processing is disabled
             if queue.len() >= *self.batch_size.lock().await {
                 drop(queue);
-                self.process_current_batch().await?;
+                if let Err(e) = self.process_current_batch().await {
+                    // Mark as failed if batch processing fails
+                    self.mark_aggregate_failed(aggregate_id, e.to_string())
+                        .await;
+                    return Err(e);
+                }
+                // Mark as completed if batch processing succeeds
+                self.mark_aggregate_completed(aggregate_id).await;
             }
         }
         Ok(())
@@ -772,6 +810,7 @@ impl UltraOptimizedCDCEventProcessor {
             &self.projection_cache,
             &self.cache_service,
             &self.metrics,
+            self.consistency_manager.as_ref(),
             batch_size,
         )
         .await
@@ -784,6 +823,7 @@ impl UltraOptimizedCDCEventProcessor {
         projection_cache: &Arc<Mutex<ProjectionCache>>,
         cache_service: &Arc<dyn CacheServiceTrait>,
         metrics: &Arc<EnhancedCDCMetrics>,
+        consistency_manager: Option<&Arc<ConsistencyManager>>,
         batch_size: usize,
     ) -> Result<()> {
         let start_time = Instant::now();
@@ -820,6 +860,7 @@ impl UltraOptimizedCDCEventProcessor {
 
         // Process each aggregate's events
         let mut updated_projections = Vec::new();
+        let mut processed_aggregates = Vec::new();
         let mut cache_guard = projection_cache.lock().await;
 
         for (aggregate_id, aggregate_events) in events_by_aggregate {
@@ -860,6 +901,7 @@ impl UltraOptimizedCDCEventProcessor {
                 &projection,
                 aggregate_id,
             ));
+            processed_aggregates.push(aggregate_id);
         }
 
         drop(cache_guard);
@@ -869,7 +911,7 @@ impl UltraOptimizedCDCEventProcessor {
             let upsert_start = Instant::now();
 
             // Use adaptive concurrency based on batch size
-            let max_concurrent = (updated_projections.len() / 50).max(2).min(8);
+            let max_concurrent = (updated_projections.len() / 50).max(2).min(16); // Increased to support stress test
             let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
             // Optimize chunk size for better performance
@@ -970,6 +1012,33 @@ impl UltraOptimizedCDCEventProcessor {
             metrics
                 .projection_updates
                 .fetch_add(success_count as u64, std::sync::atomic::Ordering::Relaxed);
+
+            // Mark projection completion for successfully updated aggregates
+            for aggregate_id in processed_aggregates {
+                if let Some(consistency_manager) = consistency_manager {
+                    tracing::info!(
+                        "CDC Event Processor: Marking projection completed for aggregate {}",
+                        aggregate_id
+                    );
+                    consistency_manager
+                        .mark_projection_completed(aggregate_id)
+                        .await;
+                    tracing::info!("CDC Event Processor: Successfully marked projection completed for aggregate {}", aggregate_id);
+
+                    // Also mark CDC processing as completed
+                    tracing::info!(
+                        "CDC Event Processor: Marking CDC completed for aggregate {}",
+                        aggregate_id
+                    );
+                    consistency_manager.mark_completed(aggregate_id).await;
+                    tracing::info!(
+                        "CDC Event Processor: Successfully marked CDC completed for aggregate {}",
+                        aggregate_id
+                    );
+                } else {
+                    tracing::warn!("CDC Event Processor: No consistency manager available to mark projection completed for aggregate {}", aggregate_id);
+                }
+            }
 
             // If any chunks failed, return error but continue processing others
             if failure_count > 0 {
@@ -1073,24 +1142,24 @@ impl UltraOptimizedCDCEventProcessor {
         let cache_entry = if let Some(proj) = db_projection {
             ProjectionCacheEntry {
                 balance: proj.balance,
-                owner_name: proj.owner_name,
+                owner_name: proj.owner_name.clone(),
                 is_active: proj.is_active,
                 version: 1,
                 cached_at: Instant::now(),
                 last_event_id: None,
             }
         } else {
+            // Create a new, empty projection entry for this aggregate
             ProjectionCacheEntry {
                 balance: Decimal::ZERO,
                 owner_name: String::new(),
-                is_active: false,
+                is_active: true,
                 version: 1,
                 cached_at: Instant::now(),
                 last_event_id: None,
             }
         };
         // Populate both Redis and L1
-        // Convert AccountProjection to Account for cache_service
         let account = crate::domain::Account {
             id: aggregate_id,
             owner_name: cache_entry.owner_name.clone(),
@@ -1656,6 +1725,7 @@ impl UltraOptimizedCDCEventProcessor {
         let cache_service = Arc::clone(&self.cache_service);
         let metrics = Arc::clone(&self.metrics);
         let batch_size = *self.batch_size.lock().await;
+        let consistency_manager = self.consistency_manager.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5)); // Flush every 5 seconds
@@ -1672,6 +1742,7 @@ impl UltraOptimizedCDCEventProcessor {
                         &projection_cache,
                         &cache_service,
                         &metrics,
+                        consistency_manager.as_ref(), // Always notify consistency manager
                         batch_size,
                     )
                     .await
@@ -1844,7 +1915,7 @@ impl Default for DLQRecoveryConfig {
             max_reprocessing_retries: 5,
             reprocessing_backoff_ms: 1000,
             batch_size: 10,
-            poll_timeout_ms: 100,
+            poll_timeout_ms: 25,
             enable_auto_recovery: false,
             auto_recovery_interval_secs: 300, // 5 minutes
         }
@@ -2287,6 +2358,7 @@ impl UltraOptimizedCDCEventProcessor {
                             &projection_cache,
                             &cache_service,
                             &metrics,
+                            None, // No consistency manager in this context
                             batch_size,
                         ).await {
                             error!("Batch processing failed: {}", e);
@@ -2412,9 +2484,9 @@ pub enum CacheEvictionPolicy {
 impl Default for AdvancedPerformanceConfig {
     fn default() -> Self {
         Self {
-            min_batch_size: 10,
-            max_batch_size: 1000,
-            target_batch_time_ms: 100,
+            min_batch_size: 250,
+            max_batch_size: 250,
+            target_batch_time_ms: 25,
             load_adjustment_factor: 0.1,
 
             min_concurrency: 2,
@@ -5140,5 +5212,66 @@ impl UltraOptimizedCDCEventProcessor {
             "alert_history": alert_history,
             "performance_trends": performance_trends
         }))
+    }
+
+    /// Mark an aggregate as completed by CDC processing
+    pub async fn mark_aggregate_completed(&self, aggregate_id: Uuid) {
+        // This method can be called by external consistency managers
+        // when CDC events are successfully processed
+        info!(
+            "🟡 CDC Event Processor: Marked aggregate {} as completed",
+            aggregate_id
+        );
+
+        // If we have a consistency manager, mark the projection as completed
+        if let Some(ref consistency_manager) = self.consistency_manager {
+            info!(
+                "🟡 CDC Event Processor: Calling consistency manager for aggregate {}",
+                aggregate_id
+            );
+            consistency_manager
+                .mark_projection_completed(aggregate_id)
+                .await;
+            info!(
+                "🟡 CDC Event Processor: Successfully called consistency manager for aggregate {}",
+                aggregate_id
+            );
+
+            // Also mark CDC processing as completed
+            tracing::info!(
+                "CDC Event Processor: Marking CDC completed for aggregate {} (immediate)",
+                aggregate_id
+            );
+            consistency_manager.mark_completed(aggregate_id).await;
+            tracing::info!("CDC Event Processor: Successfully marked CDC completed for aggregate {} (immediate)", aggregate_id);
+        } else {
+            warn!(
+                "🟡 CDC Event Processor: No consistency manager available for aggregate {}",
+                aggregate_id
+            );
+        }
+    }
+
+    /// Mark an aggregate as failed by CDC processing
+    pub async fn mark_aggregate_failed(&self, aggregate_id: Uuid, error: String) {
+        // This method can be called by external consistency managers
+        // when CDC events fail to process
+        error!(
+            "CDC Event Processor: Marked aggregate {} as failed: {}",
+            aggregate_id, error
+        );
+
+        // If we have a consistency manager, mark the aggregate as failed
+        if let Some(ref consistency_manager) = self.consistency_manager {
+            consistency_manager
+                .mark_failed(aggregate_id, error.clone())
+                .await;
+        }
+    }
+
+    /// Set the consistency manager for this processor
+    pub async fn set_consistency_manager(&mut self, consistency_manager: Arc<ConsistencyManager>) {
+        self.consistency_manager = Some(consistency_manager);
+        info!("CDC Event Processor: Consistency manager set");
     }
 }

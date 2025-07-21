@@ -42,8 +42,31 @@ impl AppConfig {
         };
 
         Self {
+            database_pool_size: std::env::var("DB_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "80".to_string())
+                .parse()
+                .unwrap_or(80),
+            max_concurrent_operations: std::env::var("MAX_CONCURRENT_OPERATIONS")
+                .unwrap_or_else(|_| "200".to_string())
+                .parse()
+                .unwrap_or(200),
+            max_requests_per_second: std::env::var("MAX_REQUESTS_PER_SECOND")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .unwrap_or(1000),
+            batch_flush_interval_ms: std::env::var("BATCH_FLUSH_INTERVAL_MS")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()
+                .unwrap_or(100),
+            cache_size: std::env::var("CACHE_MAX_SIZE")
+                .unwrap_or_else(|_| "5000".to_string())
+                .parse()
+                .unwrap_or(5000),
+            port: std::env::var("PORT")
+                .unwrap_or_else(|_| "3000".to_string())
+                .parse()
+                .unwrap_or(3000),
             data_capture: DataCaptureConfig { method },
-            ..Default::default()
         }
     }
 }
@@ -51,12 +74,30 @@ impl AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            database_pool_size: 10,
-            max_concurrent_operations: 100,
-            max_requests_per_second: 1000,
-            batch_flush_interval_ms: 100,
-            cache_size: 1000,
-            port: 3000,
+            database_pool_size: std::env::var("DB_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "80".to_string())
+                .parse()
+                .unwrap_or(80),
+            max_concurrent_operations: std::env::var("MAX_CONCURRENT_OPERATIONS")
+                .unwrap_or_else(|_| "200".to_string())
+                .parse()
+                .unwrap_or(200),
+            max_requests_per_second: std::env::var("MAX_REQUESTS_PER_SECOND")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .unwrap_or(1000),
+            batch_flush_interval_ms: std::env::var("BATCH_FLUSH_INTERVAL_MS")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()
+                .unwrap_or(100),
+            cache_size: std::env::var("CACHE_MAX_SIZE")
+                .unwrap_or_else(|_| "5000".to_string())
+                .parse()
+                .unwrap_or(5000),
+            port: std::env::var("PORT")
+                .unwrap_or_else(|_| "3000".to_string())
+                .parse()
+                .unwrap_or(3000),
             data_capture: DataCaptureConfig::default(),
         }
     }

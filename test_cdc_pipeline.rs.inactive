@@ -1,0 +1,120 @@
+use banking_es::infrastructure::cdc_debezium::CDCOutboxRepository;
+use banking_es::infrastructure::connection_pool_partitioning::PartitionedPools;
+use sqlx::PgPool;
+use std::sync::Arc;
+use uuid::Uuid;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging
+    tracing_subscriber::fmt::init();
+
+    println!("🔍 Testing CDC Pipeline");
+    println!("======================");
+
+    // Create database pool
+    let database_url = "postgresql://postgres:Francisco1@localhost:5432/banking_es";
+    let pool = PgPool::connect(database_url).await?;
+
+    // Create partitioned pools
+    let partitioned_pools = Arc::new(
+        PartitionedPools::new(
+            database_url.to_string(),
+            10,   // write_pool_max_connections
+            5,    // write_pool_min_connections
+            10,   // read_pool_max_connections
+            5,    // read_pool_min_connections
+            30,   // acquire_timeout_secs
+            300,  // write_idle_timeout_secs
+            300,  // read_idle_timeout_secs
+            3600, // write_max_lifetime_secs
+            3600, // read_max_lifetime_secs
+        )
+        .await?,
+    );
+
+    // Create CDC outbox repository
+    let outbox_repo = Arc::new(CDCOutboxRepository::new(partitioned_pools.clone()));
+
+    // Check current count in kafka_outbox_cdc
+    let current_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM kafka_outbox_cdc")
+        .fetch_one(&pool)
+        .await?;
+
+    println!("📊 Current messages in kafka_outbox_cdc: {}", current_count);
+
+    // Insert a test message into kafka_outbox_cdc
+    let test_id = Uuid::new_v4();
+    let test_aggregate_id = Uuid::new_v4();
+    let test_event_id = Uuid::new_v4();
+
+    println!("📝 Inserting test message with ID: {}", test_id);
+
+    sqlx::query!(
+        r#"
+        INSERT INTO kafka_outbox_cdc (id, aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+        "#,
+        test_id,
+        test_aggregate_id,
+        test_event_id,
+        "TestEvent",
+        b"test payload",
+        "banking-es.public.kafka_outbox_cdc",
+        serde_json::json!({"test": true})
+    )
+    .execute(&pool)
+    .await?;
+
+    println!("✅ Test message inserted successfully");
+
+    // Wait a moment for Debezium to capture the change
+    println!("⏳ Waiting 3 seconds for Debezium to capture the change...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    // Check if the message was processed (should be deleted if processed)
+    let new_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM kafka_outbox_cdc")
+        .fetch_one(&pool)
+        .await?;
+
+    println!(
+        "📊 Messages in kafka_outbox_cdc after processing: {}",
+        new_count
+    );
+
+    // Check if our test message is still there
+    let test_message_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM kafka_outbox_cdc WHERE id = $1)")
+            .bind(test_id)
+            .fetch_one(&pool)
+            .await?;
+
+    if test_message_exists {
+        println!(
+            "⚠️ Test message still exists in kafka_outbox_cdc - CDC processing may not be working"
+        );
+    } else {
+        println!("✅ Test message was processed and removed from kafka_outbox_cdc");
+    }
+
+    // Check if any projections were updated
+    let projection_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM account_projections")
+        .fetch_one(&pool)
+        .await?;
+
+    println!(
+        "📊 Total projections in account_projections: {}",
+        projection_count
+    );
+
+    // Clean up test message if it still exists
+    if test_message_exists {
+        sqlx::query!("DELETE FROM kafka_outbox_cdc WHERE id = $1", test_id)
+            .execute(&pool)
+            .await?;
+        println!("🧹 Cleaned up test message");
+    }
+
+    println!("🎯 CDC Pipeline Test Complete");
+    Ok(())
+}

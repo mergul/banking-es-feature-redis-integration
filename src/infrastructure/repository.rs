@@ -366,8 +366,13 @@ mod tests {
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
         });
 
+        let max_connections = std::env::var("DB_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .unwrap_or(10);
+
         let pool = PgPoolOptions::new()
-            .max_connections(1)
+            .max_connections(max_connections)
             .connect(&database_url)
             .await
             .expect("Failed to create test database pool");

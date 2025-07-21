@@ -1894,58 +1894,6 @@ impl EventStore {
         Ok(())
     }
 
-    // Optimized batch processing configuration
-    pub fn optimized_batch_config() -> EventStoreConfig {
-        EventStoreConfig {
-            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
-            }),
-            max_connections: 100,    // Increased for better concurrency
-            min_connections: 20,     // Increased for better responsiveness
-            acquire_timeout_secs: 5, // Reduced for faster failure detection
-            idle_timeout_secs: 300,  // Reduced for better connection reuse
-            max_lifetime_secs: 1800, // Optimized for performance
-
-            // Optimized batching settings for high throughput
-            batch_size: 500,             // Smaller batches for better responsiveness
-            batch_timeout_ms: 5,         // Faster timeouts for lower latency
-            max_batch_queue_size: 50000, // Increased for high throughput
-            batch_processor_count: 16,   // More processors for better parallelism
-
-            // Snapshot configuration optimized for performance
-            snapshot_threshold: 1000,      // Increased threshold
-            snapshot_interval_secs: 600,   // Longer intervals
-            snapshot_cache_ttl_secs: 3600, // Longer TTL
-            max_snapshots_per_run: 50,     // More snapshots per run
-        }
-    }
-
-    // High-performance configuration for production
-    pub fn high_performance_config() -> EventStoreConfig {
-        EventStoreConfig {
-            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
-            }),
-            max_connections: 200,    // High connection count
-            min_connections: 50,     // High minimum connections
-            acquire_timeout_secs: 3, // Very fast timeout
-            idle_timeout_secs: 180,  // Aggressive connection reuse
-            max_lifetime_secs: 900,  // Shorter lifetime for fresh connections
-
-            // Ultra-optimized batching for maximum throughput
-            batch_size: 1000,             // Large batches for efficiency
-            batch_timeout_ms: 2,          // Very fast timeouts
-            max_batch_queue_size: 100000, // Very large queue
-            batch_processor_count: 32,    // Many processors
-
-            // Aggressive snapshot settings
-            snapshot_threshold: 2000,      // High threshold
-            snapshot_interval_secs: 300,   // Frequent snapshots
-            snapshot_cache_ttl_secs: 7200, // Long TTL
-            max_snapshots_per_run: 100,    // Many snapshots per run
-        }
-    }
-
     // Backward compatibility method for old batch format
     async fn flush_batch(
         pools: &Arc<PartitionedPools>,
@@ -2046,21 +1994,60 @@ impl Default for EventStoreConfig {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
                 "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
             }),
-            max_connections: 50,      // Reduced from 200 to prevent exhaustion
-            min_connections: 10,      // Reduced from 50
-            acquire_timeout_secs: 10, // Increased from 5 for stability
-            idle_timeout_secs: 600,   // Reduced from 1800
-            max_lifetime_secs: 1800,  // Reduced from 3600
+            max_connections: std::env::var("DB_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "80".to_string())
+                .parse()
+                .unwrap_or(80),
+            min_connections: std::env::var("DB_MIN_CONNECTIONS")
+                .unwrap_or_else(|_| "20".to_string())
+                .parse()
+                .unwrap_or(20),
+            acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30),
+            idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()
+                .unwrap_or(600),
+            max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
+                .unwrap_or_else(|_| "1800".to_string())
+                .parse()
+                .unwrap_or(1800),
 
-            // Optimized batching settings for stability
-            batch_size: 1000,            // Reduced from 10000
-            batch_timeout_ms: 10,        // Increased from 1
-            max_batch_queue_size: 10000, // Reduced from 100000
-            batch_processor_count: 8,    // Reduced from 32
-            snapshot_threshold: 500,     // Reduced from 1000
-            snapshot_interval_secs: 300,
-            snapshot_cache_ttl_secs: 1800, // Reduced from 3600
-            max_snapshots_per_run: 20,     // Reduced from 50
+            // Optimized batching settings from environment variables
+            batch_size: std::env::var("DB_BATCH_SIZE")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .unwrap_or(1000),
+            batch_timeout_ms: std::env::var("DB_BATCH_TIMEOUT_MS")
+                .unwrap_or_else(|_| "25".to_string())
+                .parse()
+                .unwrap_or(25),
+            max_batch_queue_size: std::env::var("DB_MAX_BATCH_QUEUE_SIZE")
+                .unwrap_or_else(|_| "10000".to_string())
+                .parse()
+                .unwrap_or(10000),
+            batch_processor_count: std::env::var("DB_BATCH_PROCESSOR_COUNT")
+                .unwrap_or_else(|_| "16".to_string())
+                .parse()
+                .unwrap_or(16),
+            snapshot_threshold: std::env::var("DB_SNAPSHOT_THRESHOLD")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()
+                .unwrap_or(500),
+            snapshot_interval_secs: std::env::var("DB_SNAPSHOT_INTERVAL")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .unwrap_or(300),
+            snapshot_cache_ttl_secs: std::env::var("DB_SNAPSHOT_CACHE_TTL")
+                .unwrap_or_else(|_| "1800".to_string())
+                .parse()
+                .unwrap_or(1800),
+            max_snapshots_per_run: std::env::var("DB_MAX_SNAPSHOTS_PER_RUN")
+                .unwrap_or_else(|_| "20".to_string())
+                .parse()
+                .unwrap_or(20),
         }
     }
 }
@@ -2070,20 +2057,61 @@ impl EventStoreConfig {
     /// This uses an in-memory SQLite database URL and minimal settings.
     pub fn default_in_memory_for_tests() -> Result<Self, anyhow::Error> {
         Ok(Self {
-            database_url: "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string(),
-            max_connections: 5,
-            min_connections: 1,
-            acquire_timeout_secs: 5,
-            idle_timeout_secs: 60,
-            max_lifetime_secs: 300,
-            batch_size: 100,
-            batch_timeout_ms: 10,
-            max_batch_queue_size: 1000,
-            batch_processor_count: 1,
-            snapshot_threshold: 10,
-            snapshot_interval_secs: 60,
-            snapshot_cache_ttl_secs: 300,
-            max_snapshots_per_run: 10,
+            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+            }),
+            max_connections: std::env::var("DB_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "20".to_string())
+                .parse()
+                .unwrap_or(20),
+            min_connections: std::env::var("DB_MIN_CONNECTIONS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
+            acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30),
+            idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()
+                .unwrap_or(600),
+            max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
+                .unwrap_or_else(|_| "1800".to_string())
+                .parse()
+                .unwrap_or(1800),
+            batch_size: std::env::var("DB_BATCH_SIZE")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()
+                .unwrap_or(100),
+            batch_timeout_ms: std::env::var("DB_BATCH_TIMEOUT_MS")
+                .unwrap_or_else(|_| "25".to_string())
+                .parse()
+                .unwrap_or(25),
+            max_batch_queue_size: std::env::var("DB_MAX_BATCH_QUEUE_SIZE")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .unwrap_or(1000),
+            batch_processor_count: std::env::var("DB_BATCH_PROCESSOR_COUNT")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()
+                .unwrap_or(4),
+            snapshot_threshold: std::env::var("DB_SNAPSHOT_THRESHOLD")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+            snapshot_interval_secs: std::env::var("DB_SNAPSHOT_INTERVAL")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()
+                .unwrap_or(60),
+            snapshot_cache_ttl_secs: std::env::var("DB_SNAPSHOT_CACHE_TTL")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .unwrap_or(300),
+            max_snapshots_per_run: std::env::var("DB_MAX_SNAPSHOTS_PER_RUN")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
         })
     }
 }
@@ -2122,9 +2150,17 @@ impl Default for RetryConfig {
 
 impl Default for EventStore {
     fn default() -> Self {
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        });
+        let max_connections = std::env::var("DB_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "80".to_string())
+            .parse()
+            .unwrap_or(80);
+
         let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect_lazy("postgresql://postgres:Francisco1@localhost:5432/banking_es")
+            .max_connections(max_connections)
+            .connect_lazy(&database_url)
             .expect("Failed to connect to database");
         EventStore::new(pool)
     }

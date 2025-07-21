@@ -39,7 +39,10 @@ impl Default for DeadlockConfig {
         Self {
             check_interval: Duration::from_secs(5),
             operation_timeout: Duration::from_secs(30),
-            max_concurrent_operations: 1000,
+            max_concurrent_operations: std::env::var("MAX_CONCURRENT_OPERATIONS")
+                .unwrap_or_else(|_| "200".to_string())
+                .parse()
+                .unwrap_or(200),
             enable_auto_resolution: true,
             log_suspicious_operations: true,
         }

@@ -1,0 +1,125 @@
+use banking_es::{application::services::CQRSAccountService, infrastructure::init};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+#[tokio::test]
+async fn test_minimal_stress() {
+    println!("🔍 Starting Minimal Stress Test");
+    println!("===============================");
+
+    // Initialize services
+    println!("🔧 Initializing services...");
+    let start = Instant::now();
+
+    let service_context = match banking_es::infrastructure::init::init_all_services().await {
+        Ok(ctx) => {
+            println!("✅ Services initialized in {:?}", start.elapsed());
+            ctx
+        }
+        Err(e) => {
+            println!("❌ Service initialization failed: {:?}", e);
+            return;
+        }
+    };
+
+    // Create CQRS service with minimal settings
+    println!("🔧 Creating CQRS service...");
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let cqrs_service = Arc::new(CQRSAccountService::new(
+        service_context.event_store.clone(),
+        service_context.projection_store.clone(),
+        service_context.cache_service.clone(),
+        kafka_config,
+        5, // Very low concurrency
+        5, // Small batch size
+        Duration::from_millis(50),
+        false, // Disable batching
+    ));
+
+    println!("✅ CQRS service created");
+
+    // Test 1: Single account creation
+    println!("📊 Test 1: Single Account Creation");
+    let start = Instant::now();
+
+    let account_result = cqrs_service
+        .create_account("TestUser1".to_string(), Decimal::new(100, 0))
+        .await;
+
+    match account_result {
+        Ok(account_id) => {
+            println!(
+                "✅ Account creation successful: {} in {:?}",
+                account_id,
+                start.elapsed()
+            );
+
+            // Test 2: Single read operation
+            println!("📊 Test 2: Single Read Operation");
+            let start = Instant::now();
+
+            let read_result = cqrs_service.get_account(account_id).await;
+            match read_result {
+                Ok(account) => {
+                    if let Some(acc) = account {
+                        println!(
+                            "✅ Read successful: {} in {:?}",
+                            acc.owner_name,
+                            start.elapsed()
+                        );
+                    } else {
+                        println!("⚠️ Account not found");
+                    }
+                }
+                Err(e) => println!("❌ Read failed: {:?}", e),
+            }
+
+            // Test 3: Single write operation
+            println!("📊 Test 3: Single Write Operation");
+            let start = Instant::now();
+
+            let write_result = cqrs_service
+                .deposit_money(account_id, Decimal::new(50, 0))
+                .await;
+            match write_result {
+                Ok(_) => println!("✅ Write successful in {:?}", start.elapsed()),
+                Err(e) => println!("❌ Write failed: {:?}", e),
+            }
+        }
+        Err(e) => println!("❌ Account creation failed: {:?}", e),
+    }
+
+    // Test 4: Multiple sequential operations
+    println!("📊 Test 4: Multiple Sequential Operations");
+    let start = Instant::now();
+
+    let mut success_count = 0;
+    for i in 0..5 {
+        let account_result = cqrs_service
+            .create_account(format!("TestUser{}", i + 2), Decimal::new(100, 0))
+            .await;
+
+        match account_result {
+            Ok(account_id) => {
+                success_count += 1;
+                println!("  ✅ Created account {}: {}", i + 2, account_id);
+            }
+            Err(e) => {
+                println!("  ❌ Failed to create account {}: {:?}", i + 2, e);
+            }
+        }
+
+        // Small delay between operations
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    println!(
+        "✅ Sequential operations completed: {}/5 successful in {:?}",
+        success_count,
+        start.elapsed()
+    );
+
+    println!("🎯 Minimal stress test completed!");
+}

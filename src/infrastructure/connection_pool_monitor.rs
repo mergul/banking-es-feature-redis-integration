@@ -37,8 +37,14 @@ impl Default for PoolMonitorConfig {
             max_connection_wait_time: Duration::from_secs(5),
             pool_exhaustion_threshold: 0.8,
             enable_auto_scaling: true,
-            max_connections: 100,
-            min_connections: 5,
+            max_connections: std::env::var("DB_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "80".to_string())
+                .parse()
+                .unwrap_or(80),
+            min_connections: std::env::var("DB_MIN_CONNECTIONS")
+                .unwrap_or_else(|_| "20".to_string())
+                .parse()
+                .unwrap_or(20),
         }
     }
 }

@@ -1,0 +1,240 @@
+use banking_es::{
+    application::services::CQRSAccountService,
+    infrastructure::{
+        cdc_debezium::{CDCOutboxRepository, DebeziumConfig},
+        cdc_service_manager::{CDCServiceManager, EnhancedCDCMetrics},
+        init,
+    },
+};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+#[tokio::test]
+async fn test_diagnostic_mixed_operations() {
+    println!("🔍 Diagnostic Test - Mixed Operations");
+    println!("=====================================");
+
+    // Initialize services
+    let service_context = match banking_es::infrastructure::init::init_all_services().await {
+        Ok(ctx) => {
+            println!("✅ Services initialized");
+            ctx
+        }
+        Err(e) => {
+            println!("❌ Service initialization failed: {:?}", e);
+            return;
+        }
+    };
+
+    // Create CQRS service
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let cqrs_service = Arc::new(CQRSAccountService::new(
+        service_context.event_store.clone(),
+        service_context.projection_store.clone(),
+        service_context.cache_service.clone(),
+        kafka_config.clone(),
+        5,  // Low concurrency
+        10, // Small batch size
+        Duration::from_millis(100),
+        true, // Enable write batching
+    ));
+
+    // Start write batching service
+    cqrs_service
+        .start_write_batching()
+        .await
+        .expect("Failed to start write batching");
+    println!("✅ Write batching service started");
+
+    // Create and start CDC service manager
+    println!("🔧 Setting up CDC service manager...");
+    let cdc_outbox_repo = Arc::new(CDCOutboxRepository::new(
+        service_context.event_store.get_partitioned_pools().clone(),
+    ));
+
+    let kafka_producer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())
+            .expect("Failed to create Kafka producer");
+    let kafka_consumer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())
+            .expect("Failed to create Kafka consumer");
+
+    let cdc_config = DebeziumConfig::default();
+    let metrics = Arc::new(EnhancedCDCMetrics::default());
+
+    let mut cdc_service_manager = CDCServiceManager::new(
+        cdc_config,
+        cdc_outbox_repo,
+        kafka_producer_for_cdc,
+        kafka_consumer_for_cdc,
+        service_context.cache_service.clone(),
+        service_context.projection_store.clone(),
+        Some(metrics.clone()),
+        Some(cqrs_service.get_consistency_manager()),
+    )
+    .expect("Failed to create CDC service manager");
+
+    // Start CDC service with timeout
+    println!("🔧 Starting CDC service manager...");
+    match tokio::time::timeout(Duration::from_secs(30), cdc_service_manager.start()).await {
+        Ok(Ok(_)) => {
+            println!("✅ CDC Service Manager started");
+        }
+        Ok(Err(e)) => {
+            println!("❌ Failed to start CDC service: {:?}", e);
+            return;
+        }
+        Err(_) => {
+            println!("❌ CDC service manager start timed out after 30 seconds");
+            return;
+        }
+    }
+
+    // Test 1: Create a single account
+    println!("\n📝 Test 1: Create Account");
+    let account_id = match tokio::time::timeout(
+        Duration::from_secs(10),
+        cqrs_service.create_account("DiagnosticUser".to_string(), Decimal::new(1000, 0)),
+    )
+    .await
+    {
+        Ok(Ok(id)) => {
+            println!("✅ Account created: {}", id);
+            id
+        }
+        Ok(Err(e)) => {
+            println!("❌ Failed to create account: {:?}", e);
+            return;
+        }
+        Err(_) => {
+            println!("❌ Account creation timed out after 10 seconds");
+            return;
+        }
+    };
+
+    // Test 2: Wait for projections
+    println!("\n⏳ Test 2: Wait for projections");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    println!("✅ Waited 5 seconds");
+
+    // Test 3: Try to read account
+    println!("\n📖 Test 3: Read Account");
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        cqrs_service.get_account(account_id),
+    )
+    .await
+    {
+        Ok(Ok(Some(account))) => {
+            println!("✅ Account read successful: balance = {}", account.balance);
+        }
+        Ok(Ok(None)) => {
+            println!("⚠️ Account not found in projections (expected without CDC)");
+        }
+        Ok(Err(e)) => {
+            println!("❌ Read error: {:?}", e);
+        }
+        Err(_) => {
+            println!("❌ Read operation timed out after 10 seconds");
+            return;
+        }
+    }
+
+    // Test 4: Try a deposit
+    println!("\n💰 Test 4: Deposit Money");
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        cqrs_service.deposit_money(account_id, Decimal::new(100, 0)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {
+            println!("✅ Deposit successful");
+        }
+        Ok(Err(e)) => {
+            println!("❌ Deposit error: {:?}", e);
+        }
+        Err(_) => {
+            println!("❌ Deposit operation timed out after 10 seconds");
+            return;
+        }
+    }
+
+    // Test 5: Try a withdraw
+    println!("\n💸 Test 5: Withdraw Money");
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        cqrs_service.withdraw_money(account_id, Decimal::new(50, 0)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {
+            println!("✅ Withdraw successful");
+        }
+        Ok(Err(e)) => {
+            println!("❌ Withdraw error: {:?}", e);
+        }
+        Err(_) => {
+            println!("❌ Withdraw operation timed out after 10 seconds");
+            return;
+        }
+    }
+
+    // Test 6: Try balance check
+    println!("\n💳 Test 6: Balance Check");
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        cqrs_service.get_account_balance(account_id),
+    )
+    .await
+    {
+        Ok(Ok(balance)) => {
+            println!("✅ Balance check successful: {}", balance);
+        }
+        Ok(Err(e)) => {
+            println!("❌ Balance check error: {:?}", e);
+        }
+        Err(_) => {
+            println!("❌ Balance check timed out after 10 seconds");
+            return;
+        }
+    }
+
+    // Test 7: Try active status check
+    println!("\n✅ Test 7: Active Status Check");
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        cqrs_service.is_account_active(account_id),
+    )
+    .await
+    {
+        Ok(Ok(active)) => {
+            println!("✅ Active status check successful: {}", active);
+        }
+        Ok(Err(e)) => {
+            println!("❌ Active status check error: {:?}", e);
+        }
+        Err(_) => {
+            println!("❌ Active status check timed out after 10 seconds");
+            return;
+        }
+    }
+
+    // Cleanup with timeout
+    println!("\n🧹 Test 8: Cleanup");
+    match tokio::time::timeout(Duration::from_secs(10), cdc_service_manager.stop()).await {
+        Ok(Ok(_)) => {
+            println!("✅ CDC service stopped");
+        }
+        Ok(Err(e)) => {
+            println!("⚠️ Warning: Failed to stop CDC service gracefully: {:?}", e);
+        }
+        Err(_) => {
+            println!("⚠️ Warning: CDC service stop timed out after 10 seconds");
+        }
+    }
+
+    println!("🎯 Diagnostic test completed!");
+}

@@ -1,0 +1,351 @@
+use banking_es::{
+    application::services::CQRSAccountService,
+    infrastructure::{
+        cdc_debezium::{CDCOutboxRepository, DebeziumConfig},
+        cdc_service_manager::{CDCServiceManager, EnhancedCDCMetrics},
+        init,
+    },
+};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+#[tokio::test]
+async fn test_high_concurrency_with_mixed_operations() {
+    println!("🚀 High Concurrency Test with Mixed Operations");
+    println!("==============================================");
+
+    // Initialize services
+    let service_context = match banking_es::infrastructure::init::init_all_services().await {
+        Ok(ctx) => {
+            println!("✅ Services initialized");
+            ctx
+        }
+        Err(e) => {
+            println!("❌ Service initialization failed: {:?}", e);
+            return;
+        }
+    };
+
+    // Create CQRS service with high concurrency settings
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let cqrs_service = Arc::new(CQRSAccountService::new(
+        service_context.event_store.clone(),
+        service_context.projection_store.clone(),
+        service_context.cache_service.clone(),
+        kafka_config.clone(),
+        25,                        // High concurrency
+        50,                        // Large batch size
+        Duration::from_millis(50), // Fast batch timeout
+        true,                      // Enable write batching
+    ));
+
+    // Start write batching service
+    cqrs_service
+        .start_write_batching()
+        .await
+        .expect("Failed to start write batching");
+    println!("✅ Write batching service started");
+
+    // Create and start CDC service manager
+    println!("🔧 Setting up CDC service manager...");
+    let cdc_outbox_repo = Arc::new(CDCOutboxRepository::new(
+        service_context.event_store.get_partitioned_pools().clone(),
+    ));
+
+    let kafka_producer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())
+            .expect("Failed to create Kafka producer");
+    let kafka_consumer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())
+            .expect("Failed to create Kafka consumer");
+
+    let cdc_config = DebeziumConfig::default();
+    let metrics = Arc::new(EnhancedCDCMetrics::default());
+
+    let mut cdc_service_manager = CDCServiceManager::new(
+        cdc_config,
+        cdc_outbox_repo,
+        kafka_producer_for_cdc,
+        kafka_consumer_for_cdc,
+        service_context.cache_service.clone(),
+        service_context.projection_store.clone(),
+        Some(metrics.clone()),
+        Some(cqrs_service.get_consistency_manager()),
+    )
+    .expect("Failed to create CDC service manager");
+
+    // Start CDC service
+    println!("🔧 Starting CDC service manager...");
+    cdc_service_manager
+        .start()
+        .await
+        .expect("Failed to start CDC service");
+    println!("✅ CDC Service Manager started");
+
+    // Get the processor with batch processing enabled
+    let processor = cdc_service_manager
+        .get_processor_with_batch_enabled()
+        .await
+        .expect("Failed to get CDC processor");
+    println!("✅ CDC Event Processor with batch processing enabled retrieved");
+
+    // Verify batch processing is enabled
+    let is_batch_running = processor.is_batch_processor_running().await;
+    println!("✅ CDC Batch Processor running: {}", is_batch_running);
+
+    // High concurrency test parameters
+    let num_accounts = 200;
+    let num_workers = 20; // 20 workers for high concurrency
+    let operations_per_worker = 50; // 50 operations per worker
+    let total_operations = num_workers * operations_per_worker;
+
+    println!("📊 High Concurrency Test Configuration:");
+    println!("   Accounts to create: {}", num_accounts);
+    println!("   Workers: {}", num_workers);
+    println!("   Operations per worker: {}", operations_per_worker);
+    println!("   Total operations: {}", total_operations);
+
+    // Phase 1: Create accounts
+    println!("\n📝 Phase 1: Creating {} accounts", num_accounts);
+    let create_start = Instant::now();
+    let mut account_ids = Vec::new();
+
+    for i in 0..num_accounts {
+        match cqrs_service
+            .create_account(format!("HighConcurrencyUser{}", i), Decimal::new(1000, 0))
+            .await
+        {
+            Ok(account_id) => {
+                account_ids.push(account_id);
+                if (i + 1) % 50 == 0 {
+                    println!("  ✅ Created {} accounts", i + 1);
+                }
+            }
+            Err(e) => {
+                println!("  ❌ Failed to create account {}: {:?}", i + 1, e);
+            }
+        }
+    }
+
+    let create_time = create_start.elapsed();
+    println!("✅ Account creation completed in {:?}", create_time);
+    println!(
+        "   Successfully created: {}/{} accounts",
+        account_ids.len(),
+        num_accounts
+    );
+
+    // Wait for projections to catch up
+    println!("⏳ Waiting for projections to update...");
+    tokio::time::sleep(Duration::from_secs(15)).await; // Longer wait for high concurrency
+
+    // Phase 2: High concurrency mixed operations
+    println!("\n🔄 Phase 2: High Concurrency Mixed Operations");
+    let mixed_start = Instant::now();
+
+    let mut handles = Vec::new();
+    let success_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let error_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+    for worker_id in 0..num_workers {
+        let service = cqrs_service.clone();
+        let accounts = account_ids.clone();
+        let success_counter = success_counter.clone();
+        let error_counter = error_counter.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut worker_success = 0;
+            let mut worker_errors = 0;
+
+            for op_id in 0..operations_per_worker {
+                let account_id = accounts[op_id % accounts.len()];
+                let operation_type = op_id % 6; // 0=read, 1=deposit, 2=withdraw, 3=read, 4=balance, 5=active
+
+                match operation_type {
+                    0 | 3 => {
+                        // Read operation
+                        match service.get_account(account_id).await {
+                            Ok(Some(_account)) => {
+                                worker_success += 1;
+                            }
+                            Ok(None) => {
+                                worker_errors += 1;
+                            }
+                            Err(_e) => {
+                                worker_errors += 1;
+                            }
+                        }
+                    }
+                    4 => {
+                        // Balance check operation
+                        match service.get_account_balance(account_id).await {
+                            Ok(_balance) => {
+                                worker_success += 1;
+                            }
+                            Err(_e) => {
+                                worker_errors += 1;
+                            }
+                        }
+                    }
+                    5 => {
+                        // Active status check
+                        match service.is_account_active(account_id).await {
+                            Ok(_active) => {
+                                worker_success += 1;
+                            }
+                            Err(_e) => {
+                                worker_errors += 1;
+                            }
+                        }
+                    }
+                    1 => {
+                        // Deposit operation
+                        match service.deposit_money(account_id, Decimal::new(10, 0)).await {
+                            Ok(_) => {
+                                worker_success += 1;
+                            }
+                            Err(_e) => {
+                                worker_errors += 1;
+                            }
+                        }
+                    }
+                    2 => {
+                        // Withdraw operation
+                        match service.withdraw_money(account_id, Decimal::new(5, 0)).await {
+                            Ok(_) => {
+                                worker_success += 1;
+                            }
+                            Err(_e) => {
+                                worker_errors += 1;
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+
+                // Minimal delay to prevent overwhelming
+                if op_id % 10 == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+
+            success_counter.fetch_add(worker_success, std::sync::atomic::Ordering::Relaxed);
+            error_counter.fetch_add(worker_errors, std::sync::atomic::Ordering::Relaxed);
+
+            (worker_success, worker_errors)
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all workers to complete
+    let mut worker_results = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok(result) => worker_results.push(result),
+            Err(e) => {
+                println!("❌ Worker panicked: {:?}", e);
+                error_counter.fetch_add(
+                    operations_per_worker as u32,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+        }
+    }
+
+    let mixed_time = mixed_start.elapsed();
+    let total_success = success_counter.load(std::sync::atomic::Ordering::Relaxed);
+    let total_errors = error_counter.load(std::sync::atomic::Ordering::Relaxed);
+
+    println!(
+        "✅ High concurrency operations completed in {:?}",
+        mixed_time
+    );
+    println!(
+        "   Successful operations: {}/{} ({:.1}%)",
+        total_success,
+        total_operations,
+        (total_success as f64 / total_operations as f64) * 100.0
+    );
+    println!(
+        "   Failed operations: {}/{} ({:.1}%)",
+        total_errors,
+        total_operations,
+        (total_errors as f64 / total_operations as f64) * 100.0
+    );
+
+    // Performance metrics
+    let total_time = create_start.elapsed();
+    let throughput = total_operations as f64 / total_time.as_secs_f64();
+    let avg_latency = total_time.as_millis() as f64 / total_operations as f64;
+
+    println!("\n📈 High Concurrency Performance Summary:");
+    println!("   Total test time: {:?}", total_time);
+    println!("   Throughput: {:.1} ops/sec", throughput);
+    println!("   Average latency: {:.1} ms/op", avg_latency);
+    println!(
+        "   Success rate: {:.1}%",
+        (total_success as f64 / total_operations as f64) * 100.0
+    );
+
+    // Get service metrics
+    let service_metrics = cqrs_service.get_metrics();
+    println!("\n📊 Service Metrics:");
+    println!(
+        "   Commands processed: {}",
+        service_metrics
+            .commands_processed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "   Commands successful: {}",
+        service_metrics
+            .commands_successful
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "   Queries processed: {}",
+        service_metrics
+            .queries_processed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "   Queries successful: {}",
+        service_metrics
+            .queries_successful
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    // Get CDC metrics
+    let cdc_metrics = cdc_service_manager.get_metrics();
+    println!("\n📊 CDC Pipeline Metrics:");
+    println!(
+        "   Events Processed: {}",
+        cdc_metrics
+            .events_processed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "   Events Failed: {}",
+        cdc_metrics
+            .events_failed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "   Projection Updates: {}",
+        cdc_metrics
+            .projection_updates
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    // Cleanup
+    cdc_service_manager
+        .stop()
+        .await
+        .expect("Failed to stop CDC service");
+    println!("✅ CDC service stopped");
+
+    println!("🎯 High concurrency test completed!");
+}

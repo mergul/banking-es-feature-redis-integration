@@ -40,7 +40,11 @@ impl ServiceContext {
     }
 }
 
-pub async fn init_all_services() -> Result<ServiceContext> {
+pub async fn init_all_services(
+    consistency_manager: Option<
+        Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+    >,
+) -> Result<ServiceContext> {
     info!("Initializing services...");
 
     // Initialize timeout manager
@@ -177,21 +181,21 @@ pub async fn init_all_services() -> Result<ServiceContext> {
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
         }),
         max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "2000".to_string())
+            .unwrap_or_else(|_| "50".to_string())
             .parse()
-            .unwrap_or(2000),
+            .unwrap_or(50),
         min_connections: std::env::var("DB_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "500".to_string())
+            .unwrap_or_else(|_| "10".to_string())
             .parse()
-            .unwrap_or(500),
+            .unwrap_or(10),
         acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
-            .unwrap_or_else(|_| "120".to_string())
+            .unwrap_or_else(|_| "30".to_string())
             .parse()
-            .unwrap_or(120),
+            .unwrap_or(30),
         idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-            .unwrap_or_else(|_| "1200".to_string())
+            .unwrap_or_else(|_| "600".to_string())
             .parse()
-            .unwrap_or(1200),
+            .unwrap_or(600),
         max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
             .unwrap_or_else(|_| "1800".to_string())
             .parse()
@@ -201,9 +205,9 @@ pub async fn init_all_services() -> Result<ServiceContext> {
             .parse()
             .unwrap_or(1000),
         batch_timeout_ms: std::env::var("DB_BATCH_TIMEOUT_MS")
-            .unwrap_or_else(|_| "100".to_string())
+            .unwrap_or_else(|_| "25".to_string())
             .parse()
-            .unwrap_or(100),
+            .unwrap_or(25),
         max_batch_queue_size: std::env::var("DB_MAX_BATCH_QUEUE_SIZE")
             .unwrap_or_else(|_| "10000".to_string())
             .parse()
@@ -325,13 +329,13 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     // Initialize ProjectionStore with optimized config for high throughput
     let mut projection_config = ProjectionConfig {
         max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "500".to_string())
+            .unwrap_or_else(|_| "50".to_string())
             .parse()
-            .unwrap_or(500),
+            .unwrap_or(50),
         min_connections: std::env::var("PROJECTION_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "100".to_string())
+            .unwrap_or_else(|_| "10".to_string())
             .parse()
-            .unwrap_or(100),
+            .unwrap_or(10),
         acquire_timeout_secs: std::env::var("PROJECTION_ACQUIRE_TIMEOUT")
             .unwrap_or_else(|_| "30".to_string())
             .parse()
@@ -365,7 +369,7 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     }
 
     let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> =
-        Arc::new(ProjectionStore::new_with_config(projection_config).await?);
+        Arc::new(ProjectionStore::new_with_config(projection_config, consistency_manager).await?);
 
     // Initialize CacheService with optimized config for high throughput
     let cache_config = CacheConfig {
@@ -620,4 +624,126 @@ pub async fn init_all_services() -> Result<ServiceContext> {
     };
 
     Ok(service_context)
+}
+
+pub async fn init_all_services_with_pool(
+    consistency_manager: Option<
+        Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
+    >,
+    db_pool: sqlx::PgPool,
+) -> anyhow::Result<ServiceContext> {
+    use crate::infrastructure::auth::{AuthConfig, AuthService};
+    use crate::infrastructure::cache_service::{
+        CacheConfig, CacheService, CacheServiceTrait, EvictionPolicy,
+    };
+    use crate::infrastructure::event_store::EventStore;
+    use crate::infrastructure::kafka_abstraction::KafkaConfig;
+    use crate::infrastructure::projections::{
+        ProjectionConfig, ProjectionStore, ProjectionStoreTrait,
+    };
+    use crate::infrastructure::redis_abstraction::{RealRedisClient, RedisPoolConfig};
+    use crate::infrastructure::repository::{AccountRepository, AccountRepositoryTrait};
+    use crate::infrastructure::scaling::{ScalingConfig, ScalingManager};
+    use crate::infrastructure::sharding::{ShardConfig, ShardManager};
+    use crate::infrastructure::user_repository::UserRepository;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    // Use the provided db_pool for all DB-backed services
+    let event_store: Arc<dyn EventStoreTrait + Send + Sync> =
+        Arc::new(EventStore::new(db_pool.clone()));
+    let mut projection_config = ProjectionConfig::default();
+    let rust_env = std::env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string());
+    if rust_env == "test" || rust_env == "development" {
+        projection_config.batch_size = 1;
+        projection_config.batch_timeout_ms = 0;
+    }
+    let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> = Arc::new(
+        ProjectionStore::from_pool_with_config(db_pool.clone(), projection_config),
+    );
+
+    // Redis setup
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+    let redis_client = Arc::new(redis::Client::open(redis_url)?);
+    let redis_pool_config = RedisPoolConfig {
+        min_connections: 20,
+        max_connections: 200,
+        connection_timeout: Duration::from_secs(5),
+        idle_timeout: Duration::from_secs(300),
+    };
+    let redis_client_trait =
+        RealRedisClient::new(redis_client.as_ref().clone(), Some(redis_pool_config));
+
+    // CacheService
+    let cache_config = CacheConfig::default();
+    let cache_service: Arc<dyn CacheServiceTrait + Send + Sync> =
+        Arc::new(CacheService::new(redis_client_trait.clone(), cache_config));
+
+    // UserRepository
+    let user_repository = Arc::new(UserRepository::new(
+        event_store.get_partitioned_pools().clone(),
+    ));
+
+    // AuthService
+    let auth_config = AuthConfig {
+        jwt_secret: std::env::var("JWT_SECRET").unwrap_or_else(|_| "default_secret".to_string()),
+        refresh_token_secret: std::env::var("REFRESH_TOKEN_SECRET")
+            .unwrap_or_else(|_| "default_refresh_secret".to_string()),
+        access_token_expiry: 3600,
+        refresh_token_expiry: 604800,
+        rate_limit_requests: 1000,
+        rate_limit_window: 60,
+        max_failed_attempts: 5,
+        lockout_duration_minutes: 30,
+    };
+    let auth_service = Arc::new(AuthService::new(
+        redis_client.clone(),
+        auth_config,
+        user_repository.clone(),
+    ));
+
+    // AccountRepository
+    let kafka_config = KafkaConfig::default();
+    let account_repository: Arc<dyn AccountRepositoryTrait + Send + Sync> =
+        match AccountRepository::with_kafka_producer(event_store.clone(), kafka_config.clone()) {
+            Ok(repo) => Arc::new(repo),
+            Err(_) => Arc::new(AccountRepository::new(event_store.clone())),
+        };
+
+    // ShardManager
+    let shard_config = ShardConfig {
+        shard_count: 16,
+        rebalance_threshold: 0.2,
+        rebalance_interval: Duration::from_secs(300),
+        lock_timeout: Duration::from_secs(30),
+        lock_retry_interval: Duration::from_millis(100),
+        max_retries: 3,
+    };
+    let shard_manager = Arc::new(ShardManager::new(redis_client_trait.clone(), shard_config));
+
+    // ScalingManager
+    let scaling_config = ScalingConfig {
+        min_instances: 1,
+        max_instances: 5,
+        scale_up_threshold: 0.8,
+        scale_down_threshold: 0.2,
+        cooldown_period: Duration::from_secs(300),
+        health_check_interval: Duration::from_secs(30),
+        instance_timeout: Duration::from_secs(60),
+    };
+    let scaling_manager = Arc::new(ScalingManager::new(
+        redis_client_trait.clone(),
+        scaling_config,
+    ));
+
+    Ok(ServiceContext {
+        event_store,
+        projection_store,
+        cache_service,
+        auth_service,
+        user_repository,
+        account_repository,
+        shard_manager,
+        scaling_manager,
+    })
 }

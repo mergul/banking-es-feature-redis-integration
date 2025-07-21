@@ -42,8 +42,12 @@ impl QueryBus {
         Q: Into<AccountQuery>,
         R: From<QueryResult>,
     {
+        println!("[DEBUG] QueryBus::execute: start");
         let account_query = query.into();
-        let result = self.account_query_handler.handle(account_query).await?;
+        println!("[DEBUG] QueryBus::execute: before handle");
+        let result = self.account_query_handler.handle(account_query).await;
+        println!("[DEBUG] QueryBus::execute: after handle");
+        let result = result?;
         Ok(R::from(result))
     }
 
@@ -140,12 +144,22 @@ impl AccountQueryHandler {
         &self,
         query: AccountQuery,
     ) -> Result<QueryResult, AccountError> {
+        println!("[DEBUG] AccountQueryHandler::get_account_by_id: start");
         let start_time = Instant::now();
 
         match query {
             AccountQuery::GetAccountById { account_id } => {
+                println!(
+                    "[DEBUG] get_account_by_id: before cache lookup for {}",
+                    account_id
+                );
                 // Try cache first
-                if let Ok(Some(cached_account)) = self.cache_service.get_account(account_id).await {
+                let cache_result = self.cache_service.get_account(account_id).await;
+                println!(
+                    "[DEBUG] get_account_by_id: after cache lookup for {} (result: {:?})",
+                    account_id, cache_result
+                );
+                if let Ok(Some(cached_account)) = cache_result {
                     // Increment cache hit metric
                     self.cache_service
                         .get_metrics()
@@ -165,12 +179,17 @@ impl AccountQueryHandler {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+                println!(
+                    "[DEBUG] get_account_by_id: before projection_store.get_account for {}",
+                    account_id
+                );
                 // Cache miss - get from projection store
                 let account = self
                     .projection_store
                     .get_account(account_id)
                     .await
                     .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+                println!("[DEBUG] get_account_by_id: after projection_store.get_account for {} (result: {:?})", account_id, account);
 
                 match account {
                     Some(projection) => {
@@ -492,6 +511,7 @@ impl AccountQueryHandler {
 #[async_trait]
 impl QueryHandler<AccountQuery, QueryResult> for AccountQueryHandler {
     async fn handle(&self, query: AccountQuery) -> Result<QueryResult, AccountError> {
+        println!("[DEBUG] AccountQueryHandler::handle: start");
         match query {
             AccountQuery::GetAccountById { .. } => self.get_account_by_id(query).await,
             AccountQuery::GetAllAccounts => self.get_all_accounts(query).await,

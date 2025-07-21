@@ -96,3 +96,4 @@ toml = "0.8"
 
 [lints.rust]
 warnings = "allow"
+

@@ -1,0 +1,288 @@
+use banking_es::{
+    application::services::CQRSAccountService,
+    infrastructure::{
+        cdc_debezium::{CDCOutboxRepository, DebeziumConfig},
+        cdc_service_manager::{CDCServiceManager, EnhancedCDCMetrics},
+        init,
+    },
+};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+#[tokio::test]
+async fn test_quick_enhanced_with_cdc() {
+    println!("🚀 Quick Enhanced Test with CDC Pipeline");
+    println!("========================================");
+
+    // Initialize services
+    let service_context = match banking_es::infrastructure::init::init_all_services().await {
+        Ok(ctx) => {
+            println!("✅ Services initialized");
+            ctx
+        }
+        Err(e) => {
+            println!("❌ Service initialization failed: {:?}", e);
+            return;
+        }
+    };
+
+    // Create CQRS service
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let cqrs_service = Arc::new(CQRSAccountService::new(
+        service_context.event_store.clone(),
+        service_context.projection_store.clone(),
+        service_context.cache_service.clone(),
+        kafka_config.clone(),
+        10, // Moderate concurrency
+        25, // Batch size
+        Duration::from_millis(100),
+        true, // Enable write batching
+    ));
+
+    // Start write batching service
+    cqrs_service
+        .start_write_batching()
+        .await
+        .expect("Failed to start write batching");
+    println!("✅ Write batching service started");
+
+    // Create and start CDC service manager
+    println!("🔧 Setting up CDC service manager...");
+    let cdc_outbox_repo = Arc::new(CDCOutboxRepository::new(
+        service_context.event_store.get_partitioned_pools().clone(),
+    ));
+
+    let kafka_producer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())
+            .expect("Failed to create Kafka producer");
+    let kafka_consumer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())
+            .expect("Failed to create Kafka consumer");
+
+    let cdc_config = DebeziumConfig::default();
+    let metrics = Arc::new(EnhancedCDCMetrics::default());
+
+    let mut cdc_service_manager = CDCServiceManager::new(
+        cdc_config,
+        cdc_outbox_repo,
+        kafka_producer_for_cdc,
+        kafka_consumer_for_cdc,
+        service_context.cache_service.clone(),
+        service_context.projection_store.clone(),
+        Some(metrics.clone()),
+        Some(cqrs_service.get_consistency_manager()),
+    )
+    .expect("Failed to create CDC service manager");
+
+    // Start CDC service
+    cdc_service_manager
+        .start()
+        .await
+        .expect("Failed to start CDC service");
+    println!("✅ CDC Service Manager started");
+
+    // Test parameters - Small scale for quick test
+    let num_accounts = 10;
+    let num_workers = 5;
+    let operations_per_worker = 10;
+    let total_operations = num_workers * operations_per_worker;
+
+    println!("📊 Test Configuration:");
+    println!("   Accounts: {}", num_accounts);
+    println!("   Workers: {}", num_workers);
+    println!("   Operations per worker: {}", operations_per_worker);
+    println!("   Total operations: {}", total_operations);
+
+    // Phase 1: Create accounts
+    println!("\n📝 Phase 1: Creating {} accounts", num_accounts);
+    let create_start = Instant::now();
+    let mut account_ids = Vec::new();
+
+    for i in 0..num_accounts {
+        match cqrs_service
+            .create_account(format!("QuickTestUser{}", i), Decimal::new(1000, 0))
+            .await
+        {
+            Ok(account_id) => {
+                account_ids.push(account_id);
+                println!("  ✅ Created account {}", i + 1);
+            }
+            Err(e) => {
+                println!("  ❌ Failed to create account {}: {:?}", i + 1, e);
+            }
+        }
+    }
+
+    let create_time = create_start.elapsed();
+    println!("✅ Account creation completed in {:?}", create_time);
+
+    // Wait for projections
+    println!("⏳ Waiting for projections to update...");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Phase 2: Mixed operations
+    println!("\n🔄 Phase 2: Mixed Operations");
+    let mixed_start = Instant::now();
+
+    let mut handles = Vec::new();
+    let success_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let error_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+    for worker_id in 0..num_workers {
+        let service = cqrs_service.clone();
+        let accounts = account_ids.clone();
+        let success_counter = success_counter.clone();
+        let error_counter = error_counter.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut worker_success = 0;
+            let mut worker_errors = 0;
+
+            for op_id in 0..operations_per_worker {
+                let account_id = accounts[op_id % accounts.len()];
+                let operation_type = op_id % 4; // 0=read, 1=deposit, 2=withdraw, 3=balance
+
+                match operation_type {
+                    0 => {
+                        // Read operation
+                        match service.get_account(account_id).await {
+                            Ok(Some(account)) => {
+                                worker_success += 1;
+                                println!(
+                                    "  Worker {}: Read account {} (balance: {})",
+                                    worker_id, account_id, account.balance
+                                );
+                            }
+                            Ok(None) => {
+                                worker_errors += 1;
+                                println!(
+                                    "  Worker {}: Account {} not found",
+                                    worker_id, account_id
+                                );
+                            }
+                            Err(e) => {
+                                worker_errors += 1;
+                                println!("  Worker {}: Read error: {:?}", worker_id, e);
+                            }
+                        }
+                    }
+                    1 => {
+                        // Deposit operation
+                        match service
+                            .deposit_money(account_id, Decimal::new(100, 0))
+                            .await
+                        {
+                            Ok(_) => {
+                                worker_success += 1;
+                                println!(
+                                    "  Worker {}: Deposited 100 to account {}",
+                                    worker_id, account_id
+                                );
+                            }
+                            Err(e) => {
+                                worker_errors += 1;
+                                println!("  Worker {}: Deposit error: {:?}", worker_id, e);
+                            }
+                        }
+                    }
+                    2 => {
+                        // Withdraw operation
+                        match service
+                            .withdraw_money(account_id, Decimal::new(50, 0))
+                            .await
+                        {
+                            Ok(_) => {
+                                worker_success += 1;
+                                println!(
+                                    "  Worker {}: Withdrew 50 from account {}",
+                                    worker_id, account_id
+                                );
+                            }
+                            Err(e) => {
+                                worker_errors += 1;
+                                println!("  Worker {}: Withdraw error: {:?}", worker_id, e);
+                            }
+                        }
+                    }
+                    3 => {
+                        // Balance check
+                        match service.get_account_balance(account_id).await {
+                            Ok(balance) => {
+                                worker_success += 1;
+                                println!(
+                                    "  Worker {}: Balance check for account {}: {}",
+                                    worker_id, account_id, balance
+                                );
+                            }
+                            Err(e) => {
+                                worker_errors += 1;
+                                println!("  Worker {}: Balance error: {:?}", worker_id, e);
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+
+                // Small delay
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            success_counter.fetch_add(worker_success, std::sync::atomic::Ordering::Relaxed);
+            error_counter.fetch_add(worker_errors, std::sync::atomic::Ordering::Relaxed);
+
+            (worker_success, worker_errors)
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all workers
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    let mixed_time = mixed_start.elapsed();
+    let total_success = success_counter.load(std::sync::atomic::Ordering::Relaxed);
+    let total_errors = error_counter.load(std::sync::atomic::Ordering::Relaxed);
+
+    println!("✅ Mixed operations completed in {:?}", mixed_time);
+    println!(
+        "   Successful: {}/{} ({:.1}%)",
+        total_success,
+        total_operations,
+        (total_success as f64 / total_operations as f64) * 100.0
+    );
+    println!(
+        "   Failed: {}/{} ({:.1}%)",
+        total_errors,
+        total_operations,
+        (total_errors as f64 / total_operations as f64) * 100.0
+    );
+
+    // Get CDC metrics
+    let cdc_metrics = cdc_service_manager.get_metrics();
+    println!("\n📊 CDC Pipeline Metrics:");
+    println!(
+        "   Events Processed: {}",
+        cdc_metrics
+            .events_processed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "   Projection Updates: {}",
+        cdc_metrics
+            .projection_updates
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    // Cleanup
+    cdc_service_manager
+        .stop()
+        .await
+        .expect("Failed to stop CDC service");
+    println!("✅ CDC service stopped");
+
+    println!("🎯 Quick enhanced test completed!");
+}

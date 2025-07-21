@@ -8,6 +8,7 @@ pub mod cdc_service_manager;
 pub mod config;
 pub mod connection_pool_monitor;
 pub mod connection_pool_partitioning; // Added connection pool partitioning
+pub mod consistency_manager;
 pub mod deadlock_detector;
 pub mod event_processor;
 pub mod event_store;
@@ -25,6 +26,7 @@ pub mod logging;
 pub mod middleware;
 pub mod outbox; // Added
 pub mod outbox_poller;
+
 pub mod projections;
 pub mod rate_limiter;
 pub mod redis_abstraction;
@@ -36,6 +38,7 @@ pub mod stuck_operation_diagnostic;
 pub mod timeout_manager;
 pub mod troubleshooting;
 pub mod user_repository; // Added for OutboxPollingService
+pub mod write_batching; // Added write batching
 
 pub use auth::*;
 pub use cache_service::*;
@@ -56,6 +59,7 @@ pub use outbox::{
     OutboxMessage, OutboxRepositoryTrait, PersistedOutboxMessage, PostgresOutboxRepository,
 }; // Added PostgresOutboxRepository
 pub use outbox_poller::{OutboxPollerConfig, OutboxPollingService};
+
 pub use projections::ProjectionStore;
 pub use projections::*;
 pub use rate_limiter::*;
@@ -67,3 +71,4 @@ pub use scaling::*;
 pub use sharding::*;
 pub use user_repository::*;
 pub use user_repository::{NewUser, User, UserRepository, UserRepositoryError}; // Added re-export // Added for OutboxPollingService
+pub use write_batching::*; // Added write batching exports

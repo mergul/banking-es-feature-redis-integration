@@ -130,23 +130,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load environment variables
     dotenv::dotenv().ok();
 
+    // Create consistency manager first
+    let consistency_manager = Arc::new(
+        crate::infrastructure::consistency_manager::ConsistencyManager::new(
+            Duration::from_secs(30), // max_wait_time
+            Duration::from_secs(60), // cleanup_interval
+        ),
+    );
+
     // Initialize all services with background tasks
-    let service_context = init_all_services().await?;
+    let service_context = init_all_services(Some(consistency_manager.clone())).await?;
 
     // Create KafkaConfig instance (can be loaded from env or defaults)
     let kafka_config = KafkaConfig::default(); // Or load from env
     let app_config = AppConfig::from_env();
 
     // Initialize CQRS service using the services from ServiceContext
+    let max_concurrent_operations = std::env::var("MAX_CONCURRENT_OPERATIONS")
+        .unwrap_or_else(|_| "200".to_string())
+        .parse()
+        .unwrap_or(200);
+
     let cqrs_service = Arc::new(CQRSAccountService::new(
         service_context.event_store.clone(),
         service_context.projection_store.clone(),
         service_context.cache_service.clone(),
-        kafka_config.clone(),       // Clone KafkaConfig for CQRS service
-        1000,                       // max_concurrent_operations
-        100,                        // batch_size
-        Duration::from_millis(100), // batch_timeout
+        kafka_config.clone(),              // Clone KafkaConfig for CQRS service
+        max_concurrent_operations,         // max_concurrent_operations from environment
+        100,                               // batch_size
+        Duration::from_millis(100),        // batch_timeout
+        true,                              // enable_write_batching
+        Some(consistency_manager.clone()), // Pass the consistency manager
     ));
+
+    // Start write batching service
+    cqrs_service.start_write_batching().await?;
+    info!("Write batching service started");
 
     let mut cdc_service_manager: Option<CDCServiceManager> = None;
 
@@ -172,6 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             service_context.cache_service.clone(),
             service_context.projection_store.clone(),
             None, // <-- pass None for metrics in production
+            Some(cqrs_service.get_consistency_manager()), // Pass consistency manager from CQRS service
         )?;
 
         // Start CDC service
@@ -275,6 +295,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Sending shutdown signal to CDC service...");
         manager.stop().await?;
     }
+
+    // Stop write batching service
+    info!("Stopping write batching service...");
+    cqrs_service.stop_write_batching().await?;
 
     // Add a small delay to allow the services to process the shutdown signal
     tokio::time::sleep(Duration::from_millis(1000)).await;

@@ -38,6 +38,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create Debezium config
     let debezium_config = DebeziumConfig::default();
 
+    // Create ConsistencyManager for metrics collection
+    let consistency_manager = Arc::new(
+        banking_es::infrastructure::consistency_manager::ConsistencyManager::new(
+            std::time::Duration::from_secs(30), // max_wait_time
+            std::time::Duration::from_secs(60), // cleanup_interval
+        ),
+    );
+
     // Create CDC service manager
     let mut cdc_service_manager = CDCServiceManager::new(
         debezium_config,
@@ -47,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cache_service,
         projection_store,
         None,
+        Some(consistency_manager.clone()),
     )?;
 
     // Start the service briefly to get metrics

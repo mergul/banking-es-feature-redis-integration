@@ -1,0 +1,197 @@
+use banking_es::{
+    application::services::CQRSAccountService,
+    infrastructure::{
+        cdc_debezium::{CDCOutboxRepository, DebeziumConfig},
+        cdc_service_manager::{CDCServiceManager, EnhancedCDCMetrics},
+        init,
+    },
+};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::Duration;
+use uuid::Uuid;
+
+#[tokio::test]
+async fn test_debug_projection_sync() {
+    println!("🔍 Debug Projection Synchronization");
+    println!("===================================");
+
+    // Initialize services
+    let service_context = match banking_es::infrastructure::init::init_all_services().await {
+        Ok(ctx) => {
+            println!("✅ Services initialized");
+            ctx
+        }
+        Err(e) => {
+            println!("❌ Service initialization failed: {:?}", e);
+            return;
+        }
+    };
+
+    // Create CQRS service
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let cqrs_service = Arc::new(CQRSAccountService::new(
+        service_context.event_store.clone(),
+        service_context.projection_store.clone(),
+        service_context.cache_service.clone(),
+        kafka_config.clone(),
+        5,  // Low concurrency for debugging
+        10, // Small batch size
+        Duration::from_millis(50),
+        true, // Enable write batching
+    ));
+
+    // Start write batching service
+    cqrs_service
+        .start_write_batching()
+        .await
+        .expect("Failed to start write batching");
+    println!("✅ Write batching service started");
+
+    // Create and start CDC service manager
+    println!("🔧 Setting up CDC service manager...");
+    let cdc_outbox_repo = Arc::new(CDCOutboxRepository::new(
+        service_context.event_store.get_partitioned_pools().clone(),
+    ));
+
+    let kafka_producer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())
+            .expect("Failed to create Kafka producer");
+    let kafka_consumer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())
+            .expect("Failed to create Kafka consumer");
+
+    let cdc_config = DebeziumConfig::default();
+    let metrics = Arc::new(EnhancedCDCMetrics::default());
+
+    let mut cdc_service_manager = CDCServiceManager::new(
+        cdc_config,
+        cdc_outbox_repo,
+        kafka_producer_for_cdc,
+        kafka_consumer_for_cdc,
+        service_context.cache_service.clone(),
+        service_context.projection_store.clone(),
+        Some(metrics.clone()),
+        Some(cqrs_service.get_consistency_manager()),
+    )
+    .expect("Failed to create CDC service manager");
+
+    // Start CDC service with timeout
+    println!("🔧 Starting CDC service manager...");
+    match tokio::time::timeout(Duration::from_secs(30), cdc_service_manager.start()).await {
+        Ok(Ok(_)) => {
+            println!("✅ CDC Service Manager started");
+        }
+        Ok(Err(e)) => {
+            println!("❌ Failed to start CDC service: {:?}", e);
+            return;
+        }
+        Err(_) => {
+            println!("❌ CDC service manager start timed out after 30 seconds");
+            return;
+        }
+    }
+
+    // Test 1: Create a single account
+    println!("\n📝 Test 1: Create Account");
+    let account_id = match cqrs_service
+        .create_account("DebugUser".to_string(), Decimal::new(1000, 0))
+        .await
+    {
+        Ok(id) => {
+            println!("✅ Account created: {}", id);
+            id
+        }
+        Err(e) => {
+            println!("❌ Failed to create account: {:?}", e);
+            return;
+        }
+    };
+
+    // Wait for write batching
+    println!("⏳ Waiting for write batching...");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Test 2: Try to read the account immediately (should fail)
+    println!("\n📖 Test 2: Immediate Read (should fail)");
+    match cqrs_service.get_account(account_id).await {
+        Ok(Some(account)) => {
+            println!(
+                "⚠️ Unexpected success: Found account {}",
+                account.owner_name
+            );
+        }
+        Ok(None) => {
+            println!("✅ Expected: Account not found in projections yet");
+        }
+        Err(e) => {
+            println!("✅ Expected: Read error: {:?}", e);
+        }
+    }
+
+    // Test 3: Wait longer and try again
+    println!("\n⏳ Test 3: Waiting for CDC processing...");
+    for i in 1..=10 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        println!("  Waiting... {}s", i);
+
+        match cqrs_service.get_account(account_id).await {
+            Ok(Some(account)) => {
+                println!(
+                    "✅ Success! Found account after {}s: {}",
+                    i, account.owner_name
+                );
+                break;
+            }
+            Ok(None) => {
+                println!("  Still not found after {}s", i);
+            }
+            Err(e) => {
+                println!("  Still error after {}s: {:?}", i, e);
+            }
+        }
+    }
+
+    // Test 4: Check CDC metrics
+    println!("\n📊 Test 4: CDC Metrics");
+    let cdc_metrics = cdc_service_manager.get_metrics();
+    println!(
+        "  Events Processed: {}",
+        cdc_metrics
+            .events_processed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "  Events Failed: {}",
+        cdc_metrics
+            .events_failed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "  Projection Updates: {}",
+        cdc_metrics
+            .projection_updates
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    // Test 5: Check consistency manager
+    println!("\n🔍 Test 5: Consistency Manager Status");
+    let consistency_manager = cqrs_service.get_consistency_manager();
+    println!("  Consistency Manager: {:?}", consistency_manager);
+
+    // Cleanup
+    println!("\n🧹 Cleanup");
+    match tokio::time::timeout(Duration::from_secs(10), cdc_service_manager.stop()).await {
+        Ok(Ok(_)) => {
+            println!("✅ CDC service stopped");
+        }
+        Ok(Err(e)) => {
+            println!("⚠️ Warning: Failed to stop CDC service gracefully: {:?}", e);
+        }
+        Err(_) => {
+            println!("⚠️ Warning: CDC service stop timed out after 10 seconds");
+        }
+    }
+
+    println!("🎯 Debug test completed!");
+}
