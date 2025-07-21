@@ -80,7 +80,7 @@ pub struct KafkaConfig {
     pub producer_retries: i32,
     pub consumer_max_poll_interval_ms: i32,
     pub consumer_session_timeout_ms: i32,
-    pub consumer_max_poll_records: i32,
+    pub fetch_max_bytes: i32,
     pub security_protocol: String,
     pub sasl_mechanism: String,
     pub ssl_ca_location: Option<String>,
@@ -91,6 +91,10 @@ pub struct KafkaConfig {
 
 impl Default for KafkaConfig {
     fn default() -> Self {
+        let fetch_max_bytes = std::env::var("KAFKA_FETCH_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(5 * 1024 * 1024);
         Self {
             enabled: true, // Enable Kafka by default
             bootstrap_servers: "localhost:9092".to_string(),
@@ -100,7 +104,7 @@ impl Default for KafkaConfig {
             producer_retries: 3,
             consumer_max_poll_interval_ms: 300000,
             consumer_session_timeout_ms: 10000,
-            consumer_max_poll_records: 500,
+            fetch_max_bytes,
             security_protocol: "PLAINTEXT".to_string(),
             sasl_mechanism: "PLAIN".to_string(),
             ssl_ca_location: None,
@@ -202,10 +206,15 @@ impl KafkaProducer {
             });
         }
 
+        // Read batch size from environment variable (default 32768)
+        let batch_size =
+            std::env::var("KAFKA_PRODUCER_BATCH_SIZE").unwrap_or_else(|_| "32768".to_string());
+
         let producer: FutureProducer = ClientConfig::new()
             .set("bootstrap.servers", &config.bootstrap_servers)
             .set("acks", config.producer_acks.to_string())
             .set("retries", config.producer_retries.to_string())
+            .set("batch.size", &batch_size)
             .create()?;
 
         Ok(Self {
@@ -461,6 +470,12 @@ impl KafkaConsumer {
 
         let context = LoggingConsumerContext;
 
+        // Read max poll records from environment variable (default 500)
+        let fetch_max_bytes = std::env::var("KAFKA_FETCH_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(5 * 1024 * 1024);
+
         let consumer: LoggingConsumer = ClientConfig::new()
             .set("bootstrap.servers", &config.bootstrap_servers)
             .set("group.id", &config.group_id)
@@ -479,6 +494,7 @@ impl KafkaConsumer {
             )
             .set("heartbeat.interval.ms", "3000")
             .set("partition.assignment.strategy", "cooperative-sticky")
+            .set("fetch.max.bytes", fetch_max_bytes.to_string())
             .create_with_context(context)?;
 
         tracing::info!(

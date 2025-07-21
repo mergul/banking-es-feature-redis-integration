@@ -2,9 +2,9 @@
 
 echo "🚀 Setting up optimized performance configuration..."
 
-# Database Connection Pool Optimization
-export DB_MAX_CONNECTIONS=200
-export DB_MIN_CONNECTIONS=50
+# Database Pool Optimization
+export DB_MAX_CONNECTIONS=180
+export DB_MIN_CONNECTIONS=40
 export DB_ACQUIRE_TIMEOUT=5
 export DB_IDLE_TIMEOUT=600
 export DB_MAX_LIFETIME=1800
@@ -17,7 +17,7 @@ export LOCK_TIMEOUT=10
 export RETRY_TIMEOUT=3
 
 # Batch Processing Optimization
-export DB_BATCH_SIZE=500
+export DB_BATCH_SIZE=1000
 export DB_BATCH_TIMEOUT_MS=50
 export DB_MAX_BATCH_QUEUE_SIZE=5000
 export DB_BATCH_PROCESSOR_COUNT=8
@@ -33,7 +33,7 @@ export REDIS_OPERATION_TIMEOUT=5
 export KAFKA_OPERATION_TIMEOUT=10
 export KAFKA_MAX_POLL_INTERVAL_MS=300000
 export KAFKA_SESSION_TIMEOUT_MS=10000
-export KAFKA_MAX_POLL_RECORDS=100
+export KAFKA_MAX_POLL_RECORDS=1000
 
 # Cache Optimization
 export CACHE_OPERATION_TIMEOUT=5
@@ -41,11 +41,11 @@ export CACHE_MAX_SIZE=2000
 export CACHE_DEFAULT_TTL=300
 
 # Projection Optimization
-export PROJECTION_MAX_CONNECTIONS=100
-export PROJECTION_MIN_CONNECTIONS=20
+export PROJECTION_MAX_CONNECTIONS=200
+export PROJECTION_MIN_CONNECTIONS=50
 export PROJECTION_ACQUIRE_TIMEOUT=5
 export PROJECTION_BATCH_SIZE=1000
-export PROJECTION_BATCH_TIMEOUT_MS=25
+export PROJECTION_BATCH_TIMEOUT_MS=50
 
 # Pool Monitoring
 export POOL_HEALTH_CHECK_INTERVAL=10
@@ -79,3 +79,9 @@ echo "   📈 Max Requests/Second: $MAX_REQUESTS_PER_SECOND"
 echo ""
 echo "🎯 Ready to run optimized stress test!"
 echo "   Run: cargo test test_batch_processing_stress --test working_stress_test -- --nocapture" 
+
+# Kafka Client Optimization
+export KAFKA_BATCH_SIZE=65536
+export KAFKA_LINGER_MS=10
+export KAFKA_ACKS=1
+export KAFKA_COMPRESSION_TYPE=snappy 

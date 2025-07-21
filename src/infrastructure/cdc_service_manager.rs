@@ -750,7 +750,7 @@ impl CDCServiceManager {
             producer_retries: 3,
             consumer_max_poll_interval_ms: 300000,
             consumer_session_timeout_ms: 10000,
-            consumer_max_poll_records: 500,
+            fetch_max_bytes: 500,
             security_protocol: "PLAINTEXT".to_string(),
             sasl_mechanism: "PLAIN".to_string(),
             ssl_ca_location: None,

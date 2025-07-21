@@ -2485,7 +2485,7 @@ impl Default for AdvancedPerformanceConfig {
     fn default() -> Self {
         Self {
             min_batch_size: 250,
-            max_batch_size: 250,
+            max_batch_size: 500,
             target_batch_time_ms: 25,
             load_adjustment_factor: 0.1,
 

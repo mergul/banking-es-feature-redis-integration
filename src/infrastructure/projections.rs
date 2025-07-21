@@ -124,7 +124,7 @@ impl Default for ProjectionConfig {
                 .unwrap_or_else(|_| "1000".to_string())
                 .parse()
                 .unwrap_or(1000),
-            batch_timeout_ms: 100, // Increased from 25ms to 100ms
+            batch_timeout_ms: 50, // Increased from 25ms to 50ms
             max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
                 .unwrap_or_else(|_| "80".to_string())
                 .parse()

@@ -432,10 +432,10 @@ pub async fn init_all_services(
             .unwrap_or_else(|_| "10000".to_string())
             .parse()
             .unwrap_or(10000),
-        consumer_max_poll_records: std::env::var("KAFKA_CONSUMER_MAX_POLL_RECORDS")
-            .unwrap_or_else(|_| "500".to_string())
-            .parse()
-            .unwrap_or(500),
+        fetch_max_bytes: std::env::var("KAFKA_FETCH_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(5 * 1024 * 1024),
         security_protocol: std::env::var("KAFKA_SECURITY_PROTOCOL")
             .unwrap_or_else(|_| "PLAINTEXT".to_string()),
         sasl_mechanism: std::env::var("KAFKA_SASL_MECHANISM")

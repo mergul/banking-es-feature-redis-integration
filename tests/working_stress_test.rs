@@ -17,6 +17,7 @@ use rust_decimal::Decimal;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use sysinfo::System;
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -51,8 +52,9 @@ async fn setup_stress_test_environment(
         "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
     });
     let db_pool = PgPoolOptions::new()
-        .max_connections(100)
-        .min_connections(20)
+        // Increased pool size to support up to 150 workers, with headroom for system/admin and other services
+        .max_connections(180)
+        .min_connections(40)
         .acquire_timeout(Duration::from_secs(30))
         .connect(&database_url)
         .await?;
@@ -173,9 +175,9 @@ async fn test_batch_processing_stress() {
 
     // Stress test parameters - using conservative worker counts
     let test_phases = vec![
-        ("Light Load", 50, 2, 0.8),   // 50 ops, 2 workers, 80% reads
-        ("Medium Load", 100, 3, 0.7), // 100 ops, 3 workers, 70% reads
-        ("Heavy Load", 200, 5, 0.6),  // 200 ops, 5 workers, 60% reads
+        ("Light Load", 50, 20, 0.8),   // 50 ops, 20 workers, 80% reads
+        ("Medium Load", 100, 50, 0.7), // 100 ops, 50 workers, 70% reads
+        ("Heavy Load", 200, 100, 0.6), // 200 ops, 100 workers, 60% reads
     ];
 
     let mut all_results = Vec::new();
@@ -188,6 +190,77 @@ async fn test_batch_processing_stress() {
 
         let result =
             run_stress_phase(&context.cqrs_service, total_ops, worker_count, read_ratio).await;
+
+        // Print CDC/write metrics for this phase (write phase metrics)
+        println!("\n📊 WRITE PHASE METRICS ({} Phase):", phase_name);
+        let cdc_metrics = &context.metrics;
+        println!(
+            "  - Events Processed: {}",
+            cdc_metrics
+                .events_processed
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        println!(
+            "  - Events Failed: {}",
+            cdc_metrics
+                .events_failed
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        println!(
+            "  - Projection Updates: {}",
+            cdc_metrics
+                .projection_updates
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        println!(
+            "  - Cache Invalidations: {}",
+            cdc_metrics
+                .cache_invalidations
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        // Enhanced metrics
+        println!("\n📈 ENHANCED METRICS ({} Phase):", phase_name);
+        println!(
+            "  - Throughput: {:.2} ops/sec",
+            result.operations_per_second
+        );
+        println!(
+            "  - Avg Latency: {:.2} ms",
+            result.avg_latency.as_secs_f64() * 1000.0
+        );
+        println!(
+            "  - Min Latency: {:.2} ms",
+            result.min_latency.as_secs_f64() * 1000.0
+        );
+        println!(
+            "  - Max Latency: {:.2} ms",
+            result.max_latency.as_secs_f64() * 1000.0
+        );
+        println!(
+            "  - P95 Latency: {:.2} ms",
+            result.p95_latency.as_secs_f64() * 1000.0
+        );
+        println!(
+            "  - P99 Latency: {:.2} ms",
+            result.p99_latency.as_secs_f64() * 1000.0
+        );
+        println!("  - Workers: {}", worker_count);
+        // System metrics
+        let mut sys = System::new_all();
+        sys.refresh_all();
+        let cpu_usage =
+            sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
+        let total_mem = sys.total_memory();
+        let used_mem = sys.used_memory();
+        println!("  - System CPU Usage: {:.2}%", cpu_usage);
+        println!(
+            "  - System Memory Usage: {}/{} MB",
+            used_mem / 1024,
+            total_mem / 1024
+        );
+        // DB pool stats (if accessible)
+        // (Add here if you have access to pool stats)
 
         all_results.push((phase_name.to_string(), result));
 
@@ -691,49 +764,49 @@ async fn test_read_operations_after_writes() {
         }
     };
 
-    // Phase 1: Create accounts and perform write operations
-    println!("\n📝 PHASE 1: Write Operations");
+    // Phase 1: Create accounts and perform batched write operations
+    println!("\n📝 PHASE 1: Write Operations (Batched)");
     println!("=============================");
 
-    let account_count = 50;
+    let account_count = 2000;
     println!("🔧 Creating {} test accounts...", account_count);
     let account_ids = create_test_accounts(&context.cqrs_service, account_count).await;
     println!("✅ Created {} test accounts", account_ids.len());
 
-    // Perform some write operations
-    println!("🔧 Performing write operations...");
+    // Perform batched write operations with 100 parallel tasks
+    println!("🔧 Performing batched write operations with 100 parallel tasks...");
     let write_start = Instant::now();
+    let mut write_handles = Vec::with_capacity(account_count);
+    for (i, &account_id) in account_ids.iter().enumerate() {
+        let cqrs_service = context.cqrs_service.clone();
+        let handle = tokio::spawn(async move {
+            if i % 2 == 0 {
+                cqrs_service
+                    .deposit_money(account_id, Decimal::new(100, 0))
+                    .await
+            } else {
+                cqrs_service
+                    .withdraw_money(account_id, Decimal::new(50, 0))
+                    .await
+            }
+        });
+        write_handles.push(handle);
+    }
     let mut write_success = 0;
     let mut write_failed = 0;
-
-    for (i, &account_id) in account_ids.iter().enumerate() {
-        let operation_result = if i % 2 == 0 {
-            context
-                .cqrs_service
-                .deposit_money(account_id, Decimal::new(100, 0))
-                .await
-        } else {
-            context
-                .cqrs_service
-                .withdraw_money(account_id, Decimal::new(50, 0))
-                .await
-        };
-
-        if operation_result.is_ok() {
-            write_success += 1;
-        } else {
-            write_failed += 1;
+    for (i, handle) in write_handles.into_iter().enumerate() {
+        match handle.await {
+            Ok(Ok(_)) => write_success += 1,
+            Ok(Err(_)) | Err(_) => write_failed += 1,
         }
-
         if i % 10 == 0 {
             println!(
                 "  ✅ Completed {}/{} write operations",
                 i + 1,
-                account_ids.len()
+                account_count
             );
         }
     }
-
     let write_duration = write_start.elapsed();
     println!("✅ Write operations completed:");
     println!("  - Duration: {:?}", write_duration);
@@ -741,108 +814,105 @@ async fn test_read_operations_after_writes() {
     println!("  - Failed: {}", write_failed);
     println!(
         "  - Success Rate: {:.2}%",
-        (write_success as f64 / account_ids.len() as f64) * 100.0
+        (write_success as f64 / account_count as f64) * 100.0
     );
 
-    // Wait for CDC to process all write operations
-    println!("\n⏳ Waiting for CDC to process write operations...");
-    tokio::time::sleep(Duration::from_secs(30)).await;
-    println!("✅ CDC processing wait completed");
+    // Wait for CDC to process all write operations (increased to 30 seconds)
+    let use_consistency_manager_wait = std::env::var("USE_CONSISTENCY_MANAGER_WAIT")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+    if use_consistency_manager_wait {
+        println!("\n⏳ Waiting for per-account projection consistency using Consistency Manager (30s timeout per account)...");
+        let cm = context.cqrs_service.get_consistency_manager();
+        let mut ready_accounts = 0;
+        for &account_id in &account_ids {
+            let start = Instant::now();
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                cm.wait_for_projection_sync(account_id),
+            )
+            .await;
+            match result {
+                Ok(Ok(_)) => {
+                    let waited = start.elapsed();
+                    println!(
+                        "  ✅ Account {} projection ready after {:?}",
+                        account_id, waited
+                    );
+                    ready_accounts += 1;
+                }
+                _ => {
+                    println!(
+                        "  ❌ Timeout waiting for projection for account {}",
+                        account_id
+                    );
+                }
+            }
+        }
+        println!(
+            "✅ Consistency Manager wait completed: {}/{} accounts ready",
+            ready_accounts, account_count
+        );
+    } else {
+        println!("\n⏳ Waiting for CDC to process write operations (30s)...");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        println!("✅ CDC processing wait completed");
+    }
 
-    // Phase 2: Perform read operations
-    println!("\n📖 PHASE 2: Read Operations");
+    // Phase 2: Perform batched read operations with 100 parallel tasks
+    println!("\n📖 PHASE 2: Read Operations (Batched)");
     println!("============================");
 
     let read_start = Instant::now();
+    let mut read_handles = Vec::with_capacity(account_count);
+    for (i, &account_id) in account_ids.iter().enumerate() {
+        let cqrs_service = context.cqrs_service.clone();
+        let handle = tokio::spawn(async move {
+            let op_type = match i % 4 {
+                0 => "get_account",
+                1 => "get_account_balance",
+                2 => "is_account_active",
+                _ => "get_account_transactions",
+            };
+            let start = Instant::now();
+            let result = match i % 4 {
+                0 => cqrs_service.get_account(account_id).await.map(|_| ()),
+                1 => cqrs_service
+                    .get_account_balance(account_id)
+                    .await
+                    .map(|_| ()),
+                2 => cqrs_service.is_account_active(account_id).await.map(|_| ()),
+                _ => cqrs_service
+                    .get_account_transactions(account_id)
+                    .await
+                    .map(|_| ()),
+            };
+            let latency = start.elapsed();
+            (result.is_ok(), latency)
+        });
+        read_handles.push(handle);
+    }
     let mut read_success = 0;
     let mut read_failed = 0;
-    let mut read_latencies = Vec::new();
-
-    // Test different types of read operations
-    for (i, &account_id) in account_ids.iter().enumerate() {
-        let op_type = match i % 4 {
-            0 => "get_account",
-            1 => "get_account_balance",
-            2 => "is_account_active",
-            _ => "get_account_transactions",
-        };
-        println!(
-            "[DEBUG] About to read {} for account {}",
-            op_type, account_id
-        );
-        // Add debug print before CQRS read
-        println!(
-            "[DEBUG] CQRS: Before {} for account {}",
-            op_type, account_id
-        );
-        let read_result = match i % 4 {
-            0 => {
-                let res = context.cqrs_service.get_account(account_id).await;
-                if let Ok(Some(account)) = &res {
-                    println!("  [READ] get_account({}): {:?}", account_id, account);
-                } else if let Ok(None) = &res {
-                    println!("  [READ] get_account({}): None", account_id);
-                }
-                res.map(|_| ())
+    let mut read_latencies = Vec::with_capacity(account_count);
+    for (i, handle) in read_handles.into_iter().enumerate() {
+        match handle.await {
+            Ok((true, latency)) => {
+                read_success += 1;
+                read_latencies.push(latency);
             }
-            1 => {
-                let res = context.cqrs_service.get_account_balance(account_id).await;
-                if let Ok(balance) = &res {
-                    println!("  [READ] get_account_balance({}): {}", account_id, balance);
-                }
-                res.map(|_| ())
+            Ok((false, latency)) => {
+                read_failed += 1;
+                read_latencies.push(latency);
             }
-            2 => {
-                let res = context.cqrs_service.is_account_active(account_id).await;
-                if let Ok(active) = &res {
-                    println!("  [READ] is_account_active({}): {}", account_id, active);
-                }
-                res.map(|_| ())
+            Err(_) => {
+                read_failed += 1;
             }
-            _ => {
-                let res = context
-                    .cqrs_service
-                    .get_account_transactions(account_id)
-                    .await;
-                if let Ok(transactions) = &res {
-                    println!(
-                        "  [READ] get_account_transactions({}): {:?}",
-                        account_id, transactions
-                    );
-                }
-                res.map(|_| ())
-            }
-        };
-        // Add debug print after CQRS read
-        println!("[DEBUG] CQRS: After {} for account {}", op_type, account_id);
-        println!(
-            "[DEBUG] Finished read {} for account {}",
-            op_type, account_id
-        );
-
-        let read_latency = read_start.elapsed();
-        read_latencies.push(read_latency);
-
-        if read_result.is_ok() {
-            read_success += 1;
-        } else {
-            read_failed += 1;
-            println!(
-                "  ❌ Read failed for account {}: {:?}",
-                account_id,
-                read_result.err()
-            );
         }
-
         if i % 10 == 0 {
-            println!(
-                "  ✅ Completed {}/{} read operations",
-                i + 1,
-                account_ids.len()
-            );
+            println!("  ✅ Completed {}/{} read operations", i + 1, account_count);
         }
     }
-
     let read_duration = read_start.elapsed();
 
     // Calculate read statistics
@@ -853,10 +923,8 @@ async fn test_read_operations_after_writes() {
     } else {
         Duration::ZERO
     };
-
     let p95_read_index = (read_latencies.len() as f64 * 0.95) as usize;
     let p99_read_index = (read_latencies.len() as f64 * 0.99) as usize;
-
     let p95_read_latency = read_latencies
         .get(p95_read_index)
         .copied()
@@ -871,17 +939,17 @@ async fn test_read_operations_after_writes() {
     // Print read operation results
     println!("\n📊 READ OPERATIONS RESULTS");
     println!("==========================");
-    println!("  - Total Read Operations: {}", account_ids.len());
+    println!("  - Total Read Operations: {}", account_count);
     println!("  - Successful: {}", read_success);
     println!("  - Failed: {}", read_failed);
     println!(
         "  - Success Rate: {:.2}%",
-        (read_success as f64 / account_ids.len() as f64) * 100.0
+        (read_success as f64 / account_count as f64) * 100.0
     );
     println!("  - Duration: {:?}", read_duration);
     println!(
         "  - Read Ops/sec: {:.2}",
-        account_ids.len() as f64 / read_duration.as_secs_f64()
+        account_count as f64 / read_duration.as_secs_f64()
     );
     println!("  - Avg Read Latency: {:?}", avg_read_latency);
     println!("  - P95 Read Latency: {:?}", p95_read_latency);
