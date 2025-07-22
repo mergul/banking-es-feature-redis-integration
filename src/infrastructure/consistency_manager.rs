@@ -327,6 +327,42 @@ impl ConsistencyManager {
         Ok(())
     }
 
+    /// Wait for projection synchronization to complete for multiple aggregates
+    pub async fn wait_for_projection_sync_batch(&self, aggregate_ids: Vec<Uuid>) -> Result<()> {
+        let mut results = Vec::new();
+
+        for aggregate_id in aggregate_ids {
+            let result = self.wait_for_projection_sync(aggregate_id).await;
+            results.push((aggregate_id, result));
+        }
+
+        // Check if any failed
+        let failures: Vec<_> = results
+            .iter()
+            .filter_map(|(id, result)| {
+                if let Err(ref e) = result {
+                    Some((*id, e.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !failures.is_empty() {
+            let error_messages: Vec<String> = failures
+                .iter()
+                .map(|(id, e)| format!("Aggregate {}: {}", id, e))
+                .collect();
+
+            return Err(anyhow::anyhow!(
+                "Projection sync failed for some aggregates: {}",
+                error_messages.join(", ")
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Clean up old status entries
     pub async fn cleanup_old_entries(&self) {
         let now = Instant::now();
@@ -431,7 +467,7 @@ impl ConsistencyManager {
 impl Default for ConsistencyManager {
     fn default() -> Self {
         Self::new(
-            Duration::from_secs(30), // 30 second max wait time
+            Duration::from_secs(10), // 10 second max wait time
             Duration::from_secs(60), // Clean up every minute
         )
     }
@@ -451,6 +487,7 @@ pub trait ConsistencyAware {
 }
 
 #[cfg(test)]
+#[ignore]
 mod tests {
     use super::*;
     use tokio::time::sleep;

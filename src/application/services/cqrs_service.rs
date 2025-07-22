@@ -207,11 +207,6 @@ impl CQRSAccountService {
                 );
             }
             Err(e) => {
-                // Mark projection as failed (we'll use a placeholder ID for now)
-                let placeholder_id = Uuid::new_v4();
-                self.consistency_manager
-                    .mark_projection_failed(placeholder_id, e.to_string())
-                    .await;
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -626,20 +621,6 @@ impl CQRSAccountService {
         }
 
         result
-    }
-
-    /// Mark an account operation as completed by CDC
-    pub async fn mark_cdc_completed(&self, account_id: Uuid) {
-        self.consistency_manager.mark_completed(account_id).await;
-        info!("Marked account {} as completed by CDC", account_id);
-    }
-
-    /// Mark an account operation as failed by CDC
-    pub async fn mark_cdc_failed(&self, account_id: Uuid, error: String) {
-        self.consistency_manager
-            .mark_failed(account_id, error.clone())
-            .await;
-        error!("Marked account {} as failed by CDC: {}", account_id, error);
     }
 
     /// Get consistency manager for external integration

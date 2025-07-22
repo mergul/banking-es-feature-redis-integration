@@ -20,6 +20,7 @@ use axum::{
 use chrono::Utc;
 use dotenv;
 use redis;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
@@ -133,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create consistency manager first
     let consistency_manager = Arc::new(
         crate::infrastructure::consistency_manager::ConsistencyManager::new(
-            Duration::from_secs(30), // max_wait_time
+            Duration::from_secs(10), // max_wait_time
             Duration::from_secs(60), // cleanup_interval
         ),
     );
@@ -147,9 +148,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize CQRS service using the services from ServiceContext
     let max_concurrent_operations = std::env::var("MAX_CONCURRENT_OPERATIONS")
-        .unwrap_or_else(|_| "200".to_string())
+        .unwrap_or_else(|_| "500".to_string())
         .parse()
-        .unwrap_or(200);
+        .unwrap_or(500);
 
     let cqrs_service = Arc::new(CQRSAccountService::new(
         service_context.event_store.clone(),
@@ -157,8 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_context.cache_service.clone(),
         kafka_config.clone(),              // Clone KafkaConfig for CQRS service
         max_concurrent_operations,         // max_concurrent_operations from environment
-        100,                               // batch_size
-        Duration::from_millis(100),        // batch_timeout
+        500,                               // batch_size
+        Duration::from_millis(50),         // batch_timeout
         true,                              // enable_write_batching
         Some(consistency_manager.clone()), // Pass the consistency manager
     ));

@@ -181,13 +181,13 @@ pub async fn init_all_services(
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
         }),
         max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "50".to_string())
+            .unwrap_or_else(|_| "500".to_string())
             .parse()
-            .unwrap_or(50),
+            .unwrap_or(500),
         min_connections: std::env::var("DB_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "10".to_string())
+            .unwrap_or_else(|_| "250".to_string())
             .parse()
-            .unwrap_or(10),
+            .unwrap_or(250),
         acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
             .unwrap_or_else(|_| "30".to_string())
             .parse()
@@ -269,13 +269,13 @@ pub async fn init_all_services(
             .parse()
             .unwrap_or(true),
         max_connections: std::env::var("POOL_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "100".to_string())
+            .unwrap_or_else(|_| "500".to_string())
             .parse()
-            .unwrap_or(100),
+            .unwrap_or(500),
         min_connections: std::env::var("POOL_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "5".to_string())
+            .unwrap_or_else(|_| "250".to_string())
             .parse()
-            .unwrap_or(5),
+            .unwrap_or(250),
     };
     let connection_pool_monitor = Arc::new(
         crate::infrastructure::connection_pool_monitor::ConnectionPoolMonitor::new(
@@ -329,13 +329,13 @@ pub async fn init_all_services(
     // Initialize ProjectionStore with optimized config for high throughput
     let mut projection_config = ProjectionConfig {
         max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "50".to_string())
+            .unwrap_or_else(|_| "500".to_string())
             .parse()
-            .unwrap_or(50),
+            .unwrap_or(500),
         min_connections: std::env::var("PROJECTION_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "10".to_string())
+            .unwrap_or_else(|_| "250".to_string())
             .parse()
-            .unwrap_or(10),
+            .unwrap_or(250),
         acquire_timeout_secs: std::env::var("PROJECTION_ACQUIRE_TIMEOUT")
             .unwrap_or_else(|_| "30".to_string())
             .parse()
@@ -368,8 +368,9 @@ pub async fn init_all_services(
         projection_config.batch_timeout_ms = 0;
     }
 
-    let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> =
-        Arc::new(ProjectionStore::new_with_config(projection_config, consistency_manager).await?);
+    let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> = Arc::new(
+        ProjectionStore::from_pool_with_config(event_store.get_pool().clone(), projection_config),
+    );
 
     // Initialize CacheService with optimized config for high throughput
     let cache_config = CacheConfig {

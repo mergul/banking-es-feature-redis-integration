@@ -53,8 +53,8 @@ async fn setup_stress_test_environment(
     });
     let db_pool = PgPoolOptions::new()
         // Increased pool size to support up to 150 workers, with headroom for system/admin and other services
-        .max_connections(180)
-        .min_connections(40)
+        .max_connections(1000)
+        .min_connections(500)
         .acquire_timeout(Duration::from_secs(30))
         .connect(&database_url)
         .await?;
@@ -62,7 +62,7 @@ async fn setup_stress_test_environment(
     // Create consistency manager first
     let consistency_manager = Arc::new(
         banking_es::infrastructure::consistency_manager::ConsistencyManager::new(
-            Duration::from_secs(30), // max_wait_time
+            Duration::from_secs(0),  // max_wait_time
             Duration::from_secs(60), // cleanup_interval
         ),
     );
@@ -822,40 +822,27 @@ async fn test_read_operations_after_writes() {
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false);
     if use_consistency_manager_wait {
-        println!("\n⏳ Waiting for per-account projection consistency using Consistency Manager (30s timeout per account)...");
+        println!("\n⏳ Waiting for batch projection consistency using Consistency Manager (batch API, 10s timeout per account)...");
         let cm = context.cqrs_service.get_consistency_manager();
-        let mut ready_accounts = 0;
-        for &account_id in &account_ids {
-            let start = Instant::now();
-            let result = tokio::time::timeout(
-                Duration::from_secs(30),
-                cm.wait_for_projection_sync(account_id),
-            )
-            .await;
-            match result {
-                Ok(Ok(_)) => {
-                    let waited = start.elapsed();
-                    println!(
-                        "  ✅ Account {} projection ready after {:?}",
-                        account_id, waited
-                    );
-                    ready_accounts += 1;
-                }
-                _ => {
-                    println!(
-                        "  ❌ Timeout waiting for projection for account {}",
-                        account_id
-                    );
-                }
+        let batch_result = tokio::time::timeout(
+            Duration::from_secs(10),
+            cm.wait_for_projection_sync_batch(account_ids.clone()),
+        )
+        .await;
+        match batch_result {
+            Ok(Ok(_)) => {
+                println!("✅ All projections in batch are ready");
+            }
+            Ok(Err(e)) => {
+                println!("❌ Some projections failed to sync: {}", e);
+            }
+            Err(_) => {
+                println!("❌ Timeout waiting for batch projection sync");
             }
         }
-        println!(
-            "✅ Consistency Manager wait completed: {}/{} accounts ready",
-            ready_accounts, account_count
-        );
     } else {
-        println!("\n⏳ Waiting for CDC to process write operations (30s)...");
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        println!("\n⏳ Waiting for CDC to process write operations (10s)...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
         println!("✅ CDC processing wait completed");
     }
 

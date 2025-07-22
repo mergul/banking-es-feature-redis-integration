@@ -917,14 +917,30 @@ impl UltraOptimizedCDCEventProcessor {
             // Optimize chunk size for better performance
             let chunk_size = (updated_projections.len() / max_concurrent).max(1);
             let mut tasks = Vec::new();
+            let mut chunk_aggregate_ids: Vec<Vec<Uuid>> = Vec::new();
 
             for chunk in updated_projections.chunks(chunk_size) {
                 let store = projection_store.clone();
                 let chunk_vec = chunk.to_vec();
                 let semaphore = semaphore.clone();
+                let aggregate_ids: Vec<Uuid> = chunk_vec.iter().map(|p| p.id).collect();
+                chunk_aggregate_ids.push(aggregate_ids);
                 tasks.push(tokio::spawn(async move {
                     let _permit = semaphore.acquire().await;
-                    store.upsert_accounts_batch(chunk_vec).await
+                    // Retry up to 3 times
+                    let mut last_err = None;
+                    for _ in 0..3 {
+                        match store.upsert_accounts_batch(chunk_vec.clone()).await {
+                            Ok(res) => {
+                                return Ok::<Result<_, anyhow::Error>, anyhow::Error>(Ok(res))
+                            }
+                            Err(e) => last_err = Some(e),
+                        }
+                    }
+                    Err(anyhow::anyhow!(format!(
+                        "Upsert failed after 3 retries: {}",
+                        last_err.unwrap()
+                    )))
                 }));
             }
 
@@ -983,69 +999,90 @@ impl UltraOptimizedCDCEventProcessor {
                 max_concurrent
             );
 
-            let mut success_count = 0;
-            let mut failure_count = 0;
-
+            // Track per-aggregate upsert results
+            let mut aggregate_upsert_success: std::collections::HashMap<Uuid, bool> =
+                std::collections::HashMap::new();
+            let mut chunk_idx = 0;
             for res in results {
+                let aggregate_ids = &chunk_aggregate_ids[chunk_idx];
+                chunk_idx += 1;
                 match res {
                     Ok(Ok(_)) => {
-                        success_count += 1;
+                        for id in aggregate_ids {
+                            aggregate_upsert_success.insert(*id, true);
+                        }
                     }
                     Ok(Err(e)) => {
-                        failure_count += 1;
                         error!("Failed to bulk update projections in chunk: {}", e);
-                        metrics
-                            .events_failed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        metrics.events_failed.fetch_add(
+                            aggregate_ids.len() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        for id in aggregate_ids {
+                            aggregate_upsert_success.insert(*id, false);
+                        }
                     }
                     Err(e) => {
-                        failure_count += 1;
                         error!("Join error in parallel upsert: {}", e);
-                        metrics
-                            .events_failed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        metrics.events_failed.fetch_add(
+                            aggregate_ids.len() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        for id in aggregate_ids {
+                            aggregate_upsert_success.insert(*id, false);
+                        }
                     }
                 }
             }
 
-            // Update projection updates metric
-            metrics
-                .projection_updates
-                .fetch_add(success_count as u64, std::sync::atomic::Ordering::Relaxed);
-
-            // Mark projection completion for successfully updated aggregates
+            // Mark projection completion or failure for each aggregate
             for aggregate_id in processed_aggregates {
                 if let Some(consistency_manager) = consistency_manager {
-                    tracing::info!(
-                        "CDC Event Processor: Marking projection completed for aggregate {}",
-                        aggregate_id
-                    );
-                    consistency_manager
-                        .mark_projection_completed(aggregate_id)
-                        .await;
-                    tracing::info!("CDC Event Processor: Successfully marked projection completed for aggregate {}", aggregate_id);
+                    if aggregate_upsert_success
+                        .get(&aggregate_id)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        tracing::info!(
+                            "CDC Event Processor: Marking projection completed for aggregate {}",
+                            aggregate_id
+                        );
+                        consistency_manager
+                            .mark_projection_completed(aggregate_id)
+                            .await;
+                        tracing::info!("CDC Event Processor: Successfully marked projection completed for aggregate {}", aggregate_id);
 
-                    // Also mark CDC processing as completed
-                    tracing::info!(
-                        "CDC Event Processor: Marking CDC completed for aggregate {}",
-                        aggregate_id
-                    );
-                    consistency_manager.mark_completed(aggregate_id).await;
-                    tracing::info!(
-                        "CDC Event Processor: Successfully marked CDC completed for aggregate {}",
-                        aggregate_id
-                    );
+                        // Also mark CDC processing as completed
+                        tracing::info!(
+                            "CDC Event Processor: Marking CDC completed for aggregate {}",
+                            aggregate_id
+                        );
+                        consistency_manager.mark_completed(aggregate_id).await;
+                        tracing::info!(
+                            "CDC Event Processor: Successfully marked CDC completed for aggregate {}",
+                            aggregate_id
+                        );
+                    } else {
+                        let err_msg = "DB upsert failed after 3 retries".to_string();
+                        tracing::warn!(
+                            "CDC Event Processor: Marking projection failed for aggregate {}: {}",
+                            aggregate_id,
+                            err_msg
+                        );
+                        consistency_manager
+                            .mark_projection_failed(aggregate_id, err_msg.clone())
+                            .await;
+                        consistency_manager.mark_failed(aggregate_id, err_msg).await;
+                    }
                 } else {
-                    tracing::warn!("CDC Event Processor: No consistency manager available to mark projection completed for aggregate {}", aggregate_id);
+                    tracing::warn!("CDC Event Processor: No consistency manager available to mark projection completed/failed for aggregate {}", aggregate_id);
                 }
             }
 
             // If any chunks failed, return error but continue processing others
-            if failure_count > 0 {
+            if aggregate_upsert_success.values().any(|&v| !v) {
                 return Err(anyhow::anyhow!(
-                    "{} out of {} projection update chunks failed",
-                    failure_count,
-                    success_count + failure_count
+                    "Some projection update chunks failed (see logs for details)"
                 ));
             }
         }

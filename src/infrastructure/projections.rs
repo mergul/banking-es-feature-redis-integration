@@ -97,8 +97,6 @@ pub struct ProjectionStore {
     cache_version: Arc<std::sync::atomic::AtomicU64>,
     metrics: Arc<ProjectionMetrics>,
     config: ProjectionConfig,
-    consistency_manager:
-        Option<Arc<crate::infrastructure::consistency_manager::ConsistencyManager>>,
 }
 
 #[derive(Debug, Clone)]
@@ -270,16 +268,6 @@ impl ProjectionStore {
     }
 
     pub fn from_pools_with_config(pools: Arc<PartitionedPools>, config: ProjectionConfig) -> Self {
-        Self::from_pools_with_config_and_consistency_manager(pools, config, None)
-    }
-
-    pub fn from_pools_with_config_and_consistency_manager(
-        pools: Arc<PartitionedPools>,
-        config: ProjectionConfig,
-        consistency_manager: Option<
-            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
-        >,
-    ) -> Self {
         let account_cache = Arc::new(RwLock::new(HashMap::new()));
         let transaction_cache = Arc::new(RwLock::new(HashMap::new()));
         let (update_sender, update_receiver) = mpsc::unbounded_channel();
@@ -289,7 +277,6 @@ impl ProjectionStore {
         // Clone before move
         let processor_cache_version = cache_version.clone();
         let processor_metrics = metrics.clone();
-        let processor_consistency_manager = consistency_manager.clone();
 
         let store = Self {
             pools: pools.clone(),
@@ -299,7 +286,6 @@ impl ProjectionStore {
             cache_version,
             metrics,
             config: config.clone(),
-            consistency_manager,
         };
 
         // Start background processor
@@ -316,7 +302,6 @@ impl ProjectionStore {
                 processor_cache_version,
                 processor_metrics,
                 processor_config,
-                processor_consistency_manager,
             )
             .await;
         });
@@ -328,12 +313,7 @@ impl ProjectionStore {
         store
     }
 
-    pub async fn new_with_config(
-        config: ProjectionConfig,
-        consistency_manager: Option<
-            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
-        >,
-    ) -> Result<Self> {
+    pub async fn new_with_config(config: ProjectionConfig) -> Result<Self> {
         panic!("ProjectionStore::new_with_config is not supported. Please use ProjectionStore::from_pool_with_config(pool, config) and pass a shared PgPool instance.");
     }
 
@@ -649,9 +629,6 @@ impl ProjectionStore {
         cache_version: Arc<std::sync::atomic::AtomicU64>,
         metrics: Arc<ProjectionMetrics>,
         mut config: ProjectionConfig,
-        consistency_manager: Option<
-            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
-        >,
     ) {
         // Force batch timeout to 50ms for test/debug
         config.batch_timeout_ms = 50;
@@ -693,7 +670,6 @@ impl ProjectionStore {
                             &transaction_cache,
                             &cache_version,
                             &metrics,
-                            consistency_manager.clone(),
                         ).await {
                             error!("[ProjectionStore] Failed to flush batches: {} (ids={:?})", e, ids);
                         }
@@ -711,7 +687,6 @@ impl ProjectionStore {
                             &transaction_cache,
                             &cache_version,
                             &metrics,
-                            consistency_manager.clone(),
                         ).await {
                             error!("[ProjectionStore] Failed to flush batches: {} (ids={:?})", e, ids);
                         }
@@ -728,9 +703,6 @@ impl ProjectionStore {
         cache_version: Arc<std::sync::atomic::AtomicU64>,
         metrics: Arc<ProjectionMetrics>,
         mut config: ProjectionConfig,
-        consistency_manager: Option<
-            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
-        >,
     ) {
         // Panic hook for batch processor
         std::panic::set_hook(Box::new(|panic_info| {
@@ -779,7 +751,6 @@ impl ProjectionStore {
                                     &transaction_cache,
                                     &cache_version,
                                     &metrics,
-                                    consistency_manager.clone(),
                                 ).await {
                                     tracing::error!("[ProjectionStore] FLUSH ERROR: {}", e);
                                     metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -803,7 +774,6 @@ impl ProjectionStore {
                                     &transaction_cache,
                                     &cache_version,
                                     &metrics,
-                                    consistency_manager.clone(),
                                 ).await {
                                     tracing::error!("[ProjectionStore] FINAL FLUSH ERROR: {}", e);
                                     metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -830,7 +800,6 @@ impl ProjectionStore {
                             &transaction_cache,
                             &cache_version,
                             &metrics,
-                            consistency_manager.clone(),
                         ).await {
                             tracing::error!("[ProjectionStore] FLUSH ERROR (timeout): {}", e);
                             metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -853,9 +822,6 @@ impl ProjectionStore {
         transaction_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
         cache_version: &Arc<std::sync::atomic::AtomicU64>,
         metrics: &Arc<ProjectionMetrics>,
-        consistency_manager: Option<
-            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
-        >,
     ) -> Result<()> {
         let write_pool = pools.select_pool(OperationType::Write);
         let mut tx = write_pool.begin().await?;
@@ -910,22 +876,6 @@ impl ProjectionStore {
             metrics
                 .batch_updates
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            // Notify consistency manager about completed projections
-            if let Some(cm) = consistency_manager.as_ref() {
-                for account_id in ids.iter() {
-                    tracing::info!(
-                        "[ProjectionStore] Notifying consistency manager for account {} (projection+cdc)",
-                        account_id
-                    );
-                    cm.mark_projection_completed(*account_id).await;
-                    cm.mark_completed(*account_id).await;
-                    tracing::info!(
-                        "[ProjectionStore] Notified consistency manager for account {} (projection+cdc)",
-                        account_id
-                    );
-                }
-            }
         }
 
         // Process transaction updates
@@ -966,9 +916,6 @@ impl ProjectionStore {
         transaction_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
         cache_version: &Arc<std::sync::atomic::AtomicU64>,
         metrics: &Arc<ProjectionMetrics>,
-        consistency_manager: Option<
-            Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
-        >,
     ) -> Result<()> {
         let flush_start = std::time::Instant::now();
 
@@ -1029,18 +976,6 @@ impl ProjectionStore {
             metrics
                 .batch_updates
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            // Notify consistency manager about completed projections
-            if let Some(cm) = consistency_manager.as_ref() {
-                for account_id in ids {
-                    cm.mark_projection_completed(account_id).await;
-                    cm.mark_completed(account_id).await;
-                    tracing::info!(
-                        "[ProjectionStore] Notified consistency manager for account {} (optimized)",
-                        account_id
-                    );
-                }
-            }
 
             let account_time = account_start.elapsed().as_millis() as u64;
             tracing::debug!(

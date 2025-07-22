@@ -38,13 +38,13 @@ impl Default for PoolMonitorConfig {
             pool_exhaustion_threshold: 0.8,
             enable_auto_scaling: true,
             max_connections: std::env::var("DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "80".to_string())
+                .unwrap_or_else(|_| "300".to_string())
                 .parse()
-                .unwrap_or(80),
+                .unwrap_or(300),
             min_connections: std::env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "20".to_string())
+                .unwrap_or_else(|_| "150".to_string())
                 .parse()
-                .unwrap_or(20),
+                .unwrap_or(150),
         }
     }
 }
