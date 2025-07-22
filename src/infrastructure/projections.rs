@@ -624,435 +624,97 @@ impl ProjectionStore {
     async fn update_processor(
         pools: Arc<PartitionedPools>,
         mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
-        account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
-        transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
-        cache_version: Arc<std::sync::atomic::AtomicU64>,
-        metrics: Arc<ProjectionMetrics>,
-        mut config: ProjectionConfig,
+        _account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
+        _transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
+        _cache_version: Arc<std::sync::atomic::AtomicU64>,
+        _metrics: Arc<ProjectionMetrics>,
+        config: ProjectionConfig,
     ) {
-        // Force batch timeout to 50ms for test/debug
-        config.batch_timeout_ms = 50;
         let mut account_batch = Vec::with_capacity(config.batch_size);
         let mut transaction_batch = Vec::with_capacity(config.batch_size);
         let mut interval = tokio::time::interval(Duration::from_millis(config.batch_timeout_ms));
-
-        info!("[ProjectionStore] Background update_processor started with batch_size={} batch_timeout_ms={}", config.batch_size, config.batch_timeout_ms);
 
         loop {
             tokio::select! {
                 Some(update) = receiver.recv() => {
-            match update {
-                ProjectionUpdate::AccountBatch(accounts) => {
-                            let ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
-                    tracing::info!(
-                                "[ProjectionStore] Received AccountBatch of size {}: ids={:?}",
-                                accounts.len(),
-                                ids
-                    );
-                    account_batch.extend(accounts);
-                }
-                ProjectionUpdate::TransactionBatch(transactions) => {
-                    tracing::info!(
-                        "[ProjectionStore] Received TransactionBatch of size {}",
-                        transactions.len()
-                    );
-                    transaction_batch.extend(transactions);
-                }
-            }
-                    if account_batch.len() >= config.batch_size || transaction_batch.len() >= config.batch_size {
-                        let ids: Vec<_> = account_batch.iter().map(|a| a.id).collect();
-                        tracing::info!("[ProjectionStore] Flushing batches due to size: account_batch_size={}, transaction_batch_size={}, account_ids={:?}", account_batch.len(), transaction_batch.len(), ids);
-                        if let Err(e) = Self::flush_batches(
-                            &pools,
-                            &mut account_batch,
-                            &mut transaction_batch,
-                            &account_cache,
-                            &transaction_cache,
-                            &cache_version,
-                            &metrics,
-                        ).await {
-                            error!("[ProjectionStore] Failed to flush batches: {} (ids={:?})", e, ids);
+                    match update {
+                        ProjectionUpdate::AccountBatch(accounts) => {
+                            account_batch.extend(accounts);
+                        }
+                        ProjectionUpdate::TransactionBatch(transactions) => {
+                            transaction_batch.extend(transactions);
                         }
                     }
                 }
                 _ = interval.tick() => {
-                    if !account_batch.is_empty() || !transaction_batch.is_empty() {
-                        let ids: Vec<_> = account_batch.iter().map(|a| a.id).collect();
-                        tracing::info!("[ProjectionStore] Flushing batches due to timeout: account_batch_size={}, transaction_batch_size={}, account_ids={:?}", account_batch.len(), transaction_batch.len(), ids);
-                        if let Err(e) = Self::flush_batches(
-                            &pools,
-                            &mut account_batch,
-                            &mut transaction_batch,
-                            &account_cache,
-                            &transaction_cache,
-                            &cache_version,
-                            &metrics,
-                        ).await {
-                            error!("[ProjectionStore] Failed to flush batches: {} (ids={:?})", e, ids);
-                        }
+                    if !account_batch.is_empty() {
+                        let batch_to_process = std::mem::take(&mut account_batch);
+                        let pools = pools.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = Self::upsert_accounts_batch_parallel(&pools, batch_to_process).await {
+                                error!("[ProjectionStore] Error upserting account batch: {}", e);
+                            }
+                        });
+                    }
+                    if !transaction_batch.is_empty() {
+                        let batch_to_process = std::mem::take(&mut transaction_batch);
+                        let pools = pools.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = Self::insert_transactions_batch_parallel(&pools, batch_to_process).await {
+                                error!("[ProjectionStore] Error inserting transaction batch: {}", e);
+                            }
+                        });
                     }
                 }
             }
         }
     }
-    async fn batch_update_processor(
-        pools: Arc<PartitionedPools>,
-        mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
-        account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
-        transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
-        cache_version: Arc<std::sync::atomic::AtomicU64>,
-        metrics: Arc<ProjectionMetrics>,
-        mut config: ProjectionConfig,
-    ) {
-        // Panic hook for batch processor
-        std::panic::set_hook(Box::new(|panic_info| {
-            eprintln!(
-                "[ProjectionStore] PANIC in batch_update_processor: {:?}",
-                panic_info
-            );
-        }));
-        tracing::info!(
-            "[ProjectionStore] Optimized batch_update_processor STARTED (only one instance should run)"
-        );
 
-        // Optimized batch timeout for better performance
-        config.batch_timeout_ms = 25; // Reduced from 50ms for lower latency
-        let mut account_batch = Vec::with_capacity(config.batch_size);
-        let mut transaction_batch = Vec::with_capacity(config.batch_size);
-        let mut interval = tokio::time::interval(Duration::from_millis(config.batch_timeout_ms));
-        let mut last_flush_time = std::time::Instant::now();
-
-        loop {
-            tokio::select! {
-                maybe_update = receiver.recv() => {
-                    match maybe_update {
-                        Some(update) => {
-                            match update {
-                                ProjectionUpdate::AccountBatch(accounts) => {
-                                    tracing::debug!("[ProjectionStore] Received AccountBatch: {} accounts", accounts.len());
-                                    account_batch.extend(accounts);
-                                }
-                                ProjectionUpdate::TransactionBatch(transactions) => {
-                                    tracing::debug!("[ProjectionStore] Received TransactionBatch: {} transactions", transactions.len());
-                                    transaction_batch.extend(transactions);
-                                }
-                            }
-
-                            // Flush if batch size reached (optimized threshold)
-                            if account_batch.len() >= config.batch_size || transaction_batch.len() >= config.batch_size {
-                                tracing::info!("[ProjectionStore] FLUSH (size threshold): accounts={}, transactions={}",
-                                    account_batch.len(), transaction_batch.len());
-
-                                if let Err(e) = Self::flush_batches_optimized(
-                                    &pools,
-                                    &mut account_batch,
-                                    &mut transaction_batch,
-                                    &account_cache,
-                                    &transaction_cache,
-                                    &cache_version,
-                                    &metrics,
-                                ).await {
-                                    tracing::error!("[ProjectionStore] FLUSH ERROR: {}", e);
-                                    metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                } else {
-                                    tracing::info!("[ProjectionStore] FLUSH SUCCESS");
-                                    last_flush_time = std::time::Instant::now();
-                                }
-                            }
-                        }
-                        None => {
-                            tracing::warn!("[ProjectionStore] Receiver channel closed, exiting loop");
-                            // Final flush before exit
-                            if !account_batch.is_empty() || !transaction_batch.is_empty() {
-                                tracing::info!("[ProjectionStore] FINAL FLUSH: accounts={}, transactions={}",
-                                    account_batch.len(), transaction_batch.len());
-                                if let Err(e) = Self::flush_batches_optimized(
-                                    &pools,
-                                    &mut account_batch,
-                                    &mut transaction_batch,
-                                    &account_cache,
-                                    &transaction_cache,
-                                    &cache_version,
-                                    &metrics,
-                                ).await {
-                                    tracing::error!("[ProjectionStore] FINAL FLUSH ERROR: {}", e);
-                                    metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                } else {
-                                    tracing::info!("[ProjectionStore] FINAL FLUSH SUCCESS");
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-                _ = interval.tick() => {
-                    // Flush on timeout only if we have data and enough time has passed
-                    if (!account_batch.is_empty() || !transaction_batch.is_empty()) &&
-                       last_flush_time.elapsed() > Duration::from_millis(config.batch_timeout_ms) {
-                        tracing::info!("[ProjectionStore] FLUSH (timeout): accounts={}, transactions={}",
-                            account_batch.len(), transaction_batch.len());
-
-                        if let Err(e) = Self::flush_batches_optimized(
-                            &pools,
-                            &mut account_batch,
-                            &mut transaction_batch,
-                            &account_cache,
-                            &transaction_cache,
-                            &cache_version,
-                            &metrics,
-                        ).await {
-                            tracing::error!("[ProjectionStore] FLUSH ERROR (timeout): {}", e);
-                            metrics.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        } else {
-                            tracing::info!("[ProjectionStore] FLUSH SUCCESS (timeout)");
-                            last_flush_time = std::time::Instant::now();
-                        }
-                    }
-                }
-            }
-        }
-        tracing::info!("[ProjectionStore] Optimized batch_update_processor EXITED");
-    }
-
-    async fn flush_batches(
+    async fn upsert_accounts_batch_parallel(
         pools: &Arc<PartitionedPools>,
-        account_batch: &mut Vec<AccountProjection>,
-        transaction_batch: &mut Vec<TransactionProjection>,
-        account_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
-        transaction_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
-        cache_version: &Arc<std::sync::atomic::AtomicU64>,
-        metrics: &Arc<ProjectionMetrics>,
+        accounts: Vec<AccountProjection>,
     ) -> Result<()> {
-        let write_pool = pools.select_pool(OperationType::Write);
-        let mut tx = write_pool.begin().await?;
+        let tasks: Vec<_> = accounts
+            .into_iter()
+            .map(|account| {
+                let pool = pools.select_pool(OperationType::Write).clone();
+                tokio::spawn(async move {
+                    let mut tx = pool.begin().await?;
+                    Self::bulk_upsert_accounts(&mut tx, &[account]).await?;
+                    tx.commit().await?;
+                    Ok::<(), anyhow::Error>(())
+                })
+            })
+            .collect();
 
-        // Process account updates
-        if !account_batch.is_empty() {
-            use std::collections::HashMap;
-            let mut deduped = HashMap::new();
-            for acc in account_batch.iter() {
-                deduped.insert(acc.id, acc.clone());
-            }
-            let mut unique_accounts: Vec<_> = deduped.into_values().collect();
-            let ids: Vec<_> = unique_accounts.iter().map(|a| a.id).collect();
-            tracing::info!(
-                "[ProjectionStore] Upserting {} accounts (deduped from {}): ids={:?}",
-                unique_accounts.len(),
-                account_batch.len(),
-                ids
-            );
-            if let Err(e) = Self::bulk_upsert_accounts(&mut tx, &unique_accounts).await {
-                let _ = tx.rollback().await;
-                error!(
-                    "[ProjectionStore] Error in bulk_upsert_accounts: {} (ids={:?})",
-                    e, ids
-                );
-                return Err(e.into());
-            }
-            tracing::info!(
-                "[ProjectionStore] Successfully upserted accounts: ids={:?}",
-                ids
-            );
-
-            // Update cache
-            {
-                let mut cache = account_cache.write().await;
-                let version = cache_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                for account in unique_accounts.drain(..) {
-                    cache.insert(
-                        account.id,
-                        CacheEntry {
-                            data: account,
-                            last_accessed: Instant::now(),
-                            version,
-                            ttl: Duration::from_secs(300), // 5 minutes TTL
-                        },
-                    );
-                }
-            }
-
-            account_batch.clear();
-
-            metrics
-                .batch_updates
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for task in tasks {
+            task.await??;
         }
 
-        // Process transaction updates
-        if !transaction_batch.is_empty() {
-            tracing::info!(
-                "[ProjectionStore] Inserting {} transactions",
-                transaction_batch.len()
-            );
-            if let Err(e) = Self::bulk_insert_transactions(&mut tx, transaction_batch).await {
-                let _ = tx.rollback().await;
-                error!("[ProjectionStore] Error in bulk_insert_transactions: {}", e);
-                return Err(e.into());
-            }
-            tracing::info!("[ProjectionStore] Successfully inserted transactions");
-
-            // Invalidate transaction cache for affected accounts
-            {
-                let mut cache = transaction_cache.write().await;
-                for transaction in transaction_batch.drain(..) {
-                    cache.remove(&transaction.account_id);
-                }
-            }
-
-            metrics
-                .batch_updates
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        tx.commit().await?;
         Ok(())
     }
 
-    async fn flush_batches_optimized(
+    async fn insert_transactions_batch_parallel(
         pools: &Arc<PartitionedPools>,
-        account_batch: &mut Vec<AccountProjection>,
-        transaction_batch: &mut Vec<TransactionProjection>,
-        account_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
-        transaction_cache: &Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
-        cache_version: &Arc<std::sync::atomic::AtomicU64>,
-        metrics: &Arc<ProjectionMetrics>,
+        transactions: Vec<TransactionProjection>,
     ) -> Result<()> {
-        let flush_start = std::time::Instant::now();
+        let tasks: Vec<_> = transactions
+            .into_iter()
+            .map(|transaction| {
+                let pool = pools.select_pool(OperationType::Write).clone();
+                tokio::spawn(async move {
+                    let mut tx = pool.begin().await?;
+                    Self::bulk_insert_transactions(&mut tx, &[transaction]).await?;
+                    tx.commit().await?;
+                    Ok::<(), anyhow::Error>(())
+                })
+            })
+            .collect();
 
-        // Use a transaction with optimized settings
-        let write_pool = pools.select_pool(OperationType::Write);
-        let mut tx = write_pool.begin().await?;
-
-        // Process account updates with optimized deduplication
-        if !account_batch.is_empty() {
-            let account_start = std::time::Instant::now();
-
-            // Optimized deduplication using HashMap
-            let mut deduped = std::collections::HashMap::new();
-            for acc in account_batch.iter() {
-                deduped.insert(acc.id, acc.clone());
-            }
-            let mut unique_accounts: Vec<_> = deduped.into_values().collect();
-            let ids: Vec<_> = unique_accounts.iter().map(|a| a.id).collect();
-
-            tracing::debug!(
-                "[ProjectionStore] Optimized upsert: {} accounts (deduped from {})",
-                unique_accounts.len(),
-                account_batch.len()
-            );
-
-            if let Err(e) = Self::bulk_upsert_accounts(&mut tx, &unique_accounts).await {
-                let _ = tx.rollback().await;
-                error!(
-                    "[ProjectionStore] Optimized bulk_upsert_accounts failed: {} (ids={:?})",
-                    e, ids
-                );
-                metrics
-                    .errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Err(e.into());
-            }
-
-            // Optimized cache update with batch operations
-            {
-                let mut cache = account_cache.write().await;
-                let version = cache_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let now = Instant::now();
-
-                for account in unique_accounts.drain(..) {
-                    cache.insert(
-                        account.id,
-                        CacheEntry {
-                            data: account,
-                            last_accessed: now,
-                            version,
-                            ttl: Duration::from_secs(300), // 5 minutes TTL
-                        },
-                    );
-                }
-            }
-
-            account_batch.clear();
-            metrics
-                .batch_updates
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            let account_time = account_start.elapsed().as_millis() as u64;
-            tracing::debug!(
-                "[ProjectionStore] Account batch processed in {}ms",
-                account_time
-            );
+        for task in tasks {
+            task.await??;
         }
 
-        // Process transaction updates with optimized batch size
-        if !transaction_batch.is_empty() {
-            let transaction_start = std::time::Instant::now();
-
-            tracing::debug!(
-                "[ProjectionStore] Optimized transaction insert: {} transactions",
-                transaction_batch.len()
-            );
-
-            if let Err(e) = Self::bulk_insert_transactions(&mut tx, transaction_batch).await {
-                let _ = tx.rollback().await;
-                error!(
-                    "[ProjectionStore] Optimized bulk_insert_transactions failed: {}",
-                    e
-                );
-                metrics
-                    .errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Err(e.into());
-            }
-
-            // Optimized cache invalidation
-            {
-                let mut cache = transaction_cache.write().await;
-                for transaction in transaction_batch.drain(..) {
-                    cache.remove(&transaction.account_id);
-                }
-            }
-
-            metrics
-                .batch_updates
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            let transaction_time = transaction_start.elapsed().as_millis() as u64;
-            tracing::debug!(
-                "[ProjectionStore] Transaction batch processed in {}ms",
-                transaction_time
-            );
-        }
-
-        // Commit transaction with timeout
-        match tokio::time::timeout(Duration::from_secs(10), tx.commit()).await {
-            Ok(commit_result) => {
-                if let Err(e) = commit_result {
-                    error!("[ProjectionStore] Transaction commit failed: {}", e);
-                    metrics
-                        .errors
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Err(e.into());
-                }
-            }
-            Err(_) => {
-                error!("[ProjectionStore] Transaction commit timeout");
-                metrics
-                    .errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Err(anyhow::anyhow!("Transaction commit timeout"));
-            }
-        }
-
-        let total_time = flush_start.elapsed().as_millis() as u64;
-        metrics
-            .query_duration
-            .fetch_add(total_time, std::sync::atomic::Ordering::Relaxed);
-
-        tracing::debug!(
-            "[ProjectionStore] Optimized flush completed in {}ms",
-            total_time
-        );
         Ok(())
     }
 

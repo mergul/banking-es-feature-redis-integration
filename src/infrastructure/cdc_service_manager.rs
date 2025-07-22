@@ -214,7 +214,7 @@ impl CDCServiceManager {
         kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
         kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
         cache_service: Arc<dyn CacheServiceTrait>,
-        projection_store: Arc<dyn ProjectionStoreTrait>,
+        pools: Arc<crate::infrastructure::connection_pool_partitioning::PartitionedPools>,
         metrics: Option<Arc<EnhancedCDCMetrics>>,
         consistency_manager: Option<
             Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
@@ -224,6 +224,7 @@ impl CDCServiceManager {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let metrics = metrics.unwrap_or_else(|| Arc::new(EnhancedCDCMetrics::default()));
         let health_checker = Arc::new(CDCHealthCheck::new(metrics.clone()));
+        let projection_store = Arc::new(crate::infrastructure::projections::ProjectionStore::from_pools_with_config(pools.clone(), Default::default()));
         let processor = Arc::new(UltraOptimizedCDCEventProcessor::new(
             kafka_producer,
             cache_service,
