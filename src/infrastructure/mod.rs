@@ -28,6 +28,7 @@ pub mod outbox; // Added
 pub mod outbox_poller;
 
 pub mod projections;
+pub mod dlq_router;
 pub mod rate_limiter;
 pub mod redis_abstraction;
 pub mod repository;

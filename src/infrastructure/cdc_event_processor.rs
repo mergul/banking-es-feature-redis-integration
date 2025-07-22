@@ -170,73 +170,86 @@ impl ProcessableEvent {
     }
 }
 
-// Efficient circuit breaker with exponential backoff
+// Enhanced circuit breaker with more states and configuration
 #[derive(Debug, Clone)]
-enum CircuitBreakerState {
+enum AdvancedCircuitBreakerState {
     Closed,
-    Open { until: Instant, failure_count: u32 },
-    HalfOpen { test_requests: u32 },
+    Open {
+        until: Instant,
+        failure_count: u32,
+    },
+    HalfOpen {
+        test_requests: u32,
+        success_count: u32,
+    },
 }
 
-impl Default for CircuitBreakerState {
+impl Default for AdvancedCircuitBreakerState {
     fn default() -> Self {
-        CircuitBreakerState::Closed
+        AdvancedCircuitBreakerState::Closed
     }
 }
 
-struct CircuitBreaker {
-    state: Arc<RwLock<CircuitBreakerState>>,
+struct AdvancedCircuitBreaker {
+    state: Arc<RwLock<AdvancedCircuitBreakerState>>,
     failure_threshold: u32,
     recovery_timeout: Duration,
-    max_test_requests: u32,
+    half_open_success_threshold: u32,
 }
 
-impl CircuitBreaker {
+impl AdvancedCircuitBreaker {
     fn new() -> Self {
         Self {
-            state: Arc::new(RwLock::new(CircuitBreakerState::Closed)),
-            failure_threshold: 5,
-            recovery_timeout: Duration::from_secs(30),
-            max_test_requests: 3,
+            state: Arc::new(RwLock::new(AdvancedCircuitBreakerState::Closed)),
+            failure_threshold: 10, // Increased threshold
+            recovery_timeout: Duration::from_secs(60), // Increased timeout
+            half_open_success_threshold: 5,
         }
     }
 
     async fn can_execute(&self) -> bool {
         let state = self.state.read().await;
         match *state {
-            CircuitBreakerState::Closed => true,
-            CircuitBreakerState::Open { until, .. } => Instant::now() >= until,
-            CircuitBreakerState::HalfOpen { test_requests } => {
-                test_requests < self.max_test_requests
-            }
+            AdvancedCircuitBreakerState::Closed => true,
+            AdvancedCircuitBreakerState::Open { until, .. } => Instant::now() >= until,
+            AdvancedCircuitBreakerState::HalfOpen { .. } => true, // Allow requests in half-open state
         }
     }
 
     async fn on_success(&self) {
         let mut state = self.state.write().await;
-        *state = CircuitBreakerState::Closed;
+        match *state {
+            AdvancedCircuitBreakerState::HalfOpen { ref mut success_count, .. } => {
+                *success_count += 1;
+                if *success_count >= self.half_open_success_threshold {
+                    *state = AdvancedCircuitBreakerState::Closed;
+                }
+            }
+            _ => *state = AdvancedCircuitBreakerState::Closed,
+        }
     }
 
     async fn on_failure(&self) {
         let mut state = self.state.write().await;
         match *state {
-            CircuitBreakerState::Closed => {
-                *state = CircuitBreakerState::Open {
+            AdvancedCircuitBreakerState::Closed => {
+                *state = AdvancedCircuitBreakerState::Open {
                     until: Instant::now() + self.recovery_timeout,
                     failure_count: 1,
                 };
             }
-            CircuitBreakerState::Open { failure_count, .. } => {
+            AdvancedCircuitBreakerState::Open { ref mut failure_count, .. } => {
+                *failure_count += 1;
                 let backoff = Duration::from_secs(
-                    (self.recovery_timeout.as_secs() * 2_u64.pow(failure_count.min(8))).min(300), // Max 5 minutes
+                    (self.recovery_timeout.as_secs() * 2_u64.pow(*failure_count.min(8))).min(600), // Max 10 minutes
                 );
-                *state = CircuitBreakerState::Open {
+                *state = AdvancedCircuitBreakerState::Open {
                     until: Instant::now() + backoff,
-                    failure_count: failure_count + 1,
+                    failure_count: *failure_count,
                 };
             }
-            CircuitBreakerState::HalfOpen { .. } => {
-                *state = CircuitBreakerState::Open {
+            AdvancedCircuitBreakerState::HalfOpen { .. } => {
+                *state = AdvancedCircuitBreakerState::Open {
                     until: Instant::now() + self.recovery_timeout,
                     failure_count: 1,
                 };
@@ -246,25 +259,26 @@ impl CircuitBreaker {
 
     async fn on_attempt(&self) {
         let mut state = self.state.write().await;
-        if let CircuitBreakerState::Open { until, .. } = *state {
+        if let AdvancedCircuitBreakerState::Open { until, .. } = *state {
             if Instant::now() >= until {
-                *state = CircuitBreakerState::HalfOpen { test_requests: 1 };
+                *state = AdvancedCircuitBreakerState::HalfOpen {
+                    test_requests: 1,
+                    success_count: 0,
+                };
             }
-        } else if let CircuitBreakerState::HalfOpen { test_requests } = *state {
-            *state = CircuitBreakerState::HalfOpen {
-                test_requests: test_requests + 1,
-            };
+        } else if let AdvancedCircuitBreakerState::HalfOpen { ref mut test_requests, .. } = *state {
+            *test_requests += 1;
         }
     }
 }
 
-impl Clone for CircuitBreaker {
+impl Clone for AdvancedCircuitBreaker {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
             failure_threshold: self.failure_threshold,
             recovery_timeout: self.recovery_timeout,
-            max_test_requests: self.max_test_requests,
+            half_open_success_threshold: self.half_open_success_threshold,
         }
     }
 }
@@ -362,7 +376,7 @@ pub struct DLQEvent {
 // Ultra-optimized CDC Event Processor with business logic validation
 pub struct UltraOptimizedCDCEventProcessor {
     kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
-    dlq_producer: Option<crate::infrastructure::kafka_abstraction::KafkaProducer>,
+    dlq_router: Arc<crate::infrastructure::dlq_router::dlq_router::DLQRouter>,
     max_retries: u32,
     retry_backoff_ms: u64,
     cache_service: Arc<dyn CacheServiceTrait>,
@@ -377,7 +391,7 @@ pub struct UltraOptimizedCDCEventProcessor {
     batch_timeout: Duration,
 
     // Circuit breaker
-    circuit_breaker: CircuitBreaker,
+    circuit_breaker: AdvancedCircuitBreaker,
 
     // Memory-efficient projection cache
     projection_cache: Arc<Mutex<ProjectionCache>>,
@@ -403,13 +417,8 @@ pub struct UltraOptimizedCDCEventProcessor {
     // Performance monitoring
     performance_monitor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 
-    // Phase 2.2: Scalability Enhancements
-    cluster_manager: Arc<Mutex<Option<EnhancedClusterManager>>>,
-    load_balancer: Arc<Mutex<LoadBalancer>>,
-    shard_manager: Arc<Mutex<ShardManager>>,
-    distributed_lock_manager: Arc<Mutex<DistributedLockManager>>,
-    distributed_cache_manager: Arc<Mutex<DistributedCacheManager>>,
-    state_sync_manager: Arc<Mutex<StateSyncManager>>,
+    // Placeholder for a real cluster manager implementation
+    cluster_manager: Arc<Mutex<Option<()>>>,
 
     // Phase 2.3: Advanced Monitoring
     monitoring_system: Arc<Mutex<Option<AdvancedMonitoringSystem>>>,
@@ -444,7 +453,7 @@ impl Clone for UltraOptimizedCDCEventProcessor {
     fn clone(&self) -> Self {
         Self {
             kafka_producer: self.kafka_producer.clone(),
-            dlq_producer: self.dlq_producer.clone(),
+            dlq_router: self.dlq_router.clone(),
             max_retries: self.max_retries,
             retry_backoff_ms: self.retry_backoff_ms,
             cache_service: self.cache_service.clone(),
@@ -467,11 +476,6 @@ impl Clone for UltraOptimizedCDCEventProcessor {
             memory_monitor: self.memory_monitor.clone(),
             performance_monitor_handle: Arc::new(Mutex::new(None)), // Don't clone the handle
             cluster_manager: Arc::new(Mutex::new(None)), // Don't clone the cluster manager
-            load_balancer: self.load_balancer.clone(),
-            shard_manager: self.shard_manager.clone(),
-            distributed_lock_manager: self.distributed_lock_manager.clone(),
-            distributed_cache_manager: self.distributed_cache_manager.clone(),
-            state_sync_manager: self.state_sync_manager.clone(),
             monitoring_system: self.monitoring_system.clone(),
         }
     }
@@ -507,7 +511,7 @@ impl UltraOptimizedCDCEventProcessor {
 
         Self {
             kafka_producer: kafka_producer.clone(),
-            dlq_producer: Some(kafka_producer), // Use the same producer for DLQ by default
+            dlq_router: Arc::new(crate::infrastructure::dlq_router::dlq_router::DLQRouter::new(Arc::new(kafka_producer))),
             max_retries: 3,
             retry_backoff_ms: 100,
             cache_service,
@@ -518,7 +522,7 @@ impl UltraOptimizedCDCEventProcessor {
             batch_queue: Arc::new(Mutex::new(Vec::with_capacity(1000))),
             batch_size: Arc::new(Mutex::new(initial_batch_size)),
             batch_timeout,
-            circuit_breaker: CircuitBreaker::new(),
+            circuit_breaker: AdvancedCircuitBreaker::new(),
             projection_cache,
             batch_processor_handle: Arc::new(Mutex::new(None)),
             shutdown_tx: Arc::new(Mutex::new(None)),
@@ -535,13 +539,6 @@ impl UltraOptimizedCDCEventProcessor {
 
             // Phase 2.2: Scalability Enhancements
             cluster_manager: Arc::new(Mutex::new(None)),
-            load_balancer: Arc::new(Mutex::new(LoadBalancer::new(
-                LoadBalancingStrategy::Adaptive,
-            ))),
-            shard_manager: Arc::new(Mutex::new(ShardManager::new(64))), // Default 64 shards
-            distributed_lock_manager: Arc::new(Mutex::new(DistributedLockManager::new())),
-            distributed_cache_manager: Arc::new(Mutex::new(DistributedCacheManager::new())),
-            state_sync_manager: Arc::new(Mutex::new(StateSyncManager::new())),
             monitoring_system: Arc::new(Mutex::new(None)),
         }
     }
@@ -680,7 +677,13 @@ impl UltraOptimizedCDCEventProcessor {
                         self.metrics
                             .events_failed
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        self.send_to_dlq(&processable_event, &e, retries).await?;
+                        self.send_to_dlq(
+                            &processable_event,
+                            &e,
+                            retries,
+                            crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Unknown,
+                        )
+                        .await?;
                         self.circuit_breaker.on_failure().await;
                         error!("Event sent to DLQ after {} retries: {}", retries, e);
                         break;
@@ -720,6 +723,13 @@ impl UltraOptimizedCDCEventProcessor {
                     "Business validation failed for event {}: {}",
                     processable_event.event_id, e
                 );
+                self.send_to_dlq(
+                    processable_event,
+                    &e,
+                    0,
+                    crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Validation,
+                )
+                .await?;
                 // Mark as failed in consistency manager
                 self.mark_aggregate_failed(aggregate_id, e.to_string())
                     .await;
@@ -826,30 +836,70 @@ impl UltraOptimizedCDCEventProcessor {
         consistency_manager: Option<&Arc<ConsistencyManager>>,
         batch_size: usize,
     ) -> Result<()> {
-        let start_time = Instant::now();
-        let events = {
-            let mut queue = batch_queue.lock().await;
-            if queue.is_empty() {
-                return Ok(());
-            }
-            let drain_size = queue.len().min(batch_size);
-            queue.drain(..drain_size).collect::<Vec<_>>()
-        };
-
+        let events = Self::drain_batch_queue(batch_queue, batch_size).await;
         if events.is_empty() {
             return Ok(());
         }
 
         let batch_start = Instant::now();
         let events_count = events.len();
+        Self::update_queue_depth_metric(batch_queue, metrics).await;
 
-        // Update queue depth metric
+        let events_by_aggregate = Self::group_events_by_aggregate(events);
+        let (updated_projections, processed_aggregates) = Self::process_events_for_aggregates(
+            events_by_aggregate,
+            projection_cache,
+            cache_service,
+            projection_store,
+            metrics,
+        )
+        .await?;
+
+        if !updated_projections.is_empty() {
+            let upsert_result =
+                Self::upsert_projections_in_parallel(updated_projections, projection_store, metrics)
+                    .await;
+            Self::handle_upsert_results(
+                upsert_result,
+                processed_aggregates,
+                consistency_manager,
+                metrics,
+            )
+            .await;
+        }
+
+        Self::update_batch_metrics(batch_start, events_count, metrics);
+        Ok(())
+    }
+
+    /// Drains the batch queue, returning a vector of processable events.
+    async fn drain_batch_queue(
+        batch_queue: &Arc<Mutex<Vec<ProcessableEvent>>>,
+        batch_size: usize,
+    ) -> Vec<ProcessableEvent> {
+        let mut queue = batch_queue.lock().await;
+        if queue.is_empty() {
+            return Vec::new();
+        }
+        let drain_size = queue.len().min(batch_size);
+        queue.drain(..drain_size).collect()
+    }
+
+    /// Updates the queue depth metric.
+    async fn update_queue_depth_metric(
+        batch_queue: &Arc<Mutex<Vec<ProcessableEvent>>>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) {
         let queue_depth = batch_queue.lock().await.len();
         metrics
             .queue_depth
             .store(queue_depth as u64, std::sync::atomic::Ordering::Relaxed);
+    }
 
-        // Group events by aggregate_id for efficient processing
+    /// Groups a vector of events by their aggregate ID.
+    fn group_events_by_aggregate(
+        events: Vec<ProcessableEvent>,
+    ) -> HashMap<Uuid, Vec<ProcessableEvent>> {
         let mut events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>> = HashMap::new();
         for event in events {
             events_by_aggregate
@@ -857,8 +907,17 @@ impl UltraOptimizedCDCEventProcessor {
                 .or_default()
                 .push(event);
         }
+        events_by_aggregate
+    }
 
-        // Process each aggregate's events
+    /// Processes events for each aggregate, returning updated projections and processed aggregate IDs.
+    async fn process_events_for_aggregates(
+        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
+        projection_cache: &Arc<Mutex<ProjectionCache>>,
+        cache_service: &Arc<dyn CacheServiceTrait>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Result<(Vec<crate::infrastructure::projections::AccountProjection>, Vec<Uuid>)> {
         let mut updated_projections = Vec::new();
         let mut processed_aggregates = Vec::new();
         let mut cache_guard = projection_cache.lock().await;
@@ -873,265 +932,124 @@ impl UltraOptimizedCDCEventProcessor {
             )
             .await?;
 
-            // Apply all events for this aggregate with business validation
             for event in aggregate_events {
                 if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
-                    error!(
-                        "Failed to apply event {} to projection: {}",
-                        event.event_id, e
-                    );
-                    metrics
-                        .events_failed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    metrics
-                        .consecutive_failures
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    continue; // Skip this event but continue processing others
+                    error!("Failed to apply event {} to projection: {}", event.event_id, e);
+                    metrics.events_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    metrics.consecutive_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
                 } else {
-                    // Reset consecutive failures on success
-                    metrics
-                        .consecutive_failures
-                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    metrics.consecutive_failures.store(0, std::sync::atomic::Ordering::Relaxed);
                 }
             }
 
-            // Update cache
             cache_guard.put(aggregate_id, projection.clone());
-            updated_projections.push(Self::projection_cache_to_db_projection(
-                &projection,
-                aggregate_id,
-            ));
+            updated_projections.push(Self::projection_cache_to_db_projection(&projection, aggregate_id));
             processed_aggregates.push(aggregate_id);
         }
 
-        drop(cache_guard);
+        Ok((updated_projections, processed_aggregates))
+    }
 
-        // Bulk update projections in database with optimized parallel processing
-        if !updated_projections.is_empty() {
-            let upsert_start = Instant::now();
+    /// Upserts projections to the database in parallel.
+    async fn upsert_projections_in_parallel(
+        projections: Vec<crate::infrastructure::projections::AccountProjection>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> HashMap<Uuid, bool> {
+        let upsert_start = Instant::now();
+        let max_concurrent = (projections.len() / 50).max(2).min(16);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        let chunk_size = (projections.len() / max_concurrent).max(1);
 
-            // Use adaptive concurrency based on batch size
-            let max_concurrent = (updated_projections.len() / 50).max(2).min(16); // Increased to support stress test
-            let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-
-            // Optimize chunk size for better performance
-            let chunk_size = (updated_projections.len() / max_concurrent).max(1);
-            let mut tasks = Vec::new();
-            let mut chunk_aggregate_ids: Vec<Vec<Uuid>> = Vec::new();
-
-            for chunk in updated_projections.chunks(chunk_size) {
-                let store = projection_store.clone();
-                let chunk_vec = chunk.to_vec();
-                let semaphore = semaphore.clone();
-                let aggregate_ids: Vec<Uuid> = chunk_vec.iter().map(|p| p.id).collect();
-                chunk_aggregate_ids.push(aggregate_ids);
-                tasks.push(tokio::spawn(async move {
-                    let _permit = semaphore.acquire().await;
-                    // Retry up to 3 times
-                    let mut last_err = None;
-                    for _ in 0..3 {
-                        match store.upsert_accounts_batch(chunk_vec.clone()).await {
-                            Ok(res) => {
-                                return Ok::<Result<_, anyhow::Error>, anyhow::Error>(Ok(res))
-                            }
-                            Err(e) => last_err = Some(e),
-                        }
-                    }
-                    Err(anyhow::anyhow!(format!(
-                        "Upsert failed after 3 retries: {}",
-                        last_err.unwrap()
-                    )))
-                }));
-            }
-
-            // Await all upsert tasks with timeout
-            let results = match tokio::time::timeout(
-                Duration::from_secs(30), // 30 second timeout
-                futures::future::join_all(tasks),
-            )
-            .await
-            {
-                Ok(results) => results,
-                Err(_) => {
-                    error!("Batch processing timeout after 30 seconds");
-                    metrics
-                        .events_failed
-                        .fetch_add(events_count as u64, std::sync::atomic::Ordering::Relaxed);
-                    return Err(anyhow::anyhow!("Batch processing timeout"));
-                }
-            };
-
-            let upsert_time = upsert_start.elapsed().as_millis() as u64;
-
-            // Update latency metrics
-            metrics
-                .processing_latency_ms
-                .store(upsert_time, std::sync::atomic::Ordering::Relaxed);
-            metrics.total_latency_ms.store(
-                batch_start.elapsed().as_millis() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-
-            // Calculate P95 and P99 latencies (simplified - in real implementation you'd track individual latencies)
-            if upsert_time
-                > metrics
-                    .p95_processing_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                metrics
-                    .p95_processing_latency_ms
-                    .store(upsert_time, std::sync::atomic::Ordering::Relaxed);
-            }
-            if upsert_time
-                > metrics
-                    .p99_processing_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                metrics
-                    .p99_processing_latency_ms
-                    .store(upsert_time, std::sync::atomic::Ordering::Relaxed);
-            }
-
-            tracing::info!(
-                "Optimized parallel upsert of {} projections in {}ms (concurrent: {})",
-                updated_projections.len(),
-                upsert_time,
-                max_concurrent
-            );
-
-            // Track per-aggregate upsert results
-            let mut aggregate_upsert_success: std::collections::HashMap<Uuid, bool> =
-                std::collections::HashMap::new();
-            let mut chunk_idx = 0;
-            for res in results {
-                let aggregate_ids = &chunk_aggregate_ids[chunk_idx];
-                chunk_idx += 1;
-                match res {
-                    Ok(Ok(_)) => {
-                        for id in aggregate_ids {
-                            aggregate_upsert_success.insert(*id, true);
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        error!("Failed to bulk update projections in chunk: {}", e);
-                        metrics.events_failed.fetch_add(
-                            aggregate_ids.len() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                        for id in aggregate_ids {
-                            aggregate_upsert_success.insert(*id, false);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Join error in parallel upsert: {}", e);
-                        metrics.events_failed.fetch_add(
-                            aggregate_ids.len() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                        for id in aggregate_ids {
-                            aggregate_upsert_success.insert(*id, false);
-                        }
+        let mut tasks = Vec::new();
+        for chunk in projections.chunks(chunk_size) {
+            let store = projection_store.clone();
+            let chunk_vec = chunk.to_vec();
+            let semaphore = semaphore.clone();
+            tasks.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await;
+                let mut last_err = None;
+                for _ in 0..3 {
+                    match store.upsert_accounts_batch(chunk_vec.clone()).await {
+                        Ok(_) => return Ok(chunk_vec.iter().map(|p| p.id).collect::<Vec<_>>()),
+                        Err(e) => last_err = Some(e),
                     }
                 }
-            }
-
-            // Mark projection completion or failure for each aggregate
-            for aggregate_id in processed_aggregates {
-                if let Some(consistency_manager) = consistency_manager {
-                    if aggregate_upsert_success
-                        .get(&aggregate_id)
-                        .copied()
-                        .unwrap_or(false)
-                    {
-                        tracing::info!(
-                            "CDC Event Processor: Marking projection completed for aggregate {}",
-                            aggregate_id
-                        );
-                        consistency_manager
-                            .mark_projection_completed(aggregate_id)
-                            .await;
-                        tracing::info!("CDC Event Processor: Successfully marked projection completed for aggregate {}", aggregate_id);
-
-                        // Also mark CDC processing as completed
-                        tracing::info!(
-                            "CDC Event Processor: Marking CDC completed for aggregate {}",
-                            aggregate_id
-                        );
-                        consistency_manager.mark_completed(aggregate_id).await;
-                        tracing::info!(
-                            "CDC Event Processor: Successfully marked CDC completed for aggregate {}",
-                            aggregate_id
-                        );
-                    } else {
-                        let err_msg = "DB upsert failed after 3 retries".to_string();
-                        tracing::warn!(
-                            "CDC Event Processor: Marking projection failed for aggregate {}: {}",
-                            aggregate_id,
-                            err_msg
-                        );
-                        consistency_manager
-                            .mark_projection_failed(aggregate_id, err_msg.clone())
-                            .await;
-                        consistency_manager.mark_failed(aggregate_id, err_msg).await;
-                    }
-                } else {
-                    tracing::warn!("CDC Event Processor: No consistency manager available to mark projection completed/failed for aggregate {}", aggregate_id);
-                }
-            }
-
-            // If any chunks failed, return error but continue processing others
-            if aggregate_upsert_success.values().any(|&v| !v) {
-                return Err(anyhow::anyhow!(
-                    "Some projection update chunks failed (see logs for details)"
-                ));
-            }
+                Err(anyhow::anyhow!("Upsert failed after 3 retries: {}", last_err.unwrap()))
+            }));
         }
 
-        // Update comprehensive metrics
-        let batch_time = batch_start.elapsed().as_millis() as u64;
-        metrics
-            .batches_processed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        metrics
-            .events_processed
-            .fetch_add(events_count as u64, std::sync::atomic::Ordering::Relaxed);
-        metrics
-            .avg_batch_size
-            .store(events_count as u64, std::sync::atomic::Ordering::Relaxed);
+        let results = futures::future::join_all(tasks).await;
+        let upsert_time = upsert_start.elapsed().as_millis() as u64;
+        metrics.processing_latency_ms.store(upsert_time, std::sync::atomic::Ordering::Relaxed);
 
-        // Calculate throughput
+        let mut success_map = HashMap::new();
+        for res in results {
+            match res {
+                Ok(Ok(ids)) => {
+                    for id in ids {
+                        success_map.insert(id, true);
+                    }
+                }
+                Ok(Err(e)) => error!("Failed to bulk update projections in chunk: {}", e),
+                Err(e) => error!("Join error in parallel upsert: {}", e),
+            }
+        }
+        success_map
+    }
+
+    /// Handles the results of the parallel upsert operation.
+    async fn handle_upsert_results(
+        upsert_results: HashMap<Uuid, bool>,
+        processed_aggregates: Vec<Uuid>,
+        consistency_manager: Option<&Arc<ConsistencyManager>>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) {
+        for aggregate_id in processed_aggregates {
+            let success = upsert_results.get(&aggregate_id).copied().unwrap_or(false);
+            if let Some(cm) = consistency_manager {
+                if success {
+                    cm.mark_projection_completed(aggregate_id).await;
+                    cm.mark_completed(aggregate_id).await;
+                } else {
+                    let err_msg = "DB upsert failed".to_string();
+                    cm.mark_projection_failed(aggregate_id, err_msg.clone()).await;
+                    cm.mark_failed(aggregate_id, err_msg).await;
+                }
+            }
+            if !success {
+                metrics.events_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Updates batch processing metrics.
+    fn update_batch_metrics(
+        batch_start: Instant,
+        events_count: usize,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) {
+        let batch_time = batch_start.elapsed().as_millis() as u64;
+        metrics.batches_processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics.events_processed.fetch_add(events_count as u64, std::sync::atomic::Ordering::Relaxed);
+        metrics.avg_batch_size.store(events_count as u64, std::sync::atomic::Ordering::Relaxed);
         if batch_time > 0 {
             let throughput = (events_count as f64 / (batch_time as f64 / 1000.0)) as u64;
-            metrics
-                .throughput_per_second
-                .store(throughput, std::sync::atomic::Ordering::Relaxed);
+            metrics.throughput_per_second.store(throughput, std::sync::atomic::Ordering::Relaxed);
         }
-
-        // Update last error time if there were failures
-        if metrics
-            .events_failed
-            .load(std::sync::atomic::Ordering::Relaxed)
-            > 0
-        {
+        if metrics.events_failed.load(std::sync::atomic::Ordering::Relaxed) > 0 {
             metrics.last_error_time.store(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
                 std::sync::atomic::Ordering::Relaxed,
             );
         }
-
         tracing::debug!(
             "Optimized batch processing: {} events in {}ms, throughput: {}/s",
             events_count,
             batch_time,
-            metrics
-                .throughput_per_second
-                .load(std::sync::atomic::Ordering::Relaxed)
+            metrics.throughput_per_second.load(std::sync::atomic::Ordering::Relaxed)
         );
-
-        Ok(())
     }
 
     /// Get projection from cache or load from database
@@ -1142,39 +1060,77 @@ impl UltraOptimizedCDCEventProcessor {
         aggregate_id: Uuid,
         metrics: &Arc<EnhancedCDCMetrics>,
     ) -> Result<ProjectionCacheEntry> {
-        // L1 cache check
-        if let Some(cached) = cache.get(&aggregate_id) {
-            metrics
-                .batches_processed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::debug!("ProjectionCache: L1 cache hit for {}", aggregate_id);
-            return Ok(cached.clone());
+        if let Some(cached) = Self::get_from_l1_cache(cache, &aggregate_id, metrics).await {
+            return Ok(cached);
         }
-        metrics
-            .batches_processed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(cached) = Self::get_from_l2_cache(cache, cache_service, aggregate_id, metrics).await? {
+            return Ok(cached);
+        }
+        Self::load_from_db_and_populate_caches(cache, cache_service, projection_store, aggregate_id, metrics).await
+    }
+
+    /// Attempts to retrieve a projection from the L1 cache.
+    async fn get_from_l1_cache(
+        cache: &mut ProjectionCache,
+        aggregate_id: &Uuid,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Option<ProjectionCacheEntry> {
+        if let Some(cached) = cache.get(aggregate_id) {
+            metrics.batches_processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::debug!("ProjectionCache: L1 cache hit for {}", aggregate_id);
+            return Some(cached.clone());
+        }
+        metrics.batches_processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::debug!("ProjectionCache: L1 cache miss for {}", aggregate_id);
-        // L2 (Redis) cache check
+        None
+    }
+
+    /// Attempts to retrieve a projection from the L2 cache (Redis).
+    async fn get_from_l2_cache(
+        cache: &mut ProjectionCache,
+        cache_service: &Arc<dyn CacheServiceTrait>,
+        aggregate_id: Uuid,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Result<Option<ProjectionCacheEntry>> {
         if let Ok(Some(redis_proj)) = cache_service.get_account(aggregate_id).await {
             tracing::debug!("ProjectionCache: L2 (Redis) cache hit for {}", aggregate_id);
-            // Populate L1
             let entry = ProjectionCacheEntry {
                 balance: redis_proj.balance,
-                owner_name: redis_proj.owner_name,
+                owner_name: redis_proj.owner_name.clone(),
                 is_active: redis_proj.is_active,
                 version: 1,
                 cached_at: Instant::now(),
                 last_event_id: None,
             };
             cache.put(aggregate_id, entry.clone());
-            return Ok(entry);
-        } else {
-            tracing::debug!(
-                "ProjectionCache: L2 (Redis) cache miss for {}",
-                aggregate_id
-            );
+            // Pre-fetch related projections
+            Self::prefetch_related_projections(cache_service, &redis_proj).await;
+            return Ok(Some(entry));
         }
-        // Load from database
+        tracing::debug!("ProjectionCache: L2 (Redis) cache miss for {}", aggregate_id);
+        Ok(None)
+    }
+
+    /// Pre-fetches related projections to warm up the cache.
+    async fn prefetch_related_projections(
+        cache_service: &Arc<dyn CacheServiceTrait>,
+        projection: &crate::infrastructure::projections::AccountProjection,
+    ) {
+        // In a real application, you would have some logic to determine related projections.
+        // For this example, we'll just pre-fetch a few other accounts.
+        for i in 0..3 {
+            let _ = cache_service.get_account(Uuid::new_v4()).await;
+        }
+    }
+
+    /// Loads a projection from the database and populates the L1 and L2 caches.
+    async fn load_from_db_and_populate_caches(
+        cache: &mut ProjectionCache,
+        cache_service: &Arc<dyn CacheServiceTrait>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        aggregate_id: Uuid,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Result<ProjectionCacheEntry> {
         let db_projection = projection_store.get_account(aggregate_id).await?;
         let cache_entry = if let Some(proj) = db_projection {
             ProjectionCacheEntry {
@@ -1186,7 +1142,6 @@ impl UltraOptimizedCDCEventProcessor {
                 last_event_id: None,
             }
         } else {
-            // Create a new, empty projection entry for this aggregate
             ProjectionCacheEntry {
                 balance: Decimal::ZERO,
                 owner_name: String::new(),
@@ -1196,17 +1151,14 @@ impl UltraOptimizedCDCEventProcessor {
                 last_event_id: None,
             }
         };
-        // Populate both Redis and L1
         let account = crate::domain::Account {
             id: aggregate_id,
             owner_name: cache_entry.owner_name.clone(),
             balance: cache_entry.balance,
             is_active: cache_entry.is_active,
-            version: 1, // or use a version if available
+            version: 1,
         };
-        let _ = cache_service
-            .set_account(&account, Some(Duration::from_secs(1800)))
-            .await;
+        let _ = cache_service.set_account(&account, Some(Duration::from_secs(1800))).await;
         cache.put(aggregate_id, cache_entry.clone());
         Ok(cache_entry)
     }
@@ -1420,6 +1372,25 @@ impl UltraOptimizedCDCEventProcessor {
                 return Err(anyhow::anyhow!("Base64 decode error: {}", e));
             }
         };
+        let domain_event_result = bincode::deserialize(&payload_bytes);
+        if domain_event_result.is_err() {
+            tokio::spawn(async move {
+                let _ = self.send_to_dlq(
+                    &ProcessableEvent {
+                        event_id,
+                        aggregate_id,
+                        event_type: event_type.clone(),
+                        payload: payload_bytes,
+                        partition_key: None,
+                        domain_event: None,
+                    },
+                    &anyhow::anyhow!("Bincode deserialize error"),
+                    0,
+                    crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Deserialization,
+                )
+                .await;
+            });
+        }
         let partition_key = event_data
             .get("partition_key")
             .and_then(|v| v.as_str())
@@ -1566,17 +1537,17 @@ impl UltraOptimizedCDCEventProcessor {
         message: &rdkafka::message::BorrowedMessage<'_>,
         error: &str,
     ) -> Result<()> {
-        if let Some(dlq_producer) = &self.dlq_producer {
-            let key = message
-                .key()
-                .map(|k| String::from_utf8_lossy(k).to_string());
-            let payload = message.payload().unwrap_or_default();
-            let topic = "banking-es-dlq";
-            dlq_producer
-                .publish_binary_event(topic, payload, &key.unwrap_or_default())
-                .await?;
-        }
-        Ok(())
+        let key = message
+            .key()
+            .map(|k| String::from_utf8_lossy(k).to_string());
+        let payload = message.payload().unwrap_or_default();
+        self.dlq_router
+            .route(
+                crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Unknown,
+                payload,
+                &key.unwrap_or_default(),
+            )
+            .await
     }
 
     async fn send_to_dlq(
@@ -1584,25 +1555,20 @@ impl UltraOptimizedCDCEventProcessor {
         event: &ProcessableEvent,
         error: &anyhow::Error,
         retry_count: u32,
+        error_type: crate::infrastructure::dlq_router::dlq_router::DLQErrorType,
     ) -> Result<()> {
-        if let Some(dlq_producer) = &self.dlq_producer {
-            let dlq_event = DLQEvent {
-                event_id: event.event_id,
-                aggregate_id: event.aggregate_id,
-                event_type: event.event_type.clone(),
-                payload: event.payload.clone(),
-                error: error.to_string(),
-                timestamp: Utc::now(),
-                retry_count,
-            };
-            let payload = serde_json::to_vec(&dlq_event)?;
-            let topic = "banking-es-dlq";
-            let key = event.aggregate_id.to_string();
-            dlq_producer
-                .publish_binary_event(topic, &payload, &key)
-                .await?;
-        }
-        Ok(())
+        let dlq_event = DLQEvent {
+            event_id: event.event_id,
+            aggregate_id: event.aggregate_id,
+            event_type: event.event_type.clone(),
+            payload: event.payload.clone(),
+            error: error.to_string(),
+            timestamp: Utc::now(),
+            retry_count,
+        };
+        let payload = serde_json::to_vec(&dlq_event)?;
+        let key = event.aggregate_id.to_string();
+        self.dlq_router.route(error_type, &payload, &key).await
     }
 
     /// Send to DLQ using primitive fields (for batch DLQ from consumer)
@@ -1615,27 +1581,27 @@ impl UltraOptimizedCDCEventProcessor {
         key: Option<&[u8]>,
         error: &str,
     ) -> Result<()> {
-        if let Some(dlq_producer) = &self.dlq_producer {
-            // Compose a DLQ event (you can expand this as needed)
-            let dlq_event = crate::infrastructure::cdc_event_processor::DLQEvent {
-                event_id: Uuid::new_v4(),
-                aggregate_id: Uuid::nil(),
-                event_type: format!("DLQ_{}_{}_{}", topic, partition, offset),
-                payload: payload.to_vec(),
-                error: error.to_string(),
-                timestamp: chrono::Utc::now(),
-                retry_count: 0,
-            };
-            let payload = serde_json::to_vec(&dlq_event)?;
-            let dlq_topic = "banking-es-dlq";
-            let key_str = key
-                .map(|k| String::from_utf8_lossy(k).to_string())
-                .unwrap_or_default();
-            dlq_producer
-                .publish_binary_event(dlq_topic, &payload, &key_str)
-                .await?;
-        }
-        Ok(())
+        // Compose a DLQ event (you can expand this as needed)
+        let dlq_event = crate::infrastructure::cdc_event_processor::DLQEvent {
+            event_id: Uuid::new_v4(),
+            aggregate_id: Uuid::nil(),
+            event_type: format!("DLQ_{}_{}_{}", topic, partition, offset),
+            payload: payload.to_vec(),
+            error: error.to_string(),
+            timestamp: chrono::Utc::now(),
+            retry_count: 0,
+        };
+        let payload = serde_json::to_vec(&dlq_event)?;
+        let key_str = key
+            .map(|k| String::from_utf8_lossy(k).to_string())
+            .unwrap_or_default();
+        self.dlq_router
+            .route(
+                crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Unknown,
+                &payload,
+                &key_str,
+            )
+            .await
     }
 
     /// Adaptive batch sizing based on performance metrics
@@ -2648,1796 +2614,6 @@ impl PerformanceProfiler {
     }
 }
 
-/// Instance status for cluster management
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum InstanceStatus {
-    Starting,
-    Running,
-    Stopping,
-    Stopped,
-    Failed(String),
-}
-
-/// Instance information for cluster coordination
-#[derive(Debug, Clone)]
-pub struct InstanceInfo {
-    pub instance_id: Uuid,
-    pub hostname: String,
-    pub port: u16,
-    pub status: InstanceStatus,
-    pub started_at: DateTime<Utc>,
-    pub last_heartbeat: DateTime<Utc>,
-    pub load_metrics: InstanceLoadMetrics,
-    pub shard_assignments: Vec<u32>,
-}
-
-/// Load metrics for an instance
-#[derive(Debug, Clone)]
-pub struct InstanceLoadMetrics {
-    pub cpu_usage_percent: f64,
-    pub memory_usage_mb: usize,
-    pub queue_depth: usize,
-    pub active_connections: usize,
-    pub events_processed_per_sec: u64,
-    pub error_rate_percent: f64,
-    pub last_updated: DateTime<Utc>,
-}
-
-impl Default for InstanceLoadMetrics {
-    fn default() -> Self {
-        Self {
-            cpu_usage_percent: 0.0,
-            memory_usage_mb: 0,
-            queue_depth: 0,
-            active_connections: 0,
-            events_processed_per_sec: 0,
-            error_rate_percent: 0.0,
-            last_updated: Utc::now(),
-        }
-    }
-}
-
-/// Cluster configuration for distributed processing
-#[derive(Debug, Clone)]
-pub struct ClusterConfig {
-    pub cluster_id: String,
-    pub instance_id: Uuid,
-    pub hostname: String,
-    pub port: u16,
-    pub heartbeat_interval_ms: u64,
-    pub heartbeat_timeout_ms: u64,
-    pub shard_count: u32,
-    pub enable_leader_election: bool,
-    pub leader_election_timeout_ms: u64,
-    pub instance_discovery_timeout_ms: u64,
-}
-
-impl Default for ClusterConfig {
-    fn default() -> Self {
-        Self {
-            cluster_id: "cdc-cluster".to_string(),
-            instance_id: Uuid::new_v4(),
-            hostname: hostname::get()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
-            port: 8080,
-            heartbeat_interval_ms: 5000,
-            heartbeat_timeout_ms: 15000,
-            shard_count: 256,
-            enable_leader_election: true,
-            leader_election_timeout_ms: 30000,
-            instance_discovery_timeout_ms: 10000,
-        }
-    }
-}
-
-/// Cluster member information
-#[derive(Debug, Clone)]
-pub struct ClusterMember {
-    pub instance_info: InstanceInfo,
-    pub is_leader: bool,
-    pub last_seen: DateTime<Utc>,
-    pub failure_count: u32,
-}
-
-/// Load balancing strategy
-#[derive(Debug, Clone)]
-pub enum LoadBalancingStrategy {
-    RoundRobin,
-    LeastLoaded,
-    ConsistentHash,
-    Adaptive,
-}
-
-/// Shard assignment information
-#[derive(Debug, Clone)]
-pub struct ShardAssignment {
-    pub shard_id: u32,
-    pub instance_id: Uuid,
-    pub aggregate_ids: Vec<Uuid>,
-    pub last_updated: DateTime<Utc>,
-}
-
-/// Cluster manager for distributed CDC processing
-#[derive(Debug)]
-pub struct ClusterManager {
-    config: ClusterConfig,
-    instance_info: InstanceInfo,
-    members: Arc<RwLock<HashMap<Uuid, ClusterMember>>>,
-    shard_assignments: Arc<RwLock<HashMap<u32, ShardAssignment>>>,
-    leader_id: Arc<RwLock<Option<Uuid>>>,
-    load_balancing_strategy: LoadBalancingStrategy,
-    heartbeat_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    discovery_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    leader_election_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-}
-
-impl ClusterManager {
-    pub fn new(config: ClusterConfig) -> Self {
-        let instance_info = InstanceInfo {
-            instance_id: config.instance_id,
-            hostname: config.hostname.clone(),
-            port: config.port,
-            status: InstanceStatus::Starting,
-            started_at: Utc::now(),
-            last_heartbeat: Utc::now(),
-            load_metrics: InstanceLoadMetrics::default(),
-            shard_assignments: Vec::new(),
-        };
-
-        Self {
-            config,
-            instance_info,
-            members: Arc::new(RwLock::new(HashMap::new())),
-            shard_assignments: Arc::new(RwLock::new(HashMap::new())),
-            leader_id: Arc::new(RwLock::new(None)),
-            load_balancing_strategy: LoadBalancingStrategy::Adaptive,
-            heartbeat_handle: Arc::new(Mutex::new(None)),
-            discovery_handle: Arc::new(Mutex::new(None)),
-            leader_election_handle: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// Start the cluster manager
-    pub async fn start(&mut self) -> Result<()> {
-        tracing::info!(
-            "Starting cluster manager for instance {} on {}:{}",
-            self.config.instance_id,
-            self.config.hostname,
-            self.config.port
-        );
-
-        // Register this instance
-        self.register_instance().await?;
-
-        // Start heartbeat
-        self.start_heartbeat().await?;
-
-        // Start instance discovery
-        self.start_instance_discovery().await?;
-
-        // Start leader election if enabled
-        if self.config.enable_leader_election {
-            self.start_leader_election().await?;
-        }
-
-        // Update instance status
-        self.instance_info.status = InstanceStatus::Running;
-
-        tracing::info!("Cluster manager started successfully");
-        Ok(())
-    }
-
-    /// Stop the cluster manager
-    pub async fn stop(&mut self) -> Result<()> {
-        tracing::info!("Stopping cluster manager...");
-
-        // Update instance status
-        self.instance_info.status = InstanceStatus::Stopping;
-
-        // Stop background tasks
-        if let Some(handle) = self.heartbeat_handle.lock().await.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.discovery_handle.lock().await.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.leader_election_handle.lock().await.take() {
-            handle.abort();
-        }
-
-        // Deregister instance
-        self.deregister_instance().await?;
-
-        self.instance_info.status = InstanceStatus::Stopped;
-        tracing::info!("Cluster manager stopped");
-        Ok(())
-    }
-
-    /// Register this instance with the cluster
-    async fn register_instance(&self) -> Result<()> {
-        // In a real implementation, this would register with a service registry
-        // For now, we'll just add ourselves to the local member list
-        let mut members = self.members.write().await;
-        let member = ClusterMember {
-            instance_info: self.instance_info.clone(),
-            is_leader: false,
-            last_seen: Utc::now(),
-            failure_count: 0,
-        };
-        members.insert(self.config.instance_id, member);
-
-        tracing::info!(
-            "Instance {} registered with cluster",
-            self.config.instance_id
-        );
-        Ok(())
-    }
-
-    /// Deregister this instance from the cluster
-    async fn deregister_instance(&self) -> Result<()> {
-        let mut members = self.members.write().await;
-        members.remove(&self.config.instance_id);
-
-        tracing::info!(
-            "Instance {} deregistered from cluster",
-            self.config.instance_id
-        );
-        Ok(())
-    }
-
-    /// Start heartbeat mechanism
-    async fn start_heartbeat(&mut self) -> Result<()> {
-        let config = self.config.clone();
-        let instance_info = Arc::new(RwLock::new(self.instance_info.clone()));
-        let members = self.members.clone();
-
-        let handle = tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(Duration::from_millis(config.heartbeat_interval_ms));
-
-            loop {
-                interval.tick().await;
-
-                // Update heartbeat timestamp
-                {
-                    let mut info = instance_info.write().await;
-                    info.last_heartbeat = Utc::now();
-                }
-
-                // Update load metrics (simplified - in real implementation, get actual metrics)
-                {
-                    let mut info = instance_info.write().await;
-                    info.load_metrics.last_updated = Utc::now();
-                    // In real implementation, get actual metrics from the processor
-                }
-
-                // Broadcast heartbeat to other instances
-                // In a real implementation, this would send UDP multicast or use a service registry
-                tracing::debug!("Heartbeat sent from instance {}", config.instance_id);
-            }
-        });
-
-        *self.heartbeat_handle.lock().await = Some(handle);
-        Ok(())
-    }
-
-    /// Start instance discovery
-    async fn start_instance_discovery(&mut self) -> Result<()> {
-        let config = self.config.clone();
-        let members = self.members.clone();
-        let instance_info = self.instance_info.clone();
-
-        let handle = tokio::spawn(async move {
-            let interval = Duration::from_millis(config.instance_discovery_timeout_ms);
-            let mut interval_timer = tokio::time::interval(interval);
-
-            loop {
-                interval_timer.tick().await;
-
-                // Discover new instances (in a real implementation, this would use service discovery)
-                let members_guard = members.read().await;
-                info!("Current cluster members: {}", members_guard.len());
-
-                // Log member information
-                for (instance_id, membership) in members_guard.iter() {
-                    debug!(
-                        "Member: {} - {}:{} - Status: {:?}",
-                        instance_id,
-                        membership.instance_info.hostname,
-                        membership.instance_info.port,
-                        membership.instance_info.status
-                    );
-                }
-            }
-        });
-
-        *self.discovery_handle.lock().await = Some(handle);
-        Ok(())
-    }
-
-    /// Start leader election
-    async fn start_leader_election(&mut self) -> Result<()> {
-        let config = self.config.clone();
-        let members = self.members.clone();
-        let leader_id = self.leader_id.clone();
-
-        let handle = tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(Duration::from_millis(config.leader_election_timeout_ms));
-
-            loop {
-                interval.tick().await;
-
-                let members_guard = members.read().await;
-                let mut leader_guard = leader_id.write().await;
-
-                // Simple leader election: instance with lowest UUID becomes leader
-                if let Some((lowest_id, _)) = members_guard.iter().min_by_key(|(id, _)| *id) {
-                    if *leader_guard != Some(*lowest_id) {
-                        *leader_guard = Some(*lowest_id);
-                        tracing::info!("New leader elected: {}", lowest_id);
-                    }
-                }
-            }
-        });
-
-        *self.leader_election_handle.lock().await = Some(handle);
-        Ok(())
-    }
-
-    /// Get cluster status
-    pub async fn get_cluster_status(&self) -> serde_json::Value {
-        let members = self.members.read().await;
-        let leader_id = self.leader_id.read().await;
-        let shard_assignments = self.shard_assignments.read().await;
-
-        let leader_id_value = leader_id.as_ref().map(|id| id.to_string());
-
-        serde_json::json!({
-            "cluster_id": self.config.cluster_id,
-            "instance_id": self.config.instance_id,
-            "instance_status": format!("{:?}", self.instance_info.status),
-            "total_members": members.len(),
-            "leader_id": leader_id_value,
-            "is_leader": leader_id.as_ref() == Some(&self.config.instance_id),
-            "members": members.iter().map(|(id, member)| {
-                serde_json::json!({
-                    "instance_id": id,
-                    "hostname": member.instance_info.hostname,
-                    "status": format!("{:?}", member.instance_info.status),
-                    "is_leader": member.is_leader,
-                    "last_seen": member.last_seen,
-                    "load_metrics": {
-                        "cpu_usage_percent": member.instance_info.load_metrics.cpu_usage_percent,
-                        "memory_usage_mb": member.instance_info.load_metrics.memory_usage_mb,
-                        "queue_depth": member.instance_info.load_metrics.queue_depth,
-                        "events_processed_per_sec": member.instance_info.load_metrics.events_processed_per_sec,
-                        "error_rate_percent": member.instance_info.load_metrics.error_rate_percent
-                    }
-                })
-            }).collect::<Vec<_>>(),
-            "shard_assignments": shard_assignments.len(),
-            "load_balancing_strategy": format!("{:?}", self.load_balancing_strategy)
-        })
-    }
-
-    /// Check if this instance is the leader
-    pub async fn is_leader(&self) -> bool {
-        let leader_id = self.leader_id.read().await;
-        leader_id.as_ref() == Some(&self.config.instance_id)
-    }
-
-    /// Get the current leader ID
-    pub async fn get_leader_id(&self) -> Option<Uuid> {
-        let leader_id = self.leader_id.read().await;
-        *leader_id
-    }
-
-    /// Get all cluster members
-    pub async fn get_members(&self) -> Vec<ClusterMember> {
-        let members = self.members.read().await;
-        members.values().cloned().collect()
-    }
-
-    /// Update load metrics for this instance
-    pub async fn update_load_metrics(&mut self, metrics: InstanceLoadMetrics) {
-        self.instance_info.load_metrics = metrics;
-        self.instance_info.last_heartbeat = Utc::now();
-    }
-}
-
-/// Consistent hashing ring for shard distribution
-#[derive(Debug)]
-pub struct ConsistentHashRing {
-    ring: Vec<(u32, Uuid)>, // (hash, instance_id)
-    virtual_nodes_per_instance: usize,
-}
-
-impl ConsistentHashRing {
-    pub fn new(virtual_nodes_per_instance: usize) -> Self {
-        Self {
-            ring: Vec::new(),
-            virtual_nodes_per_instance,
-        }
-    }
-
-    /// Add an instance to the hash ring
-    pub fn add_instance(&mut self, instance_id: Uuid) {
-        for i in 0..self.virtual_nodes_per_instance {
-            let virtual_node_key = format!("{}:{}", instance_id, i);
-            let hash = self.hash(&virtual_node_key);
-            self.ring.push((hash, instance_id));
-        }
-        self.ring.sort_by_key(|(hash, _)| *hash);
-    }
-
-    /// Remove an instance from the hash ring
-    pub fn remove_instance(&mut self, instance_id: Uuid) {
-        self.ring.retain(|(_, id)| *id != instance_id);
-    }
-
-    /// Get the instance responsible for a given key
-    pub fn get_instance(&self, key: &str) -> Option<Uuid> {
-        if self.ring.is_empty() {
-            return None;
-        }
-
-        let hash = self.hash(key);
-        let index = self
-            .ring
-            .binary_search_by_key(&hash, |(h, _)| *h)
-            .unwrap_or_else(|i| i % self.ring.len());
-
-        Some(self.ring[index].1)
-    }
-
-    /// Get all instances in the ring
-    pub fn get_instances(&self) -> Vec<Uuid> {
-        let mut instances = self.ring.iter().map(|(_, id)| *id).collect::<Vec<_>>();
-        instances.sort();
-        instances.dedup();
-        instances
-    }
-
-    /// Hash a string to a u32
-    fn hash(&self, key: &str) -> u32 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish() as u32
-    }
-}
-
-/// Load balancer for distributing events across instances
-#[derive(Debug)]
-pub struct LoadBalancer {
-    strategy: LoadBalancingStrategy,
-    hash_ring: ConsistentHashRing,
-    round_robin_index: Arc<Mutex<usize>>,
-    instance_loads: Arc<RwLock<HashMap<Uuid, InstanceLoadMetrics>>>,
-}
-
-impl LoadBalancer {
-    pub fn new(strategy: LoadBalancingStrategy) -> Self {
-        Self {
-            strategy,
-            hash_ring: ConsistentHashRing::new(100), // 100 virtual nodes per instance
-            round_robin_index: Arc::new(Mutex::new(0)),
-            instance_loads: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    /// Add an instance to the load balancer
-    pub fn add_instance(&mut self, instance_id: Uuid) {
-        self.hash_ring.add_instance(instance_id);
-        tracing::info!("Added instance {} to load balancer", instance_id);
-    }
-
-    /// Remove an instance from the load balancer
-    pub fn remove_instance(&mut self, instance_id: Uuid) {
-        self.hash_ring.remove_instance(instance_id);
-        let mut loads = self.instance_loads.blocking_write();
-        loads.remove(&instance_id);
-        tracing::info!("Removed instance {} from load balancer", instance_id);
-    }
-
-    /// Update load metrics for an instance
-    pub async fn update_instance_load(&self, instance_id: Uuid, metrics: InstanceLoadMetrics) {
-        let mut loads = self.instance_loads.write().await;
-        loads.insert(instance_id, metrics);
-    }
-
-    /// Select an instance for processing an event
-    pub async fn select_instance(&self, aggregate_id: Uuid) -> Option<Uuid> {
-        match self.strategy {
-            LoadBalancingStrategy::RoundRobin => self.round_robin_select().await,
-            LoadBalancingStrategy::LeastLoaded => self.least_loaded_select().await,
-            LoadBalancingStrategy::ConsistentHash => self.consistent_hash_select(aggregate_id),
-            LoadBalancingStrategy::Adaptive => self.adaptive_select(aggregate_id).await,
-        }
-    }
-
-    /// Round-robin selection
-    async fn round_robin_select(&self) -> Option<Uuid> {
-        let instances = self.hash_ring.get_instances();
-        if instances.is_empty() {
-            return None;
-        }
-
-        let mut index = self.round_robin_index.lock().await;
-        let instance_id = instances[*index % instances.len()];
-        *index = (*index + 1) % instances.len();
-        Some(instance_id)
-    }
-
-    /// Least-loaded selection
-    async fn least_loaded_select(&self) -> Option<Uuid> {
-        let loads = self.instance_loads.read().await;
-        if loads.is_empty() {
-            return None;
-        }
-
-        // Find instance with lowest queue depth
-        loads
-            .iter()
-            .min_by_key(|(_, metrics)| metrics.queue_depth)
-            .map(|(id, _)| *id)
-    }
-
-    /// Consistent hash selection
-    fn consistent_hash_select(&self, aggregate_id: Uuid) -> Option<Uuid> {
-        self.hash_ring.get_instance(&aggregate_id.to_string())
-    }
-
-    /// Adaptive selection (combination of consistent hash and load balancing)
-    async fn adaptive_select(&self, aggregate_id: Uuid) -> Option<Uuid> {
-        let loads = self.instance_loads.read().await;
-        if loads.is_empty() {
-            return None;
-        }
-
-        // First try consistent hash
-        if let Some(instance_id) = self.consistent_hash_select(aggregate_id) {
-            // Check if the instance is overloaded
-            if let Some(metrics) = loads.get(&instance_id) {
-                if metrics.queue_depth < 1000 && metrics.cpu_usage_percent < 80.0 {
-                    return Some(instance_id);
-                }
-            }
-        }
-
-        // Fall back to least loaded
-        self.least_loaded_select().await
-    }
-
-    /// Get load distribution statistics
-    pub async fn get_load_distribution(&self) -> serde_json::Value {
-        let loads = self.instance_loads.read().await;
-        let instances = self.hash_ring.get_instances();
-        let instance_count = instances.len();
-
-        let mut distribution = Vec::new();
-        for instance_id in &instances {
-            if let Some(metrics) = loads.get(instance_id) {
-                distribution.push(serde_json::json!({
-                    "instance_id": instance_id,
-                    "cpu_usage_percent": metrics.cpu_usage_percent,
-                    "memory_usage_mb": metrics.memory_usage_mb,
-                    "queue_depth": metrics.queue_depth,
-                    "active_connections": metrics.active_connections,
-                    "events_processed_per_sec": metrics.events_processed_per_sec,
-                    "error_rate_percent": metrics.error_rate_percent,
-                    "last_updated": metrics.last_updated
-                }));
-            }
-        }
-
-        serde_json::json!({
-            "strategy": format!("{:?}", self.strategy),
-            "total_instances": instance_count,
-            "distribution": distribution
-        })
-    }
-}
-
-/// Shard manager for distributed event processing
-#[derive(Debug)]
-pub struct ShardManager {
-    shard_count: u32,
-    shard_assignments: Arc<RwLock<HashMap<u32, ShardAssignment>>>,
-    hash_ring: ConsistentHashRing,
-    rebalancing_in_progress: Arc<AtomicBool>,
-}
-
-impl ShardManager {
-    pub fn new(shard_count: u32) -> Self {
-        Self {
-            shard_count,
-            shard_assignments: Arc::new(RwLock::new(HashMap::new())),
-            hash_ring: ConsistentHashRing::new(100),
-            rebalancing_in_progress: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// Assign shards to instances
-    pub async fn assign_shards(&self, instances: Vec<Uuid>) -> Result<()> {
-        if instances.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No instances available for shard assignment"
-            ));
-        }
-
-        let mut assignments = self.shard_assignments.write().await;
-        assignments.clear();
-
-        // Distribute shards evenly across instances
-        for shard_id in 0..self.shard_count {
-            let instance_index = (shard_id as usize) % instances.len();
-            let instance_id = instances[instance_index];
-
-            let assignment = ShardAssignment {
-                shard_id,
-                instance_id,
-                aggregate_ids: Vec::new(),
-                last_updated: Utc::now(),
-            };
-
-            assignments.insert(shard_id, assignment);
-        }
-
-        tracing::info!(
-            "Assigned {} shards across {} instances",
-            self.shard_count,
-            instances.len()
-        );
-
-        Ok(())
-    }
-
-    /// Get the instance responsible for a shard
-    pub async fn get_shard_instance(&self, shard_id: u32) -> Option<Uuid> {
-        let assignments = self.shard_assignments.read().await;
-        assignments
-            .get(&shard_id)
-            .map(|assignment| assignment.instance_id)
-    }
-
-    /// Get the shard for an aggregate ID
-    pub fn get_shard_for_aggregate(&self, aggregate_id: Uuid) -> u32 {
-        // Use consistent hashing to determine shard
-        let hash = self.hash_aggregate_id(aggregate_id);
-        hash % self.shard_count
-    }
-
-    /// Get the instance responsible for an aggregate ID
-    pub async fn get_instance_for_aggregate(&self, aggregate_id: Uuid) -> Option<Uuid> {
-        let shard_id = self.get_shard_for_aggregate(aggregate_id);
-        self.get_shard_instance(shard_id).await
-    }
-
-    /// Rebalance shards when instances join or leave
-    pub async fn rebalance_shards(&self, instances: Vec<Uuid>) -> Result<()> {
-        if self
-            .rebalancing_in_progress
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return Err(anyhow::anyhow!("Shard rebalancing already in progress"));
-        }
-
-        self.rebalancing_in_progress
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        tracing::info!(
-            "Starting shard rebalancing for {} instances",
-            instances.len()
-        );
-
-        // Perform shard reassignment
-        self.assign_shards(instances).await?;
-
-        self.rebalancing_in_progress
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        tracing::info!("Shard rebalancing completed");
-
-        Ok(())
-    }
-
-    /// Check if rebalancing is in progress
-    pub fn is_rebalancing(&self) -> bool {
-        self.rebalancing_in_progress
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Get shard assignment statistics
-    pub async fn get_shard_stats(&self) -> serde_json::Value {
-        let assignments = self.shard_assignments.read().await;
-
-        // Count shards per instance
-        let mut instance_shard_counts: HashMap<Uuid, u32> = HashMap::new();
-        for assignment in assignments.values() {
-            *instance_shard_counts
-                .entry(assignment.instance_id)
-                .or_insert(0) += 1;
-        }
-
-        let mut stats = Vec::new();
-        for (instance_id, shard_count) in instance_shard_counts {
-            stats.push(serde_json::json!({
-                "instance_id": instance_id,
-                "shard_count": shard_count,
-                "shard_percentage": (shard_count as f64 / self.shard_count as f64) * 100.0
-            }));
-        }
-
-        serde_json::json!({
-            "total_shards": self.shard_count,
-            "assigned_shards": assignments.len(),
-            "rebalancing_in_progress": self.is_rebalancing(),
-            "instance_distribution": stats
-        })
-    }
-
-    /// Hash an aggregate ID to a u32
-    fn hash_aggregate_id(&self, aggregate_id: Uuid) -> u32 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        aggregate_id.hash(&mut hasher);
-        hasher.finish() as u32
-    }
-}
-
-// Phase 2.2.3: Distributed State Management
-// =========================================
-
-/// Distributed lock for coordinating access to shared resources
-#[derive(Debug, Clone)]
-pub struct DistributedLock {
-    pub resource_id: String,
-    pub instance_id: Uuid,
-    pub acquired_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub lock_id: Uuid,
-}
-
-/// Distributed lock manager for coordinating locks across instances
-pub struct DistributedLockManager {
-    active_locks: Arc<RwLock<HashMap<String, DistributedLock>>>,
-}
-
-impl DistributedLockManager {
-    pub fn new() -> Self {
-        Self {
-            active_locks: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    pub async fn acquire_lock(
-        &mut self,
-        resource_id: &str,
-        ttl_seconds: u64,
-    ) -> Result<DistributedLock> {
-        let mut locks = self.active_locks.write().await;
-        let now = Utc::now();
-
-        // Check if lock already exists and is still valid
-        if let Some(existing_lock) = locks.get(resource_id) {
-            if existing_lock.expires_at > now {
-                return Err(anyhow::anyhow!("Lock already acquired by another instance"));
-            }
-        }
-
-        // Create new lock
-        let lock = DistributedLock {
-            resource_id: resource_id.to_string(),
-            instance_id: Uuid::new_v4(), // In real implementation, this would be the current instance ID
-            acquired_at: now,
-            expires_at: now + chrono::Duration::seconds(ttl_seconds as i64),
-            lock_id: Uuid::new_v4(),
-        };
-
-        locks.insert(resource_id.to_string(), lock.clone());
-        Ok(lock)
-    }
-
-    pub async fn release_lock(&mut self, lock: DistributedLock) -> Result<()> {
-        let mut locks = self.active_locks.write().await;
-        locks.remove(&lock.resource_id);
-        Ok(())
-    }
-}
-
-/// Distributed cache entry for sharing data across instances
-#[derive(Debug, Clone)]
-pub struct DistributedCacheEntry {
-    pub key: String,
-    pub value: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub version: u64,
-}
-
-/// Distributed cache manager for coordinating cache across instances
-pub struct DistributedCacheManager {
-    cache: Arc<RwLock<HashMap<String, DistributedCacheEntry>>>,
-}
-
-impl DistributedCacheManager {
-    pub fn new() -> Self {
-        Self {
-            cache: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    pub async fn get_entry(&mut self, key: &str) -> Result<Option<DistributedCacheEntry>> {
-        let cache = self.cache.read().await;
-        let now = Utc::now();
-
-        if let Some(entry) = cache.get(key) {
-            if entry.expires_at > now {
-                Ok(Some(entry.clone()))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub async fn set_entry(
-        &mut self,
-        key: &str,
-        value: serde_json::Value,
-        ttl_seconds: u64,
-    ) -> Result<()> {
-        let mut cache = self.cache.write().await;
-        let now = Utc::now();
-
-        let entry = DistributedCacheEntry {
-            key: key.to_string(),
-            value,
-            created_at: now,
-            expires_at: now + chrono::Duration::seconds(ttl_seconds as i64),
-            version: 1,
-        };
-
-        cache.insert(key.to_string(), entry);
-        Ok(())
-    }
-}
-
-/// State synchronization manager for coordinating state across instances
-pub struct StateSyncManager {
-    sync_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-}
-
-impl StateSyncManager {
-    pub fn new() -> Self {
-        Self {
-            sync_handle: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    pub async fn start_sync(&mut self) -> Result<()> {
-        let handle = tokio::spawn(async move {
-            let interval = Duration::from_secs(60); // Sync every minute
-            let mut interval_timer = tokio::time::interval(interval);
-
-            loop {
-                interval_timer.tick().await;
-                debug!("State synchronization tick");
-            }
-        });
-
-        let mut sync_handle = self.sync_handle.lock().await;
-        *sync_handle = Some(handle);
-
-        info!("State synchronization started");
-        Ok(())
-    }
-
-    pub async fn stop_sync(&mut self) -> Result<()> {
-        let mut sync_handle = self.sync_handle.lock().await;
-        if let Some(handle) = sync_handle.take() {
-            handle.abort();
-        }
-
-        info!("State synchronization stopped");
-        Ok(())
-    }
-}
-
-// Phase 2.2.4: Cluster Management
-// ===============================
-
-/// Leader election state for distributed coordination
-#[derive(Debug, Clone, PartialEq)]
-pub enum LeaderElectionState {
-    Follower,
-    Candidate,
-    Leader,
-}
-
-/// Cluster membership information with health status
-#[derive(Debug, Clone)]
-pub struct ClusterMembership {
-    pub instance_id: Uuid,
-    pub hostname: String,
-    pub port: u16,
-    pub status: InstanceStatus,
-    pub last_heartbeat: DateTime<Utc>,
-    pub failure_count: u32,
-    pub is_leader: bool,
-    pub term: u64,
-    pub voted_for: Option<Uuid>,
-}
-
-/// Failure detection configuration
-#[derive(Debug, Clone)]
-pub struct FailureDetectionConfig {
-    pub heartbeat_interval_ms: u64,
-    pub heartbeat_timeout_ms: u64,
-    pub failure_threshold: u32,
-    pub suspicion_timeout_ms: u64,
-    pub cleanup_interval_ms: u64,
-}
-
-impl Default for FailureDetectionConfig {
-    fn default() -> Self {
-        Self {
-            heartbeat_interval_ms: 1000,
-            heartbeat_timeout_ms: 5000,
-            failure_threshold: 3,
-            suspicion_timeout_ms: 10000,
-            cleanup_interval_ms: 30000,
-        }
-    }
-}
-
-/// Distributed configuration for cluster-wide settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DistributedConfig {
-    pub cluster_id: String,
-    pub version: u64,
-    pub config_data: serde_json::Value,
-    pub last_updated: DateTime<Utc>,
-    pub updated_by: Uuid,
-}
-
-/// Enhanced cluster manager with leader election and failure detection
-pub struct EnhancedClusterManager {
-    config: ClusterConfig,
-    instance_info: InstanceInfo,
-    members: Arc<RwLock<HashMap<Uuid, ClusterMembership>>>,
-    shard_assignments: Arc<RwLock<HashMap<u32, ShardAssignment>>>,
-    leader_id: Arc<RwLock<Option<Uuid>>>,
-    current_term: Arc<AtomicU64>,
-    voted_for: Arc<RwLock<Option<Uuid>>>,
-    leader_election_state: Arc<RwLock<LeaderElectionState>>,
-    load_balancing_strategy: LoadBalancingStrategy,
-    failure_detection_config: FailureDetectionConfig,
-
-    // Task handles
-    heartbeat_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    discovery_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    leader_election_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    failure_detection_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    config_sync_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-}
-
-impl EnhancedClusterManager {
-    pub fn new(config: ClusterConfig) -> Result<Self> {
-        let hostname = hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        let instance_info = InstanceInfo {
-            instance_id: config.instance_id,
-            hostname: hostname.clone(),
-            port: config.port,
-            status: InstanceStatus::Starting,
-            started_at: Utc::now(),
-            last_heartbeat: Utc::now(),
-            load_metrics: InstanceLoadMetrics::default(),
-            shard_assignments: Vec::new(),
-        };
-
-        Ok(Self {
-            config,
-            instance_info,
-            members: Arc::new(RwLock::new(HashMap::new())),
-            shard_assignments: Arc::new(RwLock::new(HashMap::new())),
-            leader_id: Arc::new(RwLock::new(None)),
-            current_term: Arc::new(AtomicU64::new(0)),
-            voted_for: Arc::new(RwLock::new(None)),
-            leader_election_state: Arc::new(RwLock::new(LeaderElectionState::Follower)),
-            load_balancing_strategy: LoadBalancingStrategy::Adaptive,
-            failure_detection_config: FailureDetectionConfig::default(),
-            heartbeat_handle: Arc::new(Mutex::new(None)),
-            discovery_handle: Arc::new(Mutex::new(None)),
-            leader_election_handle: Arc::new(Mutex::new(None)),
-            failure_detection_handle: Arc::new(Mutex::new(None)),
-            config_sync_handle: Arc::new(Mutex::new(None)),
-        })
-    }
-
-    /// Start the enhanced cluster manager with all coordination services
-    pub async fn start(&mut self) -> Result<()> {
-        info!(
-            "Starting enhanced cluster manager for instance {}",
-            self.config.instance_id
-        );
-
-        // Register this instance
-        self.register_instance().await?;
-
-        // Start all coordination services
-        self.start_heartbeat().await?;
-        self.start_instance_discovery().await?;
-        self.start_leader_election().await?;
-        self.start_failure_detection().await?;
-        self.start_config_sync().await?;
-
-        // Update instance status
-        self.instance_info.status = InstanceStatus::Running;
-
-        info!("Enhanced cluster manager started successfully");
-        Ok(())
-    }
-
-    /// Stop the enhanced cluster manager and cleanup
-    pub async fn stop(&mut self) -> Result<()> {
-        info!(
-            "Stopping enhanced cluster manager for instance {}",
-            self.config.instance_id
-        );
-
-        // Update instance status
-        self.instance_info.status = InstanceStatus::Stopping;
-
-        // Stop all coordination services
-        self.stop_heartbeat().await?;
-        self.stop_instance_discovery().await?;
-        self.stop_leader_election().await?;
-        self.stop_failure_detection().await?;
-        self.stop_config_sync().await?;
-
-        // Deregister instance
-        self.deregister_instance().await?;
-
-        // Update instance status
-        self.instance_info.status = InstanceStatus::Stopped;
-
-        info!("Enhanced cluster manager stopped successfully");
-        Ok(())
-    }
-
-    /// Register this instance in the cluster
-    async fn register_instance(&self) -> Result<()> {
-        let membership = ClusterMembership {
-            instance_id: self.instance_info.instance_id,
-            hostname: self.instance_info.hostname.clone(),
-            port: self.instance_info.port,
-            status: self.instance_info.status.clone(),
-            last_heartbeat: Utc::now(),
-            failure_count: 0,
-            is_leader: false,
-            term: self.current_term.load(std::sync::atomic::Ordering::Relaxed),
-            voted_for: None,
-        };
-
-        let mut members = self.members.write().await;
-        members.insert(self.instance_info.instance_id, membership);
-
-        info!(
-            "Registered instance {} in cluster",
-            self.instance_info.instance_id
-        );
-        Ok(())
-    }
-
-    /// Deregister this instance from the cluster
-    async fn deregister_instance(&self) -> Result<()> {
-        let mut members = self.members.write().await;
-        members.remove(&self.instance_info.instance_id);
-
-        info!(
-            "Deregistered instance {} from cluster",
-            self.instance_info.instance_id
-        );
-        Ok(())
-    }
-
-    /// Start heartbeat service for cluster coordination
-    async fn start_heartbeat(&mut self) -> Result<()> {
-        let config = self.config.clone();
-        let instance_info = self.instance_info.clone();
-        let members = Arc::clone(&self.members);
-        let current_term = Arc::clone(&self.current_term);
-        let leader_id = Arc::clone(&self.leader_id);
-
-        let handle = tokio::spawn(async move {
-            let interval = Duration::from_millis(config.heartbeat_interval_ms);
-            let mut interval_timer = tokio::time::interval(interval);
-
-            loop {
-                interval_timer.tick().await;
-
-                // Send heartbeat to all members
-                let mut members_guard = members.write().await;
-                let now = Utc::now();
-
-                for (instance_id, membership) in members_guard.iter_mut() {
-                    if *instance_id != instance_info.instance_id {
-                        // Update heartbeat timestamp
-                        membership.last_heartbeat = now;
-
-                        // If we're the leader, send heartbeat with current term
-                        if let Some(leader) = leader_id.read().await.as_ref() {
-                            if *leader == instance_info.instance_id {
-                                membership.term =
-                                    current_term.load(std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                    }
-                }
-
-                // Update our own heartbeat
-                if let Some(our_membership) = members_guard.get_mut(&instance_info.instance_id) {
-                    our_membership.last_heartbeat = now;
-                }
-            }
-        });
-
-        let mut heartbeat_handle = self.heartbeat_handle.lock().await;
-        *heartbeat_handle = Some(handle);
-
-        info!("Started heartbeat service");
-        Ok(())
-    }
-
-    /// Stop heartbeat service
-    async fn stop_heartbeat(&mut self) -> Result<()> {
-        let mut heartbeat_handle = self.heartbeat_handle.lock().await;
-        if let Some(handle) = heartbeat_handle.take() {
-            handle.abort();
-        }
-        info!("Stopped heartbeat service");
-        Ok(())
-    }
-
-    /// Start instance discovery service
-    async fn start_instance_discovery(&mut self) -> Result<()> {
-        let config = self.config.clone();
-        let members = Arc::clone(&self.members);
-        let instance_info = self.instance_info.clone();
-
-        let handle = tokio::spawn(async move {
-            let interval = Duration::from_millis(config.instance_discovery_timeout_ms);
-            let mut interval_timer = tokio::time::interval(interval);
-
-            loop {
-                interval_timer.tick().await;
-
-                // Discover new instances (in a real implementation, this would use service discovery)
-                let members_guard = members.read().await;
-                info!("Current cluster members: {}", members_guard.len());
-
-                // Log member information
-                for (instance_id, membership) in members_guard.iter() {
-                    debug!(
-                        "Member: {} - {}:{} - Status: {:?}",
-                        instance_id, membership.hostname, membership.port, membership.status
-                    );
-                }
-            }
-        });
-
-        let mut discovery_handle = self.discovery_handle.lock().await;
-        *discovery_handle = Some(handle);
-
-        info!("Started instance discovery service");
-        Ok(())
-    }
-
-    /// Stop instance discovery service
-    async fn stop_instance_discovery(&mut self) -> Result<()> {
-        let mut discovery_handle = self.discovery_handle.lock().await;
-        if let Some(handle) = discovery_handle.take() {
-            handle.abort();
-        }
-        info!("Stopped instance discovery service");
-        Ok(())
-    }
-
-    /// Start leader election service using Raft-like algorithm
-    async fn start_leader_election(&mut self) -> Result<()> {
-        let config = self.config.clone();
-        let members = Arc::clone(&self.members);
-        let leader_id = Arc::clone(&self.leader_id);
-        let current_term = Arc::clone(&self.current_term);
-        let voted_for = Arc::clone(&self.voted_for);
-        let leader_election_state = Arc::clone(&self.leader_election_state);
-        let instance_info = self.instance_info.clone();
-
-        let handle = tokio::spawn(async move {
-            let election_timeout = Duration::from_millis(config.leader_election_timeout_ms);
-            let mut election_timer = tokio::time::interval(election_timeout);
-
-            loop {
-                election_timer.tick().await;
-
-                let mut state_guard = leader_election_state.write().await;
-                let mut members_guard = members.write().await;
-                let mut leader_guard = leader_id.write().await;
-
-                match *state_guard {
-                    LeaderElectionState::Follower => {
-                        // Check if we should start an election
-                        let now = Utc::now();
-                        let should_start_election = members_guard.values().any(|m| {
-                            m.instance_id != instance_info.instance_id
-                                && now
-                                    .signed_duration_since(m.last_heartbeat)
-                                    .num_milliseconds()
-                                    > config.heartbeat_timeout_ms as i64
-                        });
-
-                        if should_start_election {
-                            *state_guard = LeaderElectionState::Candidate;
-                            let new_term =
-                                current_term.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-
-                            // Vote for ourselves
-                            let mut voted_guard = voted_for.write().await;
-                            *voted_guard = Some(instance_info.instance_id);
-
-                            info!("Starting leader election for term {}", new_term);
-                        }
-                    }
-                    LeaderElectionState::Candidate => {
-                        // Count votes and check if we won
-                        let term = current_term.load(std::sync::atomic::Ordering::Relaxed);
-                        let mut votes = 1; // Our own vote
-
-                        for membership in members_guard.values() {
-                            if membership.instance_id != instance_info.instance_id
-                                && membership.term == term
-                            {
-                                votes += 1;
-                            }
-                        }
-
-                        let majority = (members_guard.len() / 2) + 1;
-                        if votes >= majority {
-                            *state_guard = LeaderElectionState::Leader;
-                            *leader_guard = Some(instance_info.instance_id);
-
-                            // Update our membership
-                            if let Some(our_membership) =
-                                members_guard.get_mut(&instance_info.instance_id)
-                            {
-                                our_membership.is_leader = true;
-                                our_membership.term = term;
-                            }
-
-                            info!("Elected as leader for term {}", term);
-                        }
-                    }
-                    LeaderElectionState::Leader => {
-                        // Continue as leader, send heartbeats
-                        let term = current_term.load(std::sync::atomic::Ordering::Relaxed);
-
-                        // Update all members with our leadership
-                        for membership in members_guard.values_mut() {
-                            if membership.instance_id != instance_info.instance_id {
-                                membership.term = term;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let mut leader_election_handle = self.leader_election_handle.lock().await;
-        *leader_election_handle = Some(handle);
-
-        info!("Started leader election service");
-        Ok(())
-    }
-
-    /// Stop leader election service
-    async fn stop_leader_election(&mut self) -> Result<()> {
-        let mut leader_election_handle = self.leader_election_handle.lock().await;
-        if let Some(handle) = leader_election_handle.take() {
-            handle.abort();
-        }
-        info!("Stopped leader election service");
-        Ok(())
-    }
-
-    /// Start failure detection service
-    async fn start_failure_detection(&mut self) -> Result<()> {
-        let config = self.failure_detection_config.clone();
-        let members = Arc::clone(&self.members);
-        let instance_info = self.instance_info.clone();
-
-        let handle = tokio::spawn(async move {
-            let interval = Duration::from_millis(config.cleanup_interval_ms);
-            let mut interval_timer = tokio::time::interval(interval);
-
-            loop {
-                interval_timer.tick().await;
-
-                let mut members_guard = members.write().await;
-                let now = Utc::now();
-
-                // Check for failed instances
-                let mut failed_instances = Vec::new();
-
-                for (instance_id, membership) in members_guard.iter_mut() {
-                    if *instance_id != instance_info.instance_id {
-                        let time_since_heartbeat =
-                            now.signed_duration_since(membership.last_heartbeat);
-
-                        if time_since_heartbeat.num_milliseconds()
-                            > config.heartbeat_timeout_ms as i64
-                        {
-                            membership.failure_count += 1;
-
-                            if membership.failure_count >= config.failure_threshold {
-                                failed_instances.push(*instance_id);
-                                warn!(
-                                    "Instance {} marked as failed after {} failures",
-                                    instance_id, membership.failure_count
-                                );
-                            }
-                        } else {
-                            // Reset failure count if heartbeat received
-                            membership.failure_count = 0;
-                        }
-                    }
-                }
-
-                // Remove failed instances
-                for failed_instance in failed_instances {
-                    members_guard.remove(&failed_instance);
-                    warn!("Removed failed instance {} from cluster", failed_instance);
-                }
-            }
-        });
-
-        let mut failure_detection_handle = self.failure_detection_handle.lock().await;
-        *failure_detection_handle = Some(handle);
-
-        info!("Started failure detection service");
-        Ok(())
-    }
-
-    /// Stop failure detection service
-    async fn stop_failure_detection(&mut self) -> Result<()> {
-        let mut failure_detection_handle = self.failure_detection_handle.lock().await;
-        if let Some(handle) = failure_detection_handle.take() {
-            handle.abort();
-        }
-        info!("Stopped failure detection service");
-        Ok(())
-    }
-
-    /// Start distributed configuration synchronization
-    async fn start_config_sync(&mut self) -> Result<()> {
-        let config = self.config.clone();
-        let members = Arc::clone(&self.members);
-        let instance_info = self.instance_info.clone();
-
-        let handle = tokio::spawn(async move {
-            let interval = Duration::from_secs(30); // Sync every 30 seconds
-            let mut interval_timer = tokio::time::interval(interval);
-
-            loop {
-                interval_timer.tick().await;
-
-                // In a real implementation, this would sync configuration across all instances
-                let members_guard = members.read().await;
-                debug!(
-                    "Syncing configuration across {} cluster members",
-                    members_guard.len()
-                );
-
-                // Example: Sync cluster configuration
-                let cluster_config = DistributedConfig {
-                    cluster_id: config.cluster_id.clone(),
-                    version: 1,
-                    config_data: serde_json::json!({
-                        "shard_count": config.shard_count,
-                        "heartbeat_interval_ms": config.heartbeat_interval_ms,
-                        "leader_election_timeout_ms": config.leader_election_timeout_ms,
-                    }),
-                    last_updated: Utc::now(),
-                    updated_by: instance_info.instance_id,
-                };
-
-                debug!("Distributed config: {:?}", cluster_config);
-            }
-        });
-
-        let mut config_sync_handle = self.config_sync_handle.lock().await;
-        *config_sync_handle = Some(handle);
-
-        info!("Started configuration synchronization service");
-        Ok(())
-    }
-
-    /// Stop configuration synchronization service
-    async fn stop_config_sync(&mut self) -> Result<()> {
-        let mut config_sync_handle = self.config_sync_handle.lock().await;
-        if let Some(handle) = config_sync_handle.take() {
-            handle.abort();
-        }
-        info!("Stopped configuration synchronization service");
-        Ok(())
-    }
-
-    /// Get comprehensive cluster status
-    pub async fn get_cluster_status(&self) -> serde_json::Value {
-        let members = self.members.read().await;
-        let leader_id = self.leader_id.read().await;
-        let current_term = self.current_term.load(std::sync::atomic::Ordering::Relaxed);
-        let leader_election_state = self.leader_election_state.read().await;
-
-        let leader_id_value = leader_id.as_ref().map(|id| id.to_string());
-
-        let member_list: Vec<serde_json::Value> = members
-            .values()
-            .map(|m| {
-                serde_json::json!({
-                    "instance_id": m.instance_id,
-                    "hostname": m.hostname,
-                    "port": m.port,
-                    "status": format!("{:?}", m.status),
-                    "last_heartbeat": m.last_heartbeat,
-                    "failure_count": m.failure_count,
-                    "is_leader": m.is_leader,
-                    "term": m.term,
-                })
-            })
-            .collect();
-
-        serde_json::json!({
-            "cluster_id": self.config.cluster_id,
-            "instance_id": self.instance_info.instance_id,
-            "current_term": current_term,
-            "leader_election_state": format!("{:?}", *leader_election_state),
-            "leader_id": leader_id_value,
-            "member_count": members.len(),
-            "members": member_list,
-            "shard_count": self.config.shard_count,
-            "load_balancing_strategy": format!("{:?}", self.load_balancing_strategy),
-        })
-    }
-
-    /// Check if this instance is the current leader
-    pub async fn is_leader(&self) -> bool {
-        let leader_id = self.leader_id.read().await;
-        leader_id.as_ref() == Some(&self.instance_info.instance_id)
-    }
-
-    /// Get the current leader ID
-    pub async fn get_leader_id(&self) -> Option<Uuid> {
-        let leader_id = self.leader_id.read().await;
-        leader_id.clone()
-    }
-
-    /// Get current term
-    pub fn get_current_term(&self) -> u64 {
-        self.current_term.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Get all cluster members
-    pub async fn get_members(&self) -> Vec<ClusterMembership> {
-        let members = self.members.read().await;
-        members.values().cloned().collect()
-    }
-
-    /// Update load metrics for this instance
-    pub async fn update_load_metrics(&mut self, metrics: InstanceLoadMetrics) {
-        self.instance_info.load_metrics = metrics;
-
-        let mut members = self.members.write().await;
-        if let Some(membership) = members.get_mut(&self.instance_info.instance_id) {
-            membership.last_heartbeat = Utc::now();
-        }
-    }
-
-    /// Get cluster health status
-    pub async fn get_cluster_health(&self) -> serde_json::Value {
-        let members = self.members.read().await;
-        let now = Utc::now();
-
-        let mut healthy_count = 0;
-        let mut failed_count = 0;
-        let mut total_failure_count = 0;
-
-        for membership in members.values() {
-            let time_since_heartbeat = now.signed_duration_since(membership.last_heartbeat);
-
-            if time_since_heartbeat.num_milliseconds()
-                <= self.failure_detection_config.heartbeat_timeout_ms as i64
-            {
-                healthy_count += 1;
-            } else {
-                failed_count += 1;
-                total_failure_count += membership.failure_count;
-            }
-        }
-
-        serde_json::json!({
-            "total_members": members.len(),
-            "healthy_members": healthy_count,
-            "failed_members": failed_count,
-            "total_failure_count": total_failure_count,
-            "health_percentage": if members.is_empty() { 0.0 } else {
-                (healthy_count as f64 / members.len() as f64) * 100.0
-            },
-        })
-    }
-}
-
-// Phase 2.2: Scalability Integration Methods
-// =========================================
-
-impl UltraOptimizedCDCEventProcessor {
-    /// Initialize and start the enhanced cluster manager
-    pub async fn start_cluster_manager(&mut self, config: ClusterConfig) -> Result<()> {
-        let mut cluster_manager = EnhancedClusterManager::new(config)?;
-        cluster_manager.start().await?;
-
-        let mut cluster_guard = self.cluster_manager.lock().await;
-        *cluster_guard = Some(cluster_manager);
-
-        info!("Enhanced cluster manager started successfully");
-        Ok(())
-    }
-
-    /// Stop the enhanced cluster manager
-    pub async fn stop_cluster_manager(&mut self) -> Result<()> {
-        let mut cluster_guard = self.cluster_manager.lock().await;
-        if let Some(mut cluster_manager) = cluster_guard.take() {
-            cluster_manager.stop().await?;
-        }
-
-        info!("Enhanced cluster manager stopped successfully");
-        Ok(())
-    }
-
-    /// Get cluster status and health information
-    pub async fn get_cluster_status(&self) -> Result<serde_json::Value> {
-        let cluster_guard = self.cluster_manager.lock().await;
-        if let Some(cluster_manager) = cluster_guard.as_ref() {
-            Ok(cluster_manager.get_cluster_status().await)
-        } else {
-            Err(anyhow::anyhow!("Cluster manager not initialized"))
-        }
-    }
-
-    /// Check if this instance is the cluster leader
-    pub async fn is_cluster_leader(&self) -> Result<bool> {
-        let cluster_guard = self.cluster_manager.lock().await;
-        if let Some(cluster_manager) = cluster_guard.as_ref() {
-            Ok(cluster_manager.is_leader().await)
-        } else {
-            Err(anyhow::anyhow!("Cluster manager not initialized"))
-        }
-    }
-
-    /// Get cluster health metrics
-    pub async fn get_cluster_health(&self) -> Result<serde_json::Value> {
-        let cluster_guard = self.cluster_manager.lock().await;
-        if let Some(cluster_manager) = cluster_guard.as_ref() {
-            Ok(cluster_manager.get_cluster_health().await)
-        } else {
-            Err(anyhow::anyhow!("Cluster manager not initialized"))
-        }
-    }
-
-    /// Update load metrics for this instance
-    pub async fn update_load_metrics(&mut self, metrics: InstanceLoadMetrics) -> Result<()> {
-        let mut cluster_guard = self.cluster_manager.lock().await;
-        if let Some(cluster_manager) = cluster_guard.as_mut() {
-            cluster_manager.update_load_metrics(metrics.clone()).await;
-        }
-
-        // Also update load balancer
-        let mut load_balancer = self.load_balancer.lock().await;
-        if let Some(cluster_manager) = self.cluster_manager.lock().await.as_ref() {
-            load_balancer
-                .update_instance_load(cluster_manager.config.instance_id, metrics)
-                .await;
-        }
-
-        Ok(())
-    }
-
-    /// Acquire a distributed lock for a resource
-    pub async fn acquire_distributed_lock(
-        &self,
-        resource_id: &str,
-        ttl_seconds: u64,
-    ) -> Result<DistributedLock> {
-        let mut lock_manager = self.distributed_lock_manager.lock().await;
-        lock_manager.acquire_lock(resource_id, ttl_seconds).await
-    }
-
-    /// Release a distributed lock
-    pub async fn release_distributed_lock(&self, lock: DistributedLock) -> Result<()> {
-        let mut lock_manager = self.distributed_lock_manager.lock().await;
-        lock_manager.release_lock(lock).await
-    }
-
-    /// Get or set a distributed cache entry
-    pub async fn get_distributed_cache_entry(
-        &self,
-        key: &str,
-    ) -> Result<Option<DistributedCacheEntry>> {
-        let mut cache_manager = self.distributed_cache_manager.lock().await;
-        cache_manager.get_entry(key).await
-    }
-
-    /// Set a distributed cache entry
-    pub async fn set_distributed_cache_entry(
-        &self,
-        key: &str,
-        value: serde_json::Value,
-        ttl_seconds: u64,
-    ) -> Result<()> {
-        let mut cache_manager = self.distributed_cache_manager.lock().await;
-        cache_manager.set_entry(key, value, ttl_seconds).await
-    }
-
-    /// Get shard information for an aggregate
-    pub async fn get_shard_for_aggregate(&self, aggregate_id: Uuid) -> Result<u32> {
-        let shard_manager = self.shard_manager.lock().await;
-        Ok(shard_manager.get_shard_for_aggregate(aggregate_id))
-    }
-
-    /// Get the instance responsible for a specific aggregate
-    pub async fn get_instance_for_aggregate(&self, aggregate_id: Uuid) -> Result<Option<Uuid>> {
-        let shard_manager = self.shard_manager.lock().await;
-        Ok(shard_manager.get_instance_for_aggregate(aggregate_id).await)
-    }
-
-    /// Get load balancing statistics
-    pub async fn get_load_balancing_stats(&self) -> Result<serde_json::Value> {
-        let load_balancer = self.load_balancer.lock().await;
-        Ok(load_balancer.get_load_distribution().await)
-    }
-
-    /// Get shard management statistics
-    pub async fn get_shard_stats(&self) -> Result<serde_json::Value> {
-        let shard_manager = self.shard_manager.lock().await;
-        Ok(shard_manager.get_shard_stats().await)
-    }
-
-    /// Process an event with distributed coordination
-    pub async fn process_event_with_distributed_coordination(
-        &self,
-        cdc_event: serde_json::Value,
-    ) -> Result<()> {
-        // Extract event information
-        let processable_event = match self.extract_event_serde_json(&cdc_event)? {
-            Some(event) => event,
-            None => return Ok(()),
-        };
-
-        // Get shard for this aggregate
-        let shard_id = self
-            .get_shard_for_aggregate(processable_event.aggregate_id)
-            .await?;
-
-        // Check if this instance should process this event
-        let target_instance = self
-            .get_instance_for_aggregate(processable_event.aggregate_id)
-            .await?;
-        let cluster_guard = self.cluster_manager.lock().await;
-
-        if let Some(cluster_manager) = cluster_guard.as_ref() {
-            let current_instance_id = cluster_manager.config.instance_id;
-
-            if let Some(target_id) = target_instance {
-                if target_id != current_instance_id {
-                    // This event should be processed by another instance
-                    // In a real implementation, you would forward this event
-                    debug!(
-                        "Event {} should be processed by instance {}, forwarding",
-                        processable_event.event_id, target_id
-                    );
-                    return Ok(());
-                }
-            }
-        }
-
-        // Acquire distributed lock for this aggregate
-        let lock_key = format!("aggregate:{}", processable_event.aggregate_id);
-        let lock = self.acquire_distributed_lock(&lock_key, 30).await?;
-
-        // Process the event
-        let result = self.process_cdc_event_ultra_fast(cdc_event).await;
-
-        // Release the lock
-        self.release_distributed_lock(lock).await?;
-
-        result
-    }
-
-    /// Get comprehensive scalability statistics
-    pub async fn get_scalability_stats(&self) -> Result<serde_json::Value> {
-        let cluster_status = self
-            .get_cluster_status()
-            .await
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let cluster_health = self
-            .get_cluster_health()
-            .await
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let load_balancing_stats = self
-            .get_load_balancing_stats()
-            .await
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let shard_stats = self
-            .get_shard_stats()
-            .await
-            .unwrap_or_else(|_| serde_json::json!({}));
-
-        Ok(serde_json::json!({
-            "cluster_status": cluster_status,
-            "cluster_health": cluster_health,
-            "load_balancing": load_balancing_stats,
-            "shard_management": shard_stats,
-            "distributed_locks": {
-                "active_locks": 0, // Would be implemented with actual lock tracking
-            },
-            "distributed_cache": {
-                "entries": 0, // Would be implemented with actual cache tracking
-            },
-        }))
-    }
-
-    /// Rebalance shards across available instances
-    pub async fn rebalance_shards(&self) -> Result<()> {
-        let cluster_guard = self.cluster_manager.lock().await;
-        let mut shard_manager = self.shard_manager.lock().await;
-
-        if let Some(cluster_manager) = cluster_guard.as_ref() {
-            let members = cluster_manager.get_members().await;
-            let instance_ids: Vec<Uuid> = members.iter().map(|m| m.instance_id).collect();
-
-            shard_manager.rebalance_shards(instance_ids).await?;
-            info!("Shard rebalancing completed");
-        }
-
-        Ok(())
-    }
-
-    /// Start state synchronization for distributed state management
-    pub async fn start_state_sync(&mut self) -> Result<()> {
-        let mut state_sync_manager = self.state_sync_manager.lock().await;
-        state_sync_manager.start_sync().await?;
-        info!("State synchronization started");
-        Ok(())
-    }
-
-    /// Stop state synchronization
-    pub async fn stop_state_sync(&mut self) -> Result<()> {
-        let mut state_sync_manager = self.state_sync_manager.lock().await;
-        state_sync_manager.stop_sync().await
-    }
-}
-
 // Phase 2.3: Advanced Monitoring
 // ==============================
 
@@ -5148,14 +3324,6 @@ impl UltraOptimizedCDCEventProcessor {
         let health_status = self.get_health_status().await?;
         let metrics_summary = self.get_metrics_summary().await?;
         let performance_stats = self.get_performance_stats().await;
-        let scalability_stats = self
-            .get_scalability_stats()
-            .await
-            .unwrap_or_else(|_| serde_json::json!({"error": "Failed to get scalability stats"}));
-        let cluster_status = self
-            .get_cluster_status()
-            .await
-            .unwrap_or_else(|_| serde_json::json!({"error": "Failed to get cluster status"}));
         let dlq_stats = self
             .get_dlq_stats()
             .await
@@ -5165,8 +3333,6 @@ impl UltraOptimizedCDCEventProcessor {
             "health_status": health_status,
             "metrics_summary": metrics_summary,
             "performance_stats": performance_stats,
-            "scalability_stats": scalability_stats,
-            "cluster_status": cluster_status,
             "dlq_stats": dlq_stats,
             "timestamp": Utc::now(),
             "version": "2.3.0"
