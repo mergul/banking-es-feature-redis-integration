@@ -47,6 +47,9 @@ async fn setup_stress_test_environment(
     // Use the same initialization pattern as main.rs
     println!("🔧 Initializing services using main.rs pattern...");
 
+    // Add a delay to allow the database to initialize
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
     // Create a single PgPool with a large pool size for all services
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
