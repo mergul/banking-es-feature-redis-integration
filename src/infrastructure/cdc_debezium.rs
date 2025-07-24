@@ -34,6 +34,7 @@ use crate::infrastructure::cdc_integration_helper::{
 use crate::infrastructure::cdc_producer::{BusinessLogicValidator, CDCProducer, CDCProducerConfig};
 use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::event_processor::EventProcessor;
+use futures::stream::StreamExt;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -921,116 +922,18 @@ impl CDCConsumer {
             }
         });
 
+        let mut message_stream = self.kafka_consumer.stream();
+
         loop {
-            poll_count += 1;
-
-            // Log every 10 polls initially, then every 100
-            if poll_count <= 10
-                || poll_count % 100 == 0
-                || last_log_time.elapsed() > Duration::from_secs(10)
-            {
-                tracing::info!(
-                    "CDCConsumer: Poll attempt #{} for topic: {}",
-                    poll_count,
-                    self.cdc_topic
-                );
-                last_log_time = std::time::Instant::now();
-            }
-
             tokio::select! {
                 _ = shutdown_token.cancelled() => {
                     info!("CDC consumer received shutdown signal");
                     tracing::info!("CDCConsumer: Received shutdown signal, breaking loop");
                     break;
                 }
-                message_result = tokio::time::timeout(Duration::from_millis(100), self.kafka_consumer.recv()) => {
-                    match message_result {
-                        Ok(Ok(Ok(message))) => {
-                            consecutive_empty_polls = 0; // Reset counter on successful message
-                            tracing::info!("[CDCConsumer] Received message on poll #{}: {:?}", poll_count, message);
-
-                            let cdc_event: serde_json::Value = match message.payload_view::<[u8]>() {
-                                Some(Ok(payload)) => match serde_json::from_slice(payload) {
-                                    Ok(event) => event,
-                                    Err(e) => {
-                                        tracing::error!("Failed to deserialize CDC event payload: {}", e);
-                                        continue;
-                                    }
-                                },
-                                Some(Err(e)) => {
-                                    tracing::error!("Error viewing message payload: {:?}", e);
-                                    continue;
-                                }
-                                None => {
-                                    tracing::warn!("Received message with no payload");
-                                    continue;
-                                }
-                            };
-
-                            tracing::info!("CDCConsumer: 📊 Message details - Topic: {:?}, Partition: {:?}, Offset: {:?}",
-                                message.topic(), message.partition(), message.offset());
-                            let permit = semaphore.clone().acquire_owned().await.unwrap();
-                            let processor = processor.clone();
-                            let offsets = offsets.clone();
-                            let dlq_tx = dlq_tx.clone();
-                            // For DLQ and offset batching, extract info from message
-                            let topic = message.topic().to_string();
-                            let partition = message.partition();
-                            let offset = message.offset();
-                            let payload = message.payload().map(|p| p.to_vec()).unwrap_or_default();
-                            let key = message.key().map(|k| k.to_vec());
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                            match processor.process_cdc_event_ultra_fast(cdc_event).await {
-                                Ok(_) => {
-                                        // Push offset for batch commit
-                                        offsets.lock().await.push((topic.clone(), partition, offset));
-                                }
-                                Err(e) => {
-                                        tracing::error!("Failed to process CDC event: {}", e);
-                                        // Send to DLQ in parallel
-                                        let _ = dlq_tx.send((topic, partition, offset, payload, key, e.to_string())).await;
-                                    }
-                                }
-                            });
-                        }
-                        Ok(Ok(Err(e))) => {
-                            tracing::error!("CDCConsumer: ❌ Error polling CDC message on poll #{}: {}", poll_count, e);
-                            // Add delay on error to avoid tight error loops, but check for shutdown signal
-                            tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                                    // Continue after delay
-                                }
-                                _ = shutdown_token.cancelled() => {
-                                    info!("CDC consumer received shutdown signal during error handling");
-                                    tracing::info!("CDCConsumer: Received shutdown signal during error handling, breaking loop");
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(Err(_)) => {
-                            // Timeout
-                            consecutive_empty_polls += 1;
-                            if poll_count <= 10 || poll_count % 50 == 0 { // Log every 50th empty poll to avoid spam
-                                tracing::debug!(
-                                    "CDCConsumer: ⏳ No CDC event available on poll #{} for topic: {} (consecutive empty: {})",
-                                    poll_count, self.cdc_topic, consecutive_empty_polls
-                                );
-                            }
-
-                            // Log warning if too many consecutive empty polls
-                            if consecutive_empty_polls >= max_consecutive_empty_polls {
-                                tracing::warn!(
-                                    "CDCConsumer: ⚠️ No messages received for {} consecutive polls. Check if Debezium is producing messages to topic: {}",
-                                    consecutive_empty_polls,
-                                    self.cdc_topic
-                                );
-                                consecutive_empty_polls = 0; // Reset to avoid spam
-                            }
-                        }
-                        Err(e) => {
-                             tracing::error!("CDCConsumer: ❌ Error receiving from consumer: {}", e);
-                        }
+                message_result = message_stream.next() => {
+                    if let Some(Ok(message)) = message_result {
+                        tracing::info!("Message received: {:?}", message);
                     }
                 }
             }

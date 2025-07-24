@@ -980,6 +980,10 @@ impl KafkaConsumer {
             ))
         }
     }
+
+    pub fn stream(&self) -> rdkafka::consumer::MessageStream<'_, LoggingConsumerContext> {
+        self.consumer.as_ref().unwrap().stream()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

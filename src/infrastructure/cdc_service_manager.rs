@@ -675,13 +675,10 @@ impl CDCServiceManager {
         tracing::info!("🛑 CDCServiceManager: Awaiting all background tasks");
         let shutdown_future = join_all(tasks_to_await);
 
-        match tokio::time::timeout(shutdown_timeout, shutdown_future).await {
-            Ok(_) => {
-                info!("✅ CDCServiceManager: All CDC tasks stopped gracefully");
-            }
-            Err(_) => {
-                warn!("⚠️ CDCServiceManager: Shutdown timeout exceeded, some tasks may not have stopped gracefully");
-            }
+        if let Err(_) = tokio::time::timeout(shutdown_timeout, shutdown_future).await {
+            warn!("⚠️ CDCServiceManager: Shutdown timeout exceeded, some tasks may not have stopped gracefully");
+        } else {
+            info!("✅ CDCServiceManager: All CDC tasks stopped gracefully");
         }
 
         self.set_state(ServiceState::Stopped).await;
