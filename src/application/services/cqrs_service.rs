@@ -120,6 +120,11 @@ impl CQRSAccountService {
         Ok(())
     }
 
+    /// Get the write batching service for direct access
+    pub fn get_write_batching_service(&self) -> Option<&Arc<WriteBatchingService>> {
+        self.write_batching_service.as_ref()
+    }
+
     /// Create a new account
     pub async fn create_account(
         &self,
@@ -240,7 +245,39 @@ impl CQRSAccountService {
             .mark_projection_pending(account_id)
             .await;
 
-        let result = self.cqrs_handler.deposit_money(account_id, amount).await;
+        // Use write batching if available, otherwise fall back to direct handler
+        let result = if let Some(ref batching_service) = self.write_batching_service {
+            let operation = WriteOperation::DepositMoney { account_id, amount };
+
+            match batching_service.submit_operation(operation).await {
+                Ok(operation_id) => {
+                    // Wait for the operation to complete
+                    match batching_service.wait_for_result(operation_id).await {
+                        Ok(result) => {
+                            if result.success {
+                                Ok(())
+                            } else {
+                                Err(AccountError::InfrastructureError(
+                                    result.error.unwrap_or_else(|| "Unknown error".to_string()),
+                                ))
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to wait for deposit result: {}", e);
+                            // Fall back to direct handler
+                            self.cqrs_handler.deposit_money(account_id, amount).await
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Write batching failed for deposit: {}", e);
+                    // Fall back to direct handler
+                    self.cqrs_handler.deposit_money(account_id, amount).await
+                }
+            }
+        } else {
+            self.cqrs_handler.deposit_money(account_id, amount).await
+        };
 
         let duration = start_time.elapsed();
         match &result {
@@ -287,7 +324,39 @@ impl CQRSAccountService {
             .mark_projection_pending(account_id)
             .await;
 
-        let result = self.cqrs_handler.withdraw_money(account_id, amount).await;
+        // Use write batching if available, otherwise fall back to direct handler
+        let result = if let Some(ref batching_service) = self.write_batching_service {
+            let operation = WriteOperation::WithdrawMoney { account_id, amount };
+
+            match batching_service.submit_operation(operation).await {
+                Ok(operation_id) => {
+                    // Wait for the operation to complete
+                    match batching_service.wait_for_result(operation_id).await {
+                        Ok(result) => {
+                            if result.success {
+                                Ok(())
+                            } else {
+                                Err(AccountError::InfrastructureError(
+                                    result.error.unwrap_or_else(|| "Unknown error".to_string()),
+                                ))
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to wait for withdraw result: {}", e);
+                            // Fall back to direct handler
+                            self.cqrs_handler.withdraw_money(account_id, amount).await
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Write batching failed for withdraw: {}", e);
+                    // Fall back to direct handler
+                    self.cqrs_handler.withdraw_money(account_id, amount).await
+                }
+            }
+        } else {
+            self.cqrs_handler.withdraw_money(account_id, amount).await
+        };
 
         let duration = start_time.elapsed();
         match &result {
@@ -621,6 +690,20 @@ impl CQRSAccountService {
         }
 
         result
+    }
+
+    /// Submit a batch of events for a single account in one transaction
+    pub async fn submit_events_batch(
+        &self,
+        account_id: Uuid,
+        events: Vec<AccountEvent>,
+        expected_version: i64,
+    ) -> Result<(), AccountError> {
+        self.cqrs_handler
+            .event_store()
+            .save_events(account_id, events, expected_version)
+            .await
+            .map_err(|e| AccountError::InfrastructureError(format!("Event store error: {:?}", e)))
     }
 
     /// Get consistency manager for external integration

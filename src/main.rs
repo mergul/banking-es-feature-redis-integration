@@ -45,7 +45,10 @@ mod web;
 use crate::application::services::CQRSAccountService;
 // use crate::application::AccountService; // Commented out: deprecated service
 use crate::infrastructure::middleware::RequestMiddleware; // Keep if CQRS handlers use similar middleware logic
-use crate::infrastructure::{AccountRepository, EventStoreConfig, UserRepository}; // AccountRepository might be unused if not by AccountService
+use crate::infrastructure::{
+    connection_pool_partitioning::{OperationType, PartitionedPools, PoolSelector},
+    AccountRepository, EventStoreConfig, UserRepository,
+}; // AccountRepository might be unused if not by AccountService
 
 use opentelemetry::sdk::export::trace::SpanExporter;
 use opentelemetry::trace::TracerProvider;
@@ -138,9 +141,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Duration::from_secs(60), // cleanup_interval
         ),
     );
+    let pool_config = crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig {
+        database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        }),
+        write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "500".to_string())
+            .parse()
+            .unwrap_or(500)
+            / 3, // Smaller write pool
+        write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
+            .unwrap_or_else(|_| "100".to_string())
+            .parse()
+            .unwrap_or(100)
+            / 3,
+        read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "500".to_string())
+            .parse()
+            .unwrap_or(500)
+            * 2
+            / 3,
+        read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
+            .unwrap_or_else(|_| "100".to_string())
+            .parse()
+            .unwrap_or(100)
+            * 2
+            / 3,
+        acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT_SECS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .unwrap_or(10),
+        read_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME_SECS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .unwrap_or(10)
+            * 2, // Longer lifetime for reads
+        write_idle_timeout_secs: std::env::var("DB_WRITE_IDLE_TIMEOUT_SECS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .unwrap_or(10),
+        read_idle_timeout_secs: std::env::var("DB_READ_IDLE_TIMEOUT_SECS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .unwrap_or(10),
+        write_max_lifetime_secs: std::env::var("DB_WRITE_MAX_LIFETIME_SECS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .unwrap_or(10),
+    };
+
+    let pools = Arc::new(PartitionedPools::new(pool_config).await?);
+    let write_pool = pools.select_pool(OperationType::Write).clone();
 
     // Initialize all services with background tasks
-    let service_context = init_all_services(Some(consistency_manager.clone())).await?;
+    let service_context =
+        init_all_services(Some(consistency_manager.clone()), pools.clone()).await?;
 
     // Create KafkaConfig instance (can be loaded from env or defaults)
     let kafka_config = KafkaConfig::default(); // Or load from env
@@ -190,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kafka_producer_for_cdc,
             kafka_consumer_for_cdc,
             service_context.cache_service.clone(),
-            service_context.projection_store.clone(),
+            pools.clone(),
             None, // <-- pass None for metrics in production
             Some(cqrs_service.get_consistency_manager()), // Pass consistency manager from CQRS service
         )?;

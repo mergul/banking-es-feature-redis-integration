@@ -166,9 +166,20 @@ impl AccountQueryHandler {
                         .hits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     info!("Cache hit for account {}", account_id);
+
+                    // Convert Account to AccountProjection for consistency
+                    let projection = crate::infrastructure::projections::AccountProjection {
+                        id: cached_account.id,
+                        owner_name: cached_account.owner_name.clone(),
+                        balance: cached_account.balance,
+                        is_active: cached_account.is_active,
+                        created_at: chrono::Utc::now(), // Use current time as fallback
+                        updated_at: chrono::Utc::now(), // Use current time as fallback
+                    };
+
                     return Ok(QueryResult {
                         success: true,
-                        data: Some(serde_json::to_value(cached_account).unwrap()),
+                        data: Some(serde_json::to_value(projection).unwrap()),
                         message: "Account retrieved from cache".to_string(),
                     });
                 }
@@ -240,7 +251,7 @@ impl AccountQueryHandler {
                 }
             }
             _ => Err(AccountError::InfrastructureError(
-                "Invalid query for get account handler".to_string(),
+                "Invalid query type for get_account_by_id".to_string(),
             )),
         }
     }

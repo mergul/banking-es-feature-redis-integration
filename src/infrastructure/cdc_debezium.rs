@@ -259,8 +259,8 @@ impl OutboxBatcher {
                         match msg {
                             Some(msg) => {
                                 buffer.push(msg);
-                                // OPTIMIZED: Process immediately for single messages or when batch is full
-                                if buffer.len() == 1 || buffer.len() >= batch_size {
+                                // Flush only when the buffer is full
+                                if buffer.len() >= batch_size {
                                     Self::flush(&repo, &pools, &mut buffer).await;
                                     last_flush = tokio::time::Instant::now();
                                 }
@@ -990,8 +990,17 @@ impl CDCConsumer {
                         }
                         Err(e) => {
                             tracing::error!("CDCConsumer: ❌ Error polling CDC message on poll #{}: {}", poll_count, e);
-                            // Add delay on error to avoid tight error loops
-                            tokio::time::sleep(Duration::from_millis(500)).await; // Increased delay
+                            // Add delay on error to avoid tight error loops, but check for shutdown signal
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                                    // Continue after delay
+                                }
+                                _ = shutdown_rx.recv() => {
+                                    info!("CDC consumer received shutdown signal during error handling");
+                                    tracing::info!("CDCConsumer: Received shutdown signal during error handling, breaking loop");
+                                    break;
+                                }
+                            }
                         }
                     }
                 }

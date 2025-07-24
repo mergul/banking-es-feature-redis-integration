@@ -1121,8 +1121,8 @@ impl EventStore {
                 params.push((
                     event.id,
                     event.aggregate_id,
-                    event.event_type,
-                    event.event_data,
+                    event.event_type.clone(),
+                    event.event_data.clone(),
                     event.version,
                     event.timestamp,
                     bincode::serialize(&event.metadata).unwrap_or_else(|_| {
@@ -1147,13 +1147,26 @@ impl EventStore {
                     .bind(metadata);
             }
 
+            tracing::info!(
+                "[EventStore] Attempting to insert {} events for aggregate_id {} (version {} to {})",
+                events.len(), aggregate_id, expected_version + 1, last_version
+            );
+
             match query.execute(&mut **tx).await {
                 Ok(_) => {
+                    tracing::info!(
+                        "[EventStore] Successfully inserted {} events for aggregate_id {} (version {} to {})",
+                        events.len(), aggregate_id, expected_version + 1, last_version
+                    );
                     // Update cache with new version after successful insert
                     version_cache.insert(aggregate_id, last_version);
                     return Ok(());
                 }
                 Err(e) => {
+                    tracing::error!(
+                        "[EventStore] Failed to insert events for aggregate_id {}: {}. Retrying (attempt {}/{})...",
+                        aggregate_id, e, retries + 1, max_retries
+                    );
                     if let Some(db_err) = e.as_database_error() {
                         if let Some(pg_err) =
                             db_err.try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
@@ -1166,6 +1179,10 @@ impl EventStore {
                                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         // Invalidate cache on conflict
                                         version_cache.remove(&aggregate_id);
+                                        tracing::error!(
+                                            "[EventStore] OCC conflict for aggregate_id {}: expected {}, actual {:?}",
+                                            aggregate_id, expected_version, current_version
+                                        );
                                         return Err(
                                             EventStoreError::OptimisticConcurrencyConflict {
                                                 aggregate_id,
@@ -1180,13 +1197,27 @@ impl EventStore {
                             if Self::is_transient_error(pg_err) {
                                 if retries < max_retries {
                                     retries += 1;
+                                    tracing::warn!(
+                                        "[EventStore] Transient error on insert for aggregate_id {}: {}. Retrying after {:?} (attempt {}/{})",
+                                        aggregate_id, pg_err, delay, retries, max_retries
+                                    );
                                     tokio::time::sleep(delay).await;
                                     delay *= 2; // Exponential backoff
                                     continue;
+                                } else {
+                                    tracing::error!(
+                                        "[EventStore] Max retries reached for aggregate_id {}. Failing batch.",
+                                        aggregate_id
+                                    );
                                 }
                             }
                         }
                     }
+                    tracing::error!(
+                        "[EventStore] Non-retryable error on insert for aggregate_id {}: {}",
+                        aggregate_id,
+                        e
+                    );
                     return Err(EventStoreError::DatabaseError(e));
                 }
             }
@@ -1930,6 +1961,285 @@ impl EventStore {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    /// Save events for multiple aggregates in a single transaction
+    /// This allows true multi-row inserts across different aggregates
+    async fn save_events_multi_aggregate_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, i64)>, // (aggregate_id, events, expected_version)
+    ) -> Result<(), EventStoreError> {
+        if events_by_aggregate.is_empty() {
+            return Ok(());
+        }
+
+        // Collect all events from all aggregates into a single batch
+        let mut all_events = Vec::new();
+
+        for (aggregate_id, events, expected_version) in events_by_aggregate {
+            if events.is_empty() {
+                continue;
+            }
+
+            // Prepare events for this aggregate
+            let mut current_event_version = expected_version;
+            let prepared_events: Vec<Event> = events
+                .into_iter()
+                .map(|domain_event| {
+                    current_event_version += 1;
+                    let event_data = bincode::serialize(&domain_event)
+                        .map_err(EventStoreError::SerializationErrorBincode)?;
+                    Ok(Event {
+                        id: Uuid::new_v4(),
+                        aggregate_id,
+                        event_type: domain_event.event_type().to_string(),
+                        event_data,
+                        version: current_event_version,
+                        timestamp: Utc::now(),
+                        metadata: EventMetadata::default(),
+                    })
+                })
+                .collect::<Result<Vec<Event>, EventStoreError>>()?;
+
+            all_events.extend(prepared_events);
+        }
+
+        if all_events.is_empty() {
+            return Ok(());
+        }
+
+        // Validate all events
+        for event_to_validate in &all_events {
+            let validation = Self::validate_event(event_to_validate).await;
+            if !validation.is_valid {
+                self.metrics
+                    .events_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(EventStoreError::ValidationError(validation.errors));
+            }
+        }
+
+        println!(
+            "🔍 [DEBUG] About to call bulk_insert_events_multi_aggregate with {} events",
+            all_events.len()
+        );
+
+        // Bulk insert all events in a single multi-aggregate operation
+        Self::bulk_insert_events_multi_aggregate(
+            tx,
+            all_events.clone(),
+            &self.metrics,
+            &self.version_cache,
+        )
+        .await?;
+
+        // Update metrics
+        self.metrics.events_processed.fetch_add(
+            all_events.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(())
+    }
+
+    /// Bulk insert events for multiple aggregates in a single database operation
+    /// This is the true multi-aggregate version that can insert events from different aggregates
+    async fn bulk_insert_events_multi_aggregate(
+        tx: &mut Transaction<'_, Postgres>,
+        events: Vec<Event>,
+        metrics: &EventStoreMetrics,
+        version_cache: &DashMap<Uuid, i64>,
+    ) -> Result<(), EventStoreError> {
+        println!(
+            "🚀 [DEBUG] bulk_insert_events_multi_aggregate called with {} events",
+            events.len()
+        );
+
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        // Set transaction isolation level to SERIALIZABLE for strongest consistency
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut **tx)
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
+
+        // Group events by aggregate_id for version checking
+        let mut events_by_aggregate: HashMap<Uuid, Vec<Event>> = HashMap::new();
+        for event in events {
+            events_by_aggregate
+                .entry(event.aggregate_id)
+                .or_insert_with(Vec::new)
+                .push(event);
+        }
+
+        // Check versions for all aggregates
+        for (aggregate_id, aggregate_events) in &events_by_aggregate {
+            if aggregate_events.is_empty() {
+                continue;
+            }
+
+            // Sort events by version for this aggregate
+            let mut sorted_events = aggregate_events.clone();
+            sorted_events.sort_by_key(|e| e.version);
+
+            let expected_version = sorted_events.first().unwrap().version - 1;
+            let last_version = sorted_events.last().unwrap().version;
+
+            // Verify current version and lock the row for update
+            let current_version = sqlx::query!(
+                r#"
+                SELECT COALESCE(e.version, 0) as version
+                FROM (SELECT 1) dummy
+                LEFT JOIN (
+                    SELECT version
+                    FROM events
+                    WHERE aggregate_id = $1
+                    ORDER BY version DESC
+                    LIMIT 1
+                    FOR UPDATE
+                ) e ON true
+                "#,
+                aggregate_id
+            )
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(EventStoreError::DatabaseError)?
+            .version
+            .unwrap_or(0);
+
+            // Strict version check
+            if current_version != expected_version {
+                metrics
+                    .occ_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Invalidate cache on conflict
+                version_cache.remove(aggregate_id);
+                return Err(EventStoreError::OptimisticConcurrencyConflict {
+                    aggregate_id: *aggregate_id,
+                    expected: expected_version,
+                    actual: Some(current_version),
+                });
+            }
+
+            // Verify version sequence for this aggregate
+            if sorted_events.len() > 1 {
+                for (i, event) in sorted_events.iter().enumerate() {
+                    if event.version != expected_version + i as i64 + 1 {
+                        return Err(EventStoreError::ValidationError(vec![
+                            "Invalid version sequence: expected ".to_string()
+                                + &(expected_version + i as i64 + 1).to_string()
+                                + ", got "
+                                + &event.version.to_string(),
+                        ]));
+                    }
+                }
+            }
+        }
+
+        // Now collect all events for the bulk insert
+        let all_events: Vec<Event> = events_by_aggregate.values().flatten().cloned().collect();
+
+        // Build the bulk insert query
+        let mut query = String::from(
+            r#"
+            INSERT INTO events (id, aggregate_id, event_type, event_data, version, timestamp, metadata)
+            VALUES
+            "#,
+        );
+
+        let mut values = Vec::new();
+        let mut params: Vec<(Uuid, Uuid, String, Vec<u8>, i64, DateTime<Utc>, Vec<u8>)> =
+            Vec::new();
+        let mut param_index = 1;
+
+        for event in all_events.clone() {
+            values.push(
+                "($".to_string()
+                    + &param_index.to_string()
+                    + ",$"
+                    + &(param_index + 1).to_string()
+                    + ",$"
+                    + &(param_index + 2).to_string()
+                    + ",$"
+                    + &(param_index + 3).to_string()
+                    + ",$"
+                    + &(param_index + 4).to_string()
+                    + ",$"
+                    + &(param_index + 5).to_string()
+                    + ",$"
+                    + &(param_index + 6).to_string()
+                    + ")",
+            );
+
+            params.push((
+                event.id,
+                event.aggregate_id,
+                event.event_type.clone(),
+                event.event_data.clone(),
+                event.version,
+                event.timestamp,
+                bincode::serialize(&event.metadata).unwrap_or_else(|_| {
+                    bincode::serialize(&EventMetadata::default()).unwrap_or_default()
+                }),
+            ));
+
+            param_index += 7;
+        }
+
+        query.push_str(&values.join(","));
+
+        let mut query = sqlx::query(&query);
+        for (id, aggregate_id, event_type, event_data, version, timestamp, metadata) in params {
+            query = query
+                .bind(id)
+                .bind(aggregate_id)
+                .bind(event_type)
+                .bind(event_data)
+                .bind(version)
+                .bind(timestamp)
+                .bind(metadata);
+        }
+
+        // Log the multi-aggregate insert
+        let unique_aggregates: std::collections::HashSet<Uuid> =
+            all_events.iter().map(|e| e.aggregate_id).collect();
+
+        tracing::info!(
+            "[EventStore] Attempting to insert {} events for {} aggregates in multi-aggregate bulk insert",
+            all_events.len(),
+            unique_aggregates.len()
+        );
+
+        match query.execute(&mut **tx).await {
+            Ok(_) => {
+                tracing::info!(
+                    "[EventStore] Successfully inserted {} events for {} aggregates in multi-aggregate bulk insert",
+                    all_events.len(),
+                    unique_aggregates.len()
+                );
+
+                // Update cache with new versions after successful insert
+                for (aggregate_id, aggregate_events) in events_by_aggregate {
+                    if let Some(last_event) = aggregate_events.last() {
+                        version_cache.insert(aggregate_id, last_event.version);
+                    }
+                }
+
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::error!(
+                    "[EventStore] Failed to insert {} events for {} aggregates in multi-aggregate bulk insert: {}",
+                    all_events.len(),
+                    unique_aggregates.len(),
+                    e
+                );
+                return Err(EventStoreError::DatabaseError(e));
+            }
+        }
+    }
 }
 
 /// Health check response
@@ -2193,6 +2503,14 @@ pub trait EventStoreTrait: Send + Sync + 'static {
         events: Vec<AccountEvent>,
         expected_version: i64,
     ) -> Result<(), EventStoreError>;
+
+    /// Save events for multiple aggregates in a single transaction
+    /// This allows true multi-row inserts across different aggregates
+    async fn save_events_multi_aggregate_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, i64)>, // (aggregate_id, events, expected_version)
+    ) -> Result<(), EventStoreError>;
 }
 
 #[async_trait]
@@ -2278,6 +2596,84 @@ impl EventStoreTrait for EventStore {
             // For now, focusing on the DB persistence part.
         )
         .await
+    }
+
+    async fn save_events_multi_aggregate_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, i64)>, // (aggregate_id, events, expected_version)
+    ) -> Result<(), EventStoreError> {
+        if events_by_aggregate.is_empty() {
+            return Ok(());
+        }
+
+        // Collect all events from all aggregates into a single batch
+        let mut all_events = Vec::new();
+
+        for (aggregate_id, events, expected_version) in events_by_aggregate {
+            if events.is_empty() {
+                continue;
+            }
+
+            // Prepare events for this aggregate
+            let mut current_event_version = expected_version;
+            let prepared_events: Vec<Event> = events
+                .into_iter()
+                .map(|domain_event| {
+                    current_event_version += 1;
+                    let event_data = bincode::serialize(&domain_event)
+                        .map_err(EventStoreError::SerializationErrorBincode)?;
+                    Ok(Event {
+                        id: Uuid::new_v4(),
+                        aggregate_id,
+                        event_type: domain_event.event_type().to_string(),
+                        event_data,
+                        version: current_event_version,
+                        timestamp: Utc::now(),
+                        metadata: EventMetadata::default(),
+                    })
+                })
+                .collect::<Result<Vec<Event>, EventStoreError>>()?;
+
+            all_events.extend(prepared_events);
+        }
+
+        if all_events.is_empty() {
+            return Ok(());
+        }
+
+        // Validate all events
+        for event_to_validate in &all_events {
+            let validation = Self::validate_event(event_to_validate).await;
+            if !validation.is_valid {
+                self.metrics
+                    .events_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(EventStoreError::ValidationError(validation.errors));
+            }
+        }
+
+        println!(
+            "🔍 [DEBUG] About to call bulk_insert_events_multi_aggregate with {} events",
+            all_events.len()
+        );
+
+        // Bulk insert all events in a single multi-aggregate operation
+        Self::bulk_insert_events_multi_aggregate(
+            tx,
+            all_events.clone(),
+            &self.metrics,
+            &self.version_cache,
+        )
+        .await?;
+
+        // Update metrics
+        self.metrics.events_processed.fetch_add(
+            all_events.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(())
     }
 }
 

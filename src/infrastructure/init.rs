@@ -4,6 +4,11 @@
 use crate::application::services::CQRSAccountService;
 use crate::infrastructure::auth::{AuthConfig, AuthService};
 use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
+use crate::infrastructure::connection_pool_monitor::{ConnectionPoolMonitor, PoolMonitorConfig};
+use crate::infrastructure::connection_pool_partitioning::{
+    OperationType, PartitionedPools, PoolSelector,
+};
+use crate::infrastructure::deadlock_detector::DeadlockDetector;
 use crate::infrastructure::event_store::{EventStore, EventStoreConfig, EventStoreTrait};
 use crate::infrastructure::kafka_abstraction::KafkaConfig;
 use crate::infrastructure::kafka_event_processor::KafkaEventProcessor;
@@ -44,6 +49,7 @@ pub async fn init_all_services(
     consistency_manager: Option<
         Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
     >,
+    partitioned_pools: Arc<crate::infrastructure::connection_pool_partitioning::PartitionedPools>,
 ) -> Result<ServiceContext> {
     info!("Initializing services...");
 
@@ -175,7 +181,7 @@ pub async fn init_all_services(
     let redis_client_trait =
         RealRedisClient::new(redis_client.as_ref().clone(), Some(redis_pool_config));
 
-    // Initialize EventStore with optimized pool size for high throughput
+    // Initialize EventStore with the provided partitioned pools
     let event_store_config = EventStoreConfig {
         database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
@@ -234,11 +240,16 @@ pub async fn init_all_services(
             .unwrap_or(100),
     };
 
-    let event_store: Arc<dyn EventStoreTrait + Send + Sync> = Arc::new(
-        EventStore::new_with_config(event_store_config)
-            .await
-            .map_err(|e| anyhow::Error::msg(e.to_string()))?,
-    );
+    let event_store: Arc<dyn EventStoreTrait + Send + Sync> =
+        Arc::new(EventStore::new_with_config_and_pools(
+            partitioned_pools.clone(),
+            event_store_config,
+            (*deadlock_detector).clone(),
+            crate::infrastructure::connection_pool_monitor::ConnectionPoolMonitor::new(
+                partitioned_pools.select_pool(OperationType::Write).clone(),
+                crate::infrastructure::connection_pool_monitor::PoolMonitorConfig::default(),
+            ),
+        ));
 
     // Initialize connection pool monitor
     let pool_monitor_config = crate::infrastructure::connection_pool_monitor::PoolMonitorConfig {
@@ -361,12 +372,6 @@ pub async fn init_all_services(
             .parse()
             .unwrap_or(20),
     };
-    // If in test or development mode, set batch_size=1 and batch_timeout_ms=0 for immediate flush
-    let rust_env = std::env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string());
-    if rust_env == "test" || rust_env == "development" {
-        projection_config.batch_size = 1;
-        projection_config.batch_timeout_ms = 0;
-    }
 
     let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> = Arc::new(
         ProjectionStore::from_pool_with_config(event_store.get_pool().clone(), projection_config),
@@ -631,7 +636,7 @@ pub async fn init_all_services_with_pool(
     consistency_manager: Option<
         Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
     >,
-    db_pool: sqlx::PgPool,
+    partitioned_pools: Arc<PartitionedPools>,
 ) -> anyhow::Result<ServiceContext> {
     use crate::infrastructure::auth::{AuthConfig, AuthService};
     use crate::infrastructure::cache_service::{
@@ -650,17 +655,23 @@ pub async fn init_all_services_with_pool(
     use std::sync::Arc;
     use std::time::Duration;
 
-    // Use the provided db_pool for all DB-backed services
+    // Use the provided partitioned pools for all DB-backed services
     let event_store: Arc<dyn EventStoreTrait + Send + Sync> =
-        Arc::new(EventStore::new(db_pool.clone()));
+        Arc::new(EventStore::new_with_config_and_pools(
+            partitioned_pools.clone(),
+            EventStoreConfig::default(),
+            DeadlockDetector::new(
+                crate::infrastructure::deadlock_detector::DeadlockConfig::default(),
+            ),
+            ConnectionPoolMonitor::new(
+                partitioned_pools.select_pool(OperationType::Write).clone(),
+                PoolMonitorConfig::default(),
+            ),
+        ));
     let mut projection_config = ProjectionConfig::default();
-    let rust_env = std::env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string());
-    if rust_env == "test" || rust_env == "development" {
-        projection_config.batch_size = 1;
-        projection_config.batch_timeout_ms = 0;
-    }
+
     let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> = Arc::new(
-        ProjectionStore::from_pool_with_config(db_pool.clone(), projection_config),
+        ProjectionStore::from_pools_with_config(partitioned_pools.clone(), projection_config),
     );
 
     // Redis setup

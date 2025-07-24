@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 /// Main CQRS handler that coordinates commands and queries
 pub struct CQRSHandler {
+    event_store: Arc<dyn EventStoreTrait>,
     command_bus: CommandBus,
     query_bus: QueryBus,
     semaphore: Arc<Semaphore>,
@@ -48,11 +49,16 @@ impl CQRSHandler {
         let query_bus = QueryBus::new(projection_store, cache_service);
 
         Self {
+            event_store,
             command_bus,
             query_bus,
             semaphore: Arc::new(Semaphore::new(max_concurrent_operations)),
             metrics: Arc::new(CQRSMetrics::default()),
         }
+    }
+
+    pub fn event_store(&self) -> &Arc<dyn EventStoreTrait> {
+        &self.event_store
     }
 
     /// Execute a command with rate limiting

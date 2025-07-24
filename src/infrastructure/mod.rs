@@ -10,6 +10,7 @@ pub mod connection_pool_monitor;
 pub mod connection_pool_partitioning; // Added connection pool partitioning
 pub mod consistency_manager;
 pub mod deadlock_detector;
+pub mod dlq_router;
 pub mod event_processor;
 pub mod event_store;
 pub mod init;

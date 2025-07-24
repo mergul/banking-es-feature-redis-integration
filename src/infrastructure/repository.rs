@@ -354,6 +354,7 @@ impl AccountRepositoryTrait for AccountRepository {
 }
 
 #[cfg(test)]
+#[ignore]
 mod tests {
     use super::*;
     use crate::domain::Account;

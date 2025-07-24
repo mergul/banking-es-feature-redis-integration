@@ -1,0 +1,329 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src/lib.rs (target/debug/deps/banking_es-73fc3b689577c159)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/banking_es-e9c1e334ed74ab9f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/working_stress_test.rs (target/debug/deps/working_stress_test-6cea076afa97cfb7)
+
+running 1 test
+🚀 Starting Write Batching Multi-Row Insert Test
+🔧 Initializing services using main.rs pattern...
+[2m2025-07-24T04:36:22.581342Z[0m [32m INFO[0m [2mbanking_es::infrastructure::connection_pool_partitioning[0m[2m:[0m 🔀 Creating partitioned connection pools...
+[2m2025-07-24T04:36:22.581392Z[0m [32m INFO[0m [2mbanking_es::infrastructure::connection_pool_partitioning[0m[2m:[0m Creating WRITE pool: 166 max connections
+[2m2025-07-24T04:36:26.966841Z[0m [32m INFO[0m [2mbanking_es::infrastructure::connection_pool_partitioning[0m[2m:[0m Creating READ pool: 333 max connections
+[2m2025-07-24T04:36:35.654958Z[0m [32m INFO[0m [2mbanking_es::infrastructure::connection_pool_partitioning[0m[2m:[0m ✅ Partitioned connection pools created successfully
+[2m2025-07-24T04:36:35.655023Z[0m [32m INFO[0m [2mbanking_es::infrastructure::connection_pool_partitioning[0m[2m:[0m    • Write pool: 0/83 connections
+[2m2025-07-24T04:36:35.655043Z[0m [32m INFO[0m [2mbanking_es::infrastructure::connection_pool_partitioning[0m[2m:[0m    • Read pool: 0/166 connections
+[2m2025-07-24T04:36:35.655141Z[0m [32m INFO[0m [2mbanking_es::infrastructure::init[0m[2m:[0m Initializing services...
+[2m2025-07-24T04:36:35.657692Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:36:35.658896Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:36:35.658975Z[0m [32m INFO[0m [2mbanking_es::infrastructure::init[0m[2m:[0m All services initialized successfully
+✅ All services initialized successfully
+[2m2025-07-24T04:36:35.760474Z[0m [32m INFO[0m [2mbanking_es::application::services::cqrs_service[0m[2m:[0m Write batching service is enabled and ready
+✅ Write batching service started
+🔧 Setting up CDC service manager...
+[2m2025-07-24T04:36:35.760911Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:36:35.761923Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+🔧 Starting CDC service manager...
+[2m2025-07-24T04:36:35.863371Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager::start() called
+[2m2025-07-24T04:36:35.863481Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m Starting optimized CDC Service Manager
+[2m2025-07-24T04:36:35.863504Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: Initializing with config: OptimizationConfig { health_check_interval_secs: 30, cleanup_interval_secs: 3600, metrics_flush_interval_secs: 60, graceful_shutdown_timeout_secs: 30, consumer_backoff_ms: 100, max_retries: 3, circuit_breaker_threshold: 0.1, enable_compression: true, enable_batching: true }
+[2m2025-07-24T04:36:35.863535Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Consistency manager is available and set on processor
+[2m2025-07-24T04:36:35.863551Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Initializing infrastructure...
+[2m2025-07-24T04:36:35.863582Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: Initializing infrastructure...
+[2m2025-07-24T04:36:35.864270Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 0 started
+[2m2025-07-24T04:36:35.864359Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 1 started
+[2m2025-07-24T04:36:35.864392Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 2 started
+[2m2025-07-24T04:36:35.864415Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 3 started
+[2m2025-07-24T04:36:35.864437Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 4 started
+[2m2025-07-24T04:36:35.864462Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 5 started
+[2m2025-07-24T04:36:35.864483Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 6 started
+[2m2025-07-24T04:36:35.864506Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 7 started
+[2m2025-07-24T04:36:35.864527Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 8 started
+[2m2025-07-24T04:36:35.864549Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 9 started
+[2m2025-07-24T04:36:35.864570Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 10 started
+[2m2025-07-24T04:36:35.864592Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 11 started
+[2m2025-07-24T04:36:35.864614Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 12 started
+[2m2025-07-24T04:36:35.864636Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 13 started
+[2m2025-07-24T04:36:35.864657Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 14 started
+[2m2025-07-24T04:36:35.864679Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m Optimized batch processor worker 15 started
+[2m2025-07-24T04:36:35.868121Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m EventStore Metrics - Processed: 0, Failed: 0, Success: 0%, Batches: 0, Cache Hit Rate: 0%
+[2m2025-07-24T04:36:35.868425Z[0m [32m INFO[0m [2mbanking_es::infrastructure::projections[0m[2m:[0m Projection Metrics - Cache Hit Rate: 0.00%, Batch Updates: 0, Errors: 0, Avg Query Time: 0.00ms
+[2m2025-07-24T04:36:35.868588Z[0m [32m INFO[0m [2mbanking_es::infrastructure::repository[0m[2m:[0m Repository Metrics - Cache Hit Rate: 0.0%, Batch Flushes: 0, Events Processed: 0, Errors: 0
+[2m2025-07-24T04:36:35.868654Z[0m [32m INFO[0m [2mbanking_es::infrastructure::projections[0m[2m:[0m Projection Metrics - Cache Hit Rate: 0.00%, Batch Updates: 0, Errors: 0, Avg Query Time: 0.00ms
+[2m2025-07-24T04:36:35.870180Z[0m [32m INFO[0m [2msqlx::postgres::notice[0m[2m:[0m relation "kafka_outbox_cdc" already exists, skipping
+[2m2025-07-24T04:36:35.876815Z[0m [32m INFO[0m [2msqlx::postgres::notice[0m[2m:[0m relation "idx_outbox_cdc_created_at" already exists, skipping
+[2m2025-07-24T04:36:35.885990Z[0m [32m INFO[0m [2msqlx::postgres::notice[0m[2m:[0m relation "idx_outbox_cdc_aggregate_id" already exists, skipping
+[2m2025-07-24T04:36:35.893748Z[0m [32m INFO[0m [2msqlx::postgres::notice[0m[2m:[0m relation "idx_outbox_cdc_event_id" already exists, skipping
+[2m2025-07-24T04:36:35.898957Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: Pre-warming caches...
+[2m2025-07-24T04:36:35.899130Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: Validating Kafka connectivity...
+[2m2025-07-24T04:36:35.899154Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: ✅ Infrastructure initialized
+[2m2025-07-24T04:36:35.899176Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Infrastructure initialized successfully
+[2m2025-07-24T04:36:35.899194Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Starting core services...
+[2m2025-07-24T04:36:35.899356Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager::start_resilient_consumer() called
+[2m2025-07-24T04:36:35.899528Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: Starting event processor's batch processor...
+[2m2025-07-24T04:36:35.899713Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_event_processor[0m[2m:[0m Batch processor started successfully
+[2m2025-07-24T04:36:35.899757Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: ✅ Event processor's batch processor started successfully
+[2m2025-07-24T04:36:35.899777Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: Force starting batch processor...
+[2m2025-07-24T04:36:35.899799Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: ✅ Batch processor force started successfully
+[2m2025-07-24T04:36:35.899812Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: ✅ Core services started
+[2m2025-07-24T04:36:35.899832Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Core services started successfully
+[2m2025-07-24T04:36:35.899893Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Starting monitoring tasks...
+[2m2025-07-24T04:36:35.900075Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: ✅ Monitoring tasks started
+[2m2025-07-24T04:36:35.900143Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Monitoring tasks started successfully
+[2m2025-07-24T04:36:35.900244Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager started successfully
+[2m2025-07-24T04:36:35.900334Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Service is now RUNNING
+✅ CDC Service Manager started
+[2m2025-07-24T04:36:35.902779Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: consumer task spawned
+[2m2025-07-24T04:36:35.902913Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:36:35.902925Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:36:35.902944Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:36:35.902955Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:36:35.903643Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:36:35.903675Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:36:35.903686Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:36:35.903730Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:36:35.903788Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:35.903799Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:35.903808Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:35.903816Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:36:35.903824Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:35.903834Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:36:35.903985Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:36:35.904009Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:35.904019Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
+[2m2025-07-24T04:36:35.905149Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m Cleanup Task: Starting cleanup cycle
+[2m2025-07-24T04:36:35.909779Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m Cleanup Task: Cleaned 0 old messages
+[2m2025-07-24T04:36:37.900953Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Service Manager: ✅ Batch processor is already running
+✅ CDC Event Processor with batch processing enabled retrieved
+✅ CDC Batch Processor running: true
+✅ Write batching test environment setup complete
+
+📝 PHASE 1: Create New Test Accounts with Multi-Aggregate Batching
+===================================================================
+🔧 Creating 50 new test accounts with batching...
+🚀 Submitting all 50 operations simultaneously...
+📦 Processing write batch: 50 operations (batch full), age: 2.311153298s
+🔄 Starting batch processing...
+📊 Processing batch with 50 operations
+🔍 [DEBUG] About to call save_events_multi_aggregate_in_transaction with 50 aggregates
+🔍 [DEBUG] About to call bulk_insert_events_multi_aggregate with 50 events
+🚀 [DEBUG] bulk_insert_events_multi_aggregate called with 50 events
+[2m2025-07-24T04:36:38.158446Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m [EventStore] Attempting to insert 50 events for 50 aggregates in multi-aggregate bulk insert
+[2m2025-07-24T04:36:38.160880Z[0m [32m INFO[0m [2mbanking_es::infrastructure::event_store[0m[2m:[0m [EventStore] Successfully inserted 50 events for 50 aggregates in multi-aggregate bulk insert
+✅ Batch execution completed with 50 results
+[2m2025-07-24T04:36:38.164695Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m ✅ OutboxBatcher: Flushed 5 messages in 3.224029ms
+[2m2025-07-24T04:36:38.194708Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m ✅ OutboxBatcher: Flushed 45 messages in 3.930743ms
+[2m2025-07-24T04:36:40.904845Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Consumer group join completed
+[2m2025-07-24T04:36:40.904869Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Starting main consumption loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:40.904900Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entering main polling loop
+[2m2025-07-24T04:36:40.904907Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Poll attempt #1 for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:40.904924Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m Pre-rebalance: Assign(TPL {banking-es.public.kafka_outbox_cdc/0: offset=Invalid metadata="", error=Ok(()); banking-es.public.kafka_outbox_cdc/1: offset=Invalid metadata="", error=Ok(()); banking-es.public.kafka_outbox_cdc/2: offset=Invalid metadata="", error=Ok(())})
+[2m2025-07-24T04:36:40.905178Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m Post-rebalance: Assign(TPL {banking-es.public.kafka_outbox_cdc/0: offset=Invalid metadata="", error=Ok(()); banking-es.public.kafka_outbox_cdc/1: offset=Invalid metadata="", error=Ok(()); banking-es.public.kafka_outbox_cdc/2: offset=Invalid metadata="", error=Ok(())})
+[2m2025-07-24T04:36:40.905238Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Timeout occurred, restarting consumer
+[2m2025-07-24T04:36:40.905250Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:36:40.905256Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:36:40.905262Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:36:40.905266Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:36:40.905822Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:36:40.905850Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:36:40.905859Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:36:40.905900Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:36:40.905916Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:40.905933Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:40.905941Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:40.905952Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:36:40.905961Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:40.905969Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:36:40.906019Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:36:40.906035Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:40.906064Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
+[2m2025-07-24T04:36:42.907276Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m Pre-rebalance: Assign(TPL {banking-es-cache/0: offset=Invalid metadata="", error=Ok(())})
+[2m2025-07-24T04:36:42.907486Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m Post-rebalance: Assign(TPL {banking-es-cache/0: offset=Invalid metadata="", error=Ok(())})
+[2m2025-07-24T04:36:45.906729Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Consumer group join completed
+[2m2025-07-24T04:36:45.906753Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Starting main consumption loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:45.906789Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entering main polling loop
+[2m2025-07-24T04:36:45.906796Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Poll attempt #1 for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:45.906815Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m Pre-rebalance: Assign(TPL {})
+[2m2025-07-24T04:36:45.907021Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m Post-rebalance: Assign(TPL {})
+[2m2025-07-24T04:36:45.907060Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Timeout occurred, restarting consumer
+[2m2025-07-24T04:36:45.907071Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:36:45.907082Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:36:45.907092Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:36:45.907096Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:36:45.907628Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:36:45.907640Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:36:45.907647Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:36:45.907684Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:36:45.907697Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:45.907704Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:45.907709Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:45.907713Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:36:45.907718Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:45.907724Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:36:45.907828Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:36:45.907843Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:45.907849Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
+[2m2025-07-24T04:36:50.908907Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Consumer group join completed
+[2m2025-07-24T04:36:50.908929Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Starting main consumption loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:50.908959Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entering main polling loop
+[2m2025-07-24T04:36:50.908965Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Poll attempt #1 for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:50.909012Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Timeout occurred, restarting consumer
+[2m2025-07-24T04:36:50.909023Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:36:50.909035Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:36:50.909043Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:36:50.909048Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:36:50.909592Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:36:50.909604Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:36:50.909609Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:36:50.909632Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:36:50.909640Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:50.909645Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:50.909649Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:50.909653Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:36:50.909658Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:50.909662Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:36:50.909697Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:36:50.909704Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:36:50.909708Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
+[2m2025-07-24T04:36:55.909689Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Timeout occurred, restarting consumer
+[2m2025-07-24T04:37:00.914586Z[0m [32m INFO[0m [2mlibrdkafka[0m[2m:[0m librdkafka: REQTMOUT [thrd:GroupCoordinator]: GroupCoordinator/0: Timed out LeaveGroupRequest in flight (after 5004ms, timeout #0): possibly held back by preceeding blocking JoinGroupRequest with timeout in 293997ms    
+[2m2025-07-24T04:37:00.914703Z[0m [33m WARN[0m [2mlibrdkafka[0m[2m:[0m librdkafka: REQTMOUT [thrd:GroupCoordinator]: GroupCoordinator/0: Timed out 1 in-flight, 0 retry-queued, 0 out-queue, 0 partially-sent requests    
+[2m2025-07-24T04:37:00.914750Z[0m [31mERROR[0m [2mlibrdkafka[0m[2m:[0m librdkafka: FAIL [thrd:GroupCoordinator]: GroupCoordinator: 1 request(s) timed out: disconnect (average rtt 0.205ms) (after 9003ms in state UP)    
+[2m2025-07-24T04:37:00.914824Z[0m [31mERROR[0m [2mrdkafka::client[0m[2m:[0m librdkafka: Global error: OperationTimedOut (Local: Timed out): GroupCoordinator: 1 request(s) timed out: disconnect (average rtt 0.205ms) (after 9003ms in state UP)    
+[2m2025-07-24T04:37:00.915958Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:37:00.916024Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:37:00.916056Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:37:00.916078Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:37:00.917563Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:37:00.917626Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:37:00.917651Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:37:00.917770Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:37:00.917827Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:00.917851Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:00.917869Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:00.917888Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:37:00.917923Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:00.917994Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:00.918263Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:00.918334Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:00.918359Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
+[2m2025-07-24T04:37:05.938926Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Consumer group join completed
+[2m2025-07-24T04:37:05.938959Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Starting main consumption loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:05.938987Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entering main polling loop
+[2m2025-07-24T04:37:05.938993Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Poll attempt #1 for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:05.939031Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Timeout occurred, restarting consumer
+[2m2025-07-24T04:37:05.939041Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:37:05.939047Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:37:05.939053Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:37:05.939068Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:37:05.939629Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:37:05.939644Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:37:05.939651Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:37:05.939681Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:37:05.939693Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:05.939699Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:05.939704Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:05.939709Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:37:05.939714Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:05.939720Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:05.939769Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:05.939783Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:05.939787Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
+[2m2025-07-24T04:37:10.940984Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Consumer group join completed
+[2m2025-07-24T04:37:10.941013Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Starting main consumption loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:10.941052Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entering main polling loop
+[2m2025-07-24T04:37:10.941059Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Poll attempt #1 for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:10.941092Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Timeout occurred, restarting consumer
+[2m2025-07-24T04:37:10.941104Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:37:10.941109Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:37:10.941116Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:37:10.941121Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:37:10.941669Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:37:10.941685Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:37:10.941692Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:37:10.941726Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:37:10.941742Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:10.941748Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:10.941753Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:10.941758Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:37:10.941763Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:10.941770Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:10.941865Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:10.941882Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:10.941889Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
+[2m2025-07-24T04:37:15.942902Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Consumer group join completed
+[2m2025-07-24T04:37:15.942926Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Starting main consumption loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:15.942958Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entering main polling loop
+[2m2025-07-24T04:37:15.942964Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Poll attempt #1 for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:15.942994Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Timeout occurred, restarting consumer
+[2m2025-07-24T04:37:15.943005Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:37:15.943010Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:37:15.943016Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:37:15.943022Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:37:15.943561Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:37:15.943574Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:37:15.943581Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:37:15.943607Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:37:15.943618Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:15.943623Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:15.943630Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:15.943643Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:37:15.943649Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:15.943655Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:15.943768Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:15.943783Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:15.943789Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
+[2m2025-07-24T04:37:20.943709Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Timeout occurred, restarting consumer
+test test_write_batching_multi_row_inserts has been running for over 60 seconds
+[2m2025-07-24T04:37:25.948973Z[0m [32m INFO[0m [2mlibrdkafka[0m[2m:[0m librdkafka: REQTMOUT [thrd:GroupCoordinator]: GroupCoordinator/0: Timed out LeaveGroupRequest in flight (after 5004ms, timeout #0): possibly held back by preceeding blocking JoinGroupRequest with timeout in 293997ms    
+[2m2025-07-24T04:37:25.949082Z[0m [33m WARN[0m [2mlibrdkafka[0m[2m:[0m librdkafka: REQTMOUT [thrd:GroupCoordinator]: GroupCoordinator/0: Timed out 1 in-flight, 0 retry-queued, 0 out-queue, 0 partially-sent requests    
+[2m2025-07-24T04:37:25.949125Z[0m [31mERROR[0m [2mlibrdkafka[0m[2m:[0m librdkafka: FAIL [thrd:GroupCoordinator]: GroupCoordinator: 1 request(s) timed out: disconnect (average rtt 0.260ms) (after 9003ms in state UP)    
+[2m2025-07-24T04:37:25.949172Z[0m [31mERROR[0m [2mrdkafka::client[0m[2m:[0m librdkafka: Global error: OperationTimedOut (Local: Timed out): GroupCoordinator: 1 request(s) timed out: disconnect (average rtt 0.260ms) (after 9003ms in state UP)    
+[2m2025-07-24T04:37:25.950504Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:37:25.950577Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:37:25.950608Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:37:25.950630Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:37:25.952034Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:37:25.952099Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:37:25.952124Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:37:25.952267Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:37:25.952319Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:25.952342Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:25.952361Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:25.952380Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:37:25.952399Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:25.952420Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:25.952655Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:25.952728Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:25.952753Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
+[2m2025-07-24T04:37:30.981056Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Consumer group join completed
+[2m2025-07-24T04:37:30.981088Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Starting main consumption loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:30.981145Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entering main polling loop
+[2m2025-07-24T04:37:30.981161Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Poll attempt #1 for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:30.981252Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Timeout occurred, restarting consumer
+[2m2025-07-24T04:37:30.981271Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: Creating new Kafka consumer instance...
+[2m2025-07-24T04:37:30.981280Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: banking-es
+[2m2025-07-24T04:37:30.981289Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: Kafka config created, attempting to create consumer...
+[2m2025-07-24T04:37:30.981297Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: Creating consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, auto_offset_reset: earliest
+[2m2025-07-24T04:37:30.982000Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: ✅ Consumer created successfully with group_id: banking-es-group
+[2m2025-07-24T04:37:30.982024Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: ✅ Kafka consumer created successfully
+[2m2025-07-24T04:37:30.982034Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDC Consumer: ✅ Successfully created Kafka consumer
+[2m2025-07-24T04:37:30.982108Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_service_manager[0m[2m:[0m CDCServiceManager: about to enter consumer main loop
+[2m2025-07-24T04:37:30.982135Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer::start_consuming_with_mutex() called for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:30.982150Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m Starting CDC consumer for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:30.982162Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Entered start_consuming async loop for topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:30.982177Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Kafka consumer config - enabled: true, group_id: banking-es-group, bootstrap_servers: localhost:9092
+[2m2025-07-24T04:37:30.982192Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Subscribing to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:30.982209Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Subscribing to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:30.982304Z[0m [32m INFO[0m [2mbanking_es::infrastructure::kafka_abstraction[0m[2m:[0m KafkaConsumer: subscribe_to_topic - Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc with group_id: banking-es-group
+[2m2025-07-24T04:37:30.982327Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: ✅ Successfully subscribed to topic: banking-es.public.kafka_outbox_cdc
+[2m2025-07-24T04:37:30.982345Z[0m [32m INFO[0m [2mbanking_es::infrastructure::cdc_debezium[0m[2m:[0m CDCConsumer: Waiting for consumer to join group...
