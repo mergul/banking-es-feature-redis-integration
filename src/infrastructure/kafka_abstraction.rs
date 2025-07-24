@@ -980,20 +980,6 @@ impl KafkaConsumer {
             ))
         }
     }
-
-    pub async fn poll(
-        &self,
-        timeout: Duration,
-    ) -> Result<Option<Result<OwnedMessage, KafkaError>>, BankingKafkaError> {
-        if let Some(consumer) = &self.consumer {
-            match consumer.recv().await {
-                Ok(message) => Ok(Some(Ok(message.detach()))),
-                Err(e) => Err(e.into()),
-            }
-        } else {
-            Ok(None)
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -670,18 +670,10 @@ impl CDCServiceManager {
         let shutdown_timeout =
             Duration::from_secs(self.optimization_config.graceful_shutdown_timeout_secs);
         let mut tasks = self.tasks.write().await;
-        let mut tasks_to_await = Vec::new();
-        for task in tasks.drain(..) {
-            if !task.is_finished() {
-                tasks_to_await.push(task);
-            }
-        }
+        let tasks_to_await: Vec<_> = tasks.drain(..).collect();
+
         tracing::info!("🛑 CDCServiceManager: Awaiting all background tasks");
-        let shutdown_future = async {
-            for task in tasks_to_await {
-                let _ = task.await;
-            }
-        };
+        let shutdown_future = join_all(tasks_to_await);
 
         match tokio::time::timeout(shutdown_timeout, shutdown_future).await {
             Ok(_) => {
