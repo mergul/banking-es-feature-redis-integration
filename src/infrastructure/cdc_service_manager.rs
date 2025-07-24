@@ -6,6 +6,7 @@ use crate::infrastructure::projections::ProjectionStoreTrait;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::future::join_all;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
@@ -669,13 +670,16 @@ impl CDCServiceManager {
             Duration::from_secs(self.optimization_config.graceful_shutdown_timeout_secs);
         let tasks = self.tasks.read().await;
 
-        let shutdown_future = async {
-            for task in tasks.iter() {
-                if !task.is_finished() {
-                    task.abort();
-                }
+        let mut tasks_to_await = vec![];
+        for task in tasks.iter() {
+            if !task.is_finished() {
+                tasks_to_await.push(async {
+                    let _ = task.await;
+                });
             }
-        };
+        }
+
+        let shutdown_future = join_all(tasks_to_await);
 
         match tokio::time::timeout(shutdown_timeout, shutdown_future).await {
             Ok(_) => {
