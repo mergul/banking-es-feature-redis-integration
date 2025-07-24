@@ -1196,6 +1196,7 @@ async fn test_read_operations_after_writes() {
         println!("⚠️  Warning: Cleanup failed: {}", e);
     }
 
+    println!("✅ All background tasks (including CDC consumer) stopped. Test complete.");
     println!("✅ Read operations test after writes (Multi-Row Insert) completed successfully!");
 }
 

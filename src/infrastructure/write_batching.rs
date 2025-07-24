@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -112,7 +113,7 @@ pub struct WriteBatchingService {
 
     // Processing
     batch_processor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    shutdown_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    shutdown_token: CancellationToken,
 
     // Metrics
     batches_processed: Arc<Mutex<u64>>,
@@ -147,7 +148,7 @@ impl WriteBatchingService {
             pending_results: Arc::new(Mutex::new(HashMap::new())),
             completed_results: Arc::new(Mutex::new(HashMap::new())), // FIXED: Add result storage
             batch_processor_handle: Arc::new(Mutex::new(None)),
-            shutdown_tx: Arc::new(Mutex::new(None)),
+            shutdown_token: CancellationToken::new(),
             batches_processed: Arc::new(Mutex::new(0)),
             operations_processed: Arc::new(Mutex::new(0)),
         }
@@ -162,9 +163,7 @@ impl WriteBatchingService {
 
         info!("🚀 Starting write batching service...");
 
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
-        *self.shutdown_tx.lock().await = Some(shutdown_tx);
-
+        let shutdown_token = self.shutdown_token.clone();
         let current_batch = self.current_batch.clone();
         let pending_results = self.pending_results.clone();
         let completed_results = self.completed_results.clone(); // FIXED: Pass completed results
@@ -205,7 +204,7 @@ impl WriteBatchingService {
                             ).await;
                         }
                     }
-                    _ = shutdown_rx.recv() => {
+                    _ = shutdown_token.cancelled() => {
                         info!("🛑 Write batching service shutdown signal received");
                         break;
                     }
@@ -238,19 +237,7 @@ impl WriteBatchingService {
     pub async fn stop(&mut self) -> Result<()> {
         info!("🛑 Stopping write batching service...");
 
-        // FIXED: Use graceful shutdown with proper channel lifecycle management
-        let graceful_timeout = Duration::from_secs(30);
-        if let Err(e) = self.graceful_shutdown(graceful_timeout).await {
-            println!(
-                "⚠️  Graceful shutdown failed: {}, falling back to force stop",
-                e
-            );
-        }
-
-        // Send shutdown signal to batch processor
-        if let Some(tx) = self.shutdown_tx.lock().await.take() {
-            let _ = tx.send(()).await;
-        }
+        self.shutdown_token.cancel();
 
         // Wait for batch processor to complete
         if let Some(handle) = self.batch_processor_handle.lock().await.take() {

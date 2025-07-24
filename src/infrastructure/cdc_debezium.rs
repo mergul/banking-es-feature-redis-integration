@@ -16,6 +16,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -35,6 +36,7 @@ use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::event_processor::EventProcessor;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 /// Kafka message structure for CDC events
 #[derive(Debug, Clone)]
@@ -739,19 +741,26 @@ impl CDCConsumer {
         &mut self,
         processor: Arc<EnhancedCDCEventProcessor>,
     ) -> Result<()> {
-        // This method is kept for backward compatibility but should not be used
-        // Use start_consuming_with_mutex directly
-        Err(anyhow::anyhow!("Use start_consuming_with_mutex instead"))
+        Err(anyhow::anyhow!(
+            "Use start_consuming_with_cancellation_token instead"
+        ))
     }
 
-    /// Start consuming CDC events with mutex-wrapped processor
-    pub async fn start_consuming_with_mutex(
+    /// Start consuming CDC events with unified cancellation token
+    pub async fn start_consuming_with_cancellation_token(
         &mut self,
         processor: Arc<UltraOptimizedCDCEventProcessor>,
-        mut shutdown_rx: mpsc::Receiver<()>,
+        shutdown_token: CancellationToken,
     ) -> Result<()> {
+        // Static counter for active polling loops
+        static ACTIVE_CONSUMERS: AtomicUsize = AtomicUsize::new(0);
+        let current = ACTIVE_CONSUMERS.fetch_add(1, Ordering::SeqCst) + 1;
         tracing::info!(
-            "CDCConsumer::start_consuming_with_mutex() called for topic: {}",
+            "CDCConsumer: Entering main polling loop. Active consumers: {}",
+            current
+        );
+        tracing::info!(
+            "CDCConsumer::start_consuming_with_cancellation_token() called for topic: {}",
             self.cdc_topic
         );
         info!("Starting CDC consumer for topic: {}", self.cdc_topic);
@@ -932,7 +941,7 @@ impl CDCConsumer {
             }
 
             tokio::select! {
-                _ = shutdown_rx.recv() => {
+                _ = shutdown_token.cancelled() => {
                     info!("CDC consumer received shutdown signal");
                     tracing::info!("CDCConsumer: Received shutdown signal, breaking loop");
                     break;
@@ -995,7 +1004,7 @@ impl CDCConsumer {
                                 _ = tokio::time::sleep(Duration::from_millis(500)) => {
                                     // Continue after delay
                                 }
-                                _ = shutdown_rx.recv() => {
+                                _ = shutdown_token.cancelled() => {
                                     info!("CDC consumer received shutdown signal during error handling");
                                     tracing::info!("CDCConsumer: Received shutdown signal during error handling, breaking loop");
                                     break;
@@ -1011,6 +1020,11 @@ impl CDCConsumer {
         tracing::info!(
             "CDCConsumer: Exiting start_consuming after {} polls",
             poll_count
+        );
+        let current = ACTIVE_CONSUMERS.fetch_sub(1, Ordering::SeqCst) - 1;
+        tracing::info!(
+            "CDCConsumer: Exiting main polling loop. Active consumers: {}",
+            current
         );
         Ok(())
     }

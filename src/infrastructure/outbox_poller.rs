@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::domain::AccountEvent;
@@ -32,9 +33,7 @@ pub struct OutboxPollingService {
     outbox_repo: Arc<dyn OutboxRepositoryTrait>,
     kafka_producer: Arc<dyn KafkaProducerTrait>,
     config: OutboxPollerConfig,
-    shutdown_rx: mpsc::Receiver<()>,
-    // To allow signaling shutdown from another part of the application
-    // _shutdown_tx: mpsc::Sender<()>, // Keep the sender if needed to signal from this struct itself
+    shutdown_token: CancellationToken,
 }
 
 impl OutboxPollingService {
@@ -42,27 +41,25 @@ impl OutboxPollingService {
         outbox_repo: Arc<dyn OutboxRepositoryTrait>,
         kafka_producer: Arc<dyn KafkaProducerTrait>,
         config: OutboxPollerConfig,
-        shutdown_rx: mpsc::Receiver<()>,
-        // _shutdown_tx: mpsc::Sender<()>,
+        shutdown_token: CancellationToken,
     ) -> Self {
         Self {
             outbox_repo,
             kafka_producer,
             config,
-            shutdown_rx,
-            // _shutdown_tx,
+            shutdown_token,
         }
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(self) {
         info!(
             "OutboxPollingService started with config: {:?}",
             self.config
         );
-
+        let shutdown_token = self.shutdown_token.clone();
         loop {
             tokio::select! {
-                _ = self.shutdown_rx.recv() => {
+                _ = shutdown_token.cancelled() => {
                     info!("OutboxPollingService received shutdown signal. Exiting.");
                     break;
                 }

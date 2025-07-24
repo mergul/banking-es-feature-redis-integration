@@ -12,6 +12,7 @@ use sqlx::{Postgres, Transaction};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, RwLock};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -21,9 +22,8 @@ pub struct CDCServiceManager {
     outbox_repo: Arc<CDCOutboxRepository>,
     processor: Arc<UltraOptimizedCDCEventProcessor>,
 
-    // Enhanced shutdown management
-    shutdown_tx: watch::Sender<bool>,
-    shutdown_rx: watch::Receiver<bool>,
+    // Unified shutdown management
+    shutdown_token: CancellationToken,
 
     // Task management with proper handles
     tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
@@ -221,7 +221,7 @@ impl CDCServiceManager {
         >,
     ) -> Result<Self> {
         let optimization_config = OptimizationConfig::default();
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let shutdown_token = CancellationToken::new();
         let metrics = metrics.unwrap_or_else(|| Arc::new(EnhancedCDCMetrics::default()));
         let health_checker = Arc::new(CDCHealthCheck::new(metrics.clone()));
         let projection_store = Arc::new(
@@ -240,14 +240,11 @@ impl CDCServiceManager {
             consistency_manager.clone(),
         ));
 
-        // Consistency manager is set on the processor during construction
-
         Ok(Self {
             config,
             outbox_repo,
             processor,
-            shutdown_tx,
-            shutdown_rx,
+            shutdown_token,
             tasks: Arc::new(RwLock::new(Vec::new())),
             state: Arc::new(RwLock::new(ServiceState::Stopped)),
             metrics,
@@ -404,7 +401,7 @@ impl CDCServiceManager {
         let config = self.config.clone();
         let processor = self.processor.clone();
         let metrics = self.metrics.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let shutdown_token = self.shutdown_token.clone();
         let optimization_config = self.optimization_config.clone();
 
         let handle = tokio::spawn(async move {
@@ -414,8 +411,8 @@ impl CDCServiceManager {
 
             loop {
                 // Check for shutdown signal
-                if *shutdown_rx.borrow() {
-                    tracing::info!("CDC Consumer: Received shutdown signal");
+                if shutdown_token.is_cancelled() {
+                    tracing::info!("CDC Consumer: Received shutdown signal (outer loop)");
                     break;
                 }
 
@@ -445,14 +442,15 @@ impl CDCServiceManager {
                 };
 
                 let cdc_topic = format!("{}.{}", config.topic_prefix, config.table_include_list);
-                let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-
                 let mut consumer = CDCConsumer::new(kafka_consumer, cdc_topic);
 
                 tracing::info!("CDCServiceManager: about to enter consumer main loop");
-                // Start consuming with timeout using the mutex version
+                // Start consuming with unified shutdown token
                 let consumer_result = consumer
-                    .start_consuming_with_mutex(processor.clone(), shutdown_rx)
+                    .start_consuming_with_cancellation_token(
+                        processor.clone(),
+                        shutdown_token.clone(),
+                    )
                     .await;
 
                 match consumer_result {
@@ -494,7 +492,7 @@ impl CDCServiceManager {
     async fn start_health_monitor(&self) -> Result<tokio::task::JoinHandle<()>> {
         let health_checker = self.health_checker.clone();
         let metrics = self.metrics.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut shutdown_rx = self.shutdown_token.clone();
         let state = self.state.clone();
         let optimization_config = self.optimization_config.clone();
 
@@ -505,7 +503,7 @@ impl CDCServiceManager {
 
             loop {
                 tokio::select! {
-                    _ = shutdown_rx.changed() => break,
+                    _ = shutdown_rx.cancelled() => break,
                     _ = interval.tick() => {
                         let health_status = health_checker.get_health_status();
                         tracing::debug!("Health Check: {}", health_status);
@@ -539,7 +537,7 @@ impl CDCServiceManager {
     async fn start_cleanup_task(&self) -> Result<tokio::task::JoinHandle<()>> {
         let outbox_repo = self.outbox_repo.clone();
         let metrics = self.metrics.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut shutdown_rx = self.shutdown_token.clone();
         let optimization_config = self.optimization_config.clone();
 
         let handle = tokio::spawn(async move {
@@ -549,7 +547,7 @@ impl CDCServiceManager {
 
             loop {
                 tokio::select! {
-                    _ = shutdown_rx.changed() => break,
+                    _ = shutdown_rx.cancelled() => break,
                     _ = interval.tick() => {
                         tracing::info!("Cleanup Task: Starting cleanup cycle");
 
@@ -575,7 +573,7 @@ impl CDCServiceManager {
     /// Start metrics collector task
     async fn start_metrics_collector(&self) -> Result<tokio::task::JoinHandle<()>> {
         let metrics = self.metrics.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut shutdown_rx = self.shutdown_token.clone();
         let optimization_config = self.optimization_config.clone();
 
         let handle = tokio::spawn(async move {
@@ -587,7 +585,7 @@ impl CDCServiceManager {
 
             loop {
                 tokio::select! {
-                    _ = shutdown_rx.changed() => break,
+                    _ = shutdown_rx.cancelled() => break,
                     _ = interval.tick() => {
                         let current_processed = metrics.events_processed.load(std::sync::atomic::Ordering::Relaxed);
                         let elapsed = last_time.elapsed();
@@ -627,7 +625,7 @@ impl CDCServiceManager {
     /// Start circuit breaker monitor
     async fn start_circuit_breaker_monitor(&self) -> Result<tokio::task::JoinHandle<()>> {
         let metrics = self.metrics.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut shutdown_rx = self.shutdown_token.clone();
         let optimization_config = self.optimization_config.clone();
 
         let handle = tokio::spawn(async move {
@@ -635,7 +633,7 @@ impl CDCServiceManager {
 
             loop {
                 tokio::select! {
-                    _ = shutdown_rx.changed() => break,
+                    _ = shutdown_rx.cancelled() => break,
                     _ = interval.tick() => {
                         let error_rate = metrics.error_rate.load(std::sync::atomic::Ordering::Relaxed) as f64 / 100.0;
 
@@ -664,10 +662,7 @@ impl CDCServiceManager {
 
         info!("Starting graceful shutdown of CDC Service Manager");
 
-        // Signal all tasks to stop
-        if let Err(e) = self.shutdown_tx.send(true) {
-            warn!("Failed to send shutdown signal: {}", e);
-        }
+        self.shutdown_token.cancel();
 
         // Wait for all tasks to complete with timeout
         let shutdown_timeout =

@@ -59,6 +59,7 @@ use crate::infrastructure::outbox_poller::{OutboxPollerConfig, OutboxPollingServ
 use crate::infrastructure::shutdown::{Shutdown, ShutdownManager};
 use infrastructure::config::{AppConfig, DataCaptureMethod};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::infrastructure::cdc_debezium::{CDCOutboxRepository, DebeziumConfig};
 use crate::infrastructure::cdc_service_manager::CDCServiceManager;
@@ -270,13 +271,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
         let kafka_producer = Arc::new(KafkaProducer::new(kafka_config.clone())?);
         let poller_config = OutboxPollerConfig::default();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let shutdown_token = CancellationToken::new();
 
-        let poller_service =
-            OutboxPollingService::new(outbox_repo, kafka_producer, poller_config, shutdown_rx);
+        let poller_service = OutboxPollingService::new(
+            outbox_repo,
+            kafka_producer,
+            poller_config,
+            shutdown_token.clone(),
+        );
 
         tokio::spawn(poller_service.run());
         info!("Outbox Poller started.");
+        // To trigger shutdown elsewhere:
+        // shutdown_token.cancel();
 
         // --- Initialize and Start Kafka Event Processor ---
         let kafka_event_processor =

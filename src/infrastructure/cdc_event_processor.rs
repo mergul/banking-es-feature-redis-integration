@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
@@ -408,7 +409,7 @@ pub struct UltraOptimizedCDCEventProcessor {
 
     // Batch processing coordination with interior mutability
     batch_processor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    shutdown_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    shutdown_token: CancellationToken,
 
     // Business logic configuration with interior mutability
     business_config: Arc<Mutex<BusinessLogicConfig>>,
@@ -477,7 +478,7 @@ impl Clone for UltraOptimizedCDCEventProcessor {
             circuit_breaker: self.circuit_breaker.clone(),
             projection_cache: self.projection_cache.clone(),
             batch_processor_handle: Arc::new(Mutex::new(None)), // Don't clone the handle
-            shutdown_tx: Arc::new(Mutex::new(None)),            // Don't clone the sender
+            shutdown_token: self.shutdown_token.clone(),
             business_config: Arc::new(Mutex::new(BusinessLogicConfig::default())), // Use default instead of trying to clone
             performance_config: self.performance_config.clone(),
             performance_profiler: self.performance_profiler.clone(),
@@ -539,7 +540,7 @@ impl UltraOptimizedCDCEventProcessor {
             circuit_breaker: AdvancedCircuitBreaker::new(),
             projection_cache,
             batch_processor_handle: Arc::new(Mutex::new(None)),
-            shutdown_tx: Arc::new(Mutex::new(None)),
+            shutdown_token: CancellationToken::new(),
             business_config: Arc::new(Mutex::new(business_config)),
             performance_config: Arc::new(Mutex::new(performance_config.clone())),
             performance_profiler: Arc::new(Mutex::new(PerformanceProfiler::new(100))),
@@ -558,19 +559,13 @@ impl UltraOptimizedCDCEventProcessor {
     }
 
     pub async fn start_batch_processor(&mut self) -> Result<()> {
-        // Check if batch processor is already running
         if self.batch_processor_handle.lock().await.is_some() {
-            return Ok(()); // Already running
+            return Ok(());
         }
-
-        // Check if batch processing is enabled in config
         if !self.business_config.lock().await.batch_processing_enabled {
             return Err(anyhow::anyhow!("Batch processing is disabled in configuration. Enable it first with update_business_config()"));
         }
-
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
-        *self.shutdown_tx.lock().await = Some(shutdown_tx);
-
+        let shutdown_token = self.shutdown_token.clone();
         let batch_queue = Arc::clone(&self.batch_queue);
         let projection_store = Arc::clone(&self.projection_store);
         let projection_cache = Arc::clone(&self.projection_cache);
@@ -579,7 +574,6 @@ impl UltraOptimizedCDCEventProcessor {
         let batch_size = *self.batch_size.lock().await;
         let batch_timeout = self.batch_timeout;
         let consistency_manager = self.consistency_manager.clone();
-
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(batch_timeout);
             loop {
@@ -597,22 +591,16 @@ impl UltraOptimizedCDCEventProcessor {
                             error!("Batch processing failed: {}", e);
                         }
                     }
-                    _ = shutdown_rx.recv() => {
+                    _ = shutdown_token.cancelled() => {
                         info!("Batch processor shutting down");
                         break;
                     }
                 }
             }
         });
-
         *self.batch_processor_handle.lock().await = Some(handle);
-
-        // Start performance monitor if enabled
         self.start_performance_monitor().await?;
-
-        // Start periodic flush task for when batch processing is disabled
         self.start_periodic_flush_task().await?;
-
         info!("Batch processor started successfully");
         Ok(())
     }
@@ -1567,17 +1555,11 @@ impl UltraOptimizedCDCEventProcessor {
 
     /// Graceful shutdown
     pub async fn shutdown(&mut self) -> Result<()> {
-        if let Some(tx) = self.shutdown_tx.lock().await.take() {
-            let _ = tx.send(()).await;
-        }
-
+        self.shutdown_token.cancel();
         if let Some(handle) = self.batch_processor_handle.lock().await.take() {
             handle.await?;
         }
-
-        // Process any remaining events
         self.process_current_batch().await?;
-
         info!("CDC Event Processor shutdown complete");
         Ok(())
     }
@@ -2427,9 +2409,7 @@ impl UltraOptimizedCDCEventProcessor {
             return Ok(()); // Already running
         }
 
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
-        *processor.shutdown_tx.lock().await = Some(shutdown_tx);
-
+        let shutdown_token = processor.shutdown_token.clone();
         let batch_queue = Arc::clone(&processor.batch_queue);
         let projection_store = Arc::clone(&processor.projection_store);
         let projection_cache = Arc::clone(&processor.projection_cache);
@@ -2455,7 +2435,7 @@ impl UltraOptimizedCDCEventProcessor {
                             error!("Batch processing failed: {}", e);
                         }
                     }
-                    _ = shutdown_rx.recv() => {
+                    _ = shutdown_token.cancelled() => {
                         info!("Batch processor shutting down");
                         break;
                     }
