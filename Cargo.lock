@@ -294,6 +294,7 @@ dependencies = [
  "sysinfo",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "toml",
  "tower 0.4.13",
  "tower-http",

@@ -11,8 +11,17 @@ async fn main() {
     let topics = vec![
         NewTopic::new("banking-es-events", 1, TopicReplication::Fixed(1)),
         NewTopic::new("banking-es-cache", 1, TopicReplication::Fixed(1)),
-        NewTopic::new("banking-es-cache-invalidation", 1, TopicReplication::Fixed(1)),
+        NewTopic::new(
+            "banking-es-cache-invalidation",
+            1,
+            TopicReplication::Fixed(1),
+        ),
         NewTopic::new("banking-es-dlq", 1, TopicReplication::Fixed(1)),
+        NewTopic::new(
+            "banking-es.public.kafka_outbox_cdc",
+            3,
+            TopicReplication::Fixed(1),
+        ), // CDC topic
     ];
 
     let results = admin_client
@@ -26,4 +35,4 @@ async fn main() {
             Err((topic, e)) => println!("Failed to create topic {}: {}", topic, e),
         }
     }
-} 
+}

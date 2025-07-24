@@ -430,7 +430,7 @@ pub struct KafkaConsumer {
     config: KafkaConfig,
 }
 
-struct LoggingConsumerContext;
+pub struct LoggingConsumerContext;
 
 impl ClientContext for LoggingConsumerContext {}
 
@@ -979,6 +979,10 @@ impl KafkaConsumer {
                 "No consumer available".into(),
             ))
         }
+    }
+
+    pub fn stream(&self) -> rdkafka::consumer::MessageStream<'_, LoggingConsumerContext> {
+        self.consumer.as_ref().unwrap().stream()
     }
 }
 
