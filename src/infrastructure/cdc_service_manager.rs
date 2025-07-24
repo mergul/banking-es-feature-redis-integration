@@ -665,6 +665,10 @@ impl CDCServiceManager {
         tracing::info!("🛑 CDCServiceManager: About to cancel shutdown_token");
         self.shutdown_token.cancel();
         tracing::info!("🛑 CDCServiceManager: shutdown_token.cancel() called");
+        info!("🛑 CDCServiceManager: Starting graceful shutdown of CDC Service Manager");
+        tracing::info!("🛑 CDCServiceManager: About to cancel shutdown_token");
+        self.shutdown_token.cancel();
+        tracing::info!("🛑 CDCServiceManager: shutdown_token.cancel() called");
 
         // Wait for all tasks to complete with timeout
         let shutdown_timeout =
@@ -693,6 +697,7 @@ impl CDCServiceManager {
         }
 
         self.set_state(ServiceState::Stopped).await;
+        info!("✅ CDCServiceManager: CDC Service Manager stopped");
         info!("✅ CDCServiceManager: CDC Service Manager stopped");
 
         Ok(())

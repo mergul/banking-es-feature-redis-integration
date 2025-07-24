@@ -699,11 +699,20 @@ impl CQRSAccountService {
         events: Vec<AccountEvent>,
         expected_version: i64,
     ) -> Result<(), AccountError> {
-        self.cqrs_handler
+        println!(
+            "[DEBUG] submit_events_batch: account_id={:?}, events={:?}, expected_version={}",
+            account_id, events, expected_version
+        );
+        let result = self
+            .cqrs_handler
             .event_store()
             .save_events(account_id, events, expected_version)
-            .await
-            .map_err(|e| AccountError::InfrastructureError(format!("Event store error: {:?}", e)))
+            .await;
+        println!(
+            "[DEBUG] submit_events_batch: completed for account_id={:?} with result={:?}",
+            account_id, result
+        );
+        result.map_err(|e| AccountError::InfrastructureError(format!("Event store error: {:?}", e)))
     }
 
     /// Get consistency manager for external integration

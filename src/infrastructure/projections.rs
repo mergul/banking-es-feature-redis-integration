@@ -187,8 +187,9 @@ impl ProjectionStoreTrait for ProjectionStore {
     }
     async fn upsert_accounts_batch(&self, accounts: Vec<AccountProjection>) -> Result<()> {
         tracing::info!(
-            "[ProjectionStore] upsert_accounts_batch called with {} accounts",
-            accounts.len()
+            "ProjectionStore: upsert_accounts_batch called with {} accounts. IDs: {:?}",
+            accounts.len(),
+            accounts.iter().map(|a| a.id).collect::<Vec<_>>()
         );
         for acc in &accounts {
             tracing::info!(
@@ -627,7 +628,7 @@ impl ProjectionStore {
         _account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
         _transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
         _cache_version: Arc<std::sync::atomic::AtomicU64>,
-        _metrics: Arc<ProjectionMetrics>,
+        metrics: Arc<ProjectionMetrics>,
         config: ProjectionConfig,
     ) {
         let mut account_batch = Vec::with_capacity(config.batch_size);
@@ -648,10 +649,12 @@ impl ProjectionStore {
                 }
                 _ = interval.tick() => {
                     if !account_batch.is_empty() {
+                        tracing::info!("ProjectionStore: update_processor flushing account batch of size {}. IDs: {:?}", account_batch.len(), account_batch.iter().map(|a| a.id).collect::<Vec<_>>());
                         let batch_to_process = std::mem::take(&mut account_batch);
                         let pools = pools.clone();
+                        let metrics = metrics.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = Self::upsert_accounts_batch_parallel(&pools, batch_to_process).await {
+                            if let Err(e) = Self::upsert_accounts_batch_parallel(&pools, &metrics, batch_to_process).await {
                                 error!("[ProjectionStore] Error upserting account batch: {}", e);
                             }
                         });
@@ -672,8 +675,16 @@ impl ProjectionStore {
 
     async fn upsert_accounts_batch_parallel(
         pools: &Arc<PartitionedPools>,
+        metrics: &Arc<ProjectionMetrics>,
         accounts: Vec<AccountProjection>,
     ) -> Result<()> {
+        let account_count = accounts.len();
+        let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
+        tracing::info!(
+            "ProjectionStore: upsert_accounts_batch_parallel flushing {} accounts to DB. IDs: {:?}",
+            account_count,
+            account_ids
+        );
         let tasks: Vec<_> = accounts
             .into_iter()
             .map(|account| {
@@ -690,7 +701,15 @@ impl ProjectionStore {
         for task in tasks {
             task.await??;
         }
-
+        // Increment batch_updates metric
+        metrics
+            .batch_updates
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            "ProjectionStore: upsert_accounts_batch_parallel DB upsert completed successfully for {} accounts. IDs: {:?}",
+            account_count,
+            account_ids
+        );
         Ok(())
     }
 

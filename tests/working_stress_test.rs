@@ -903,24 +903,29 @@ async fn test_read_operations_after_writes() {
     }
 
     // Wait for all operations to complete
+    println!("Waiting for all event submission tasks to complete...");
     let mut write_success = 0;
     let mut write_failed = 0;
     for (i, handle) in handles.into_iter().enumerate() {
-        match handle.await {
-            Ok(Ok(_)) => write_success += 1,
-            Ok(Err(e)) => {
+        println!("Awaiting handle for operation {}", i);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), handle).await;
+        match result {
+            Ok(Ok(Ok(_))) => write_success += 1,
+            Ok(Ok(Err(e))) => {
                 write_failed += 1;
                 if write_failed <= 5 {
-                    // Only log first 5 errors
                     println!("  ❌ Operation {} failed: {:?}", i, e);
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 write_failed += 1;
                 if write_failed <= 5 {
-                    // Only log first 5 errors
                     println!("  ❌ Task {} failed: {:?}", i, e);
                 }
+            }
+            Err(_) => {
+                write_failed += 1;
+                println!("  ❌ Task {} timed out", i);
             }
         }
 
@@ -932,6 +937,7 @@ async fn test_read_operations_after_writes() {
             );
         }
     }
+    println!("All event submission tasks completed.");
 
     let write_duration = write_start.elapsed();
     println!("✅ Multi-row write operations completed:");
@@ -1195,6 +1201,9 @@ async fn test_read_operations_after_writes() {
     if let Err(e) = cleanup_test_resources(&context).await {
         println!("⚠️  Warning: Cleanup failed: {}", e);
     }
+
+    // Add a small delay to allow the consumer to shut down completely
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     println!("✅ All background tasks (including CDC consumer) stopped. Test complete.");
     println!("✅ Read operations test after writes (Multi-Row Insert) completed successfully!");
@@ -1545,6 +1554,10 @@ async fn test_write_batching_multi_row_inserts() {
         println!("⚠️  Warning: Cleanup failed: {}", e);
     }
 
+    // Add a small delay to allow the consumer to shut down completely
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    println!("✅ All background tasks (including CDC consumer) stopped. Test complete.");
     println!("✅ Write Batching Multi-Row Insert Test completed successfully!");
 }
 

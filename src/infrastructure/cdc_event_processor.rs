@@ -858,12 +858,21 @@ impl UltraOptimizedCDCEventProcessor {
         .await?;
 
         if !updated_projections.is_empty() {
+            tracing::info!(
+                "CDCEventProcessor: About to upsert {} projections to ProjectionStore. IDs: {:?}",
+                updated_projections.len(),
+                updated_projections.iter().map(|p| p.id).collect::<Vec<_>>()
+            );
             let upsert_result = Self::upsert_projections_in_parallel(
                 updated_projections,
                 projection_store,
                 metrics,
             )
             .await;
+            tracing::info!(
+                "CDCEventProcessor: Upsert to ProjectionStore completed: {:?}",
+                upsert_result
+            );
             Self::handle_upsert_results(
                 upsert_result,
                 processed_aggregates,

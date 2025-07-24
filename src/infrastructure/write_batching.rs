@@ -733,6 +733,10 @@ impl WriteBatchingService {
         outbox_batcher: &crate::infrastructure::cdc_debezium::OutboxBatcher,
         config: &WriteBatchingConfig,
     ) -> Vec<(Uuid, WriteOperationResult)> {
+        println!(
+            "[DEBUG] execute_batch: Starting batch with {} operations",
+            batch.operations.len()
+        );
         let mut results = Vec::new();
         let mut retry_count = 0;
 
@@ -783,6 +787,10 @@ impl WriteBatchingService {
             }
         }
 
+        println!(
+            "[DEBUG] execute_batch: Finished batch with {} results",
+            results.len()
+        );
         results
     }
 
@@ -794,6 +802,10 @@ impl WriteBatchingService {
         write_pool: &Arc<PgPool>,
         outbox_batcher: &crate::infrastructure::cdc_debezium::OutboxBatcher,
     ) -> Result<Vec<(Uuid, WriteOperationResult)>> {
+        println!(
+            "[DEBUG] execute_batch_transaction: Starting transaction for batch with {} operations",
+            batch.operations.len()
+        );
         let mut results = Vec::new();
         let max_retries = 3;
         let mut retry_count = 0;
@@ -886,18 +898,18 @@ impl WriteBatchingService {
                 }
             }
 
-            // Insert all events in a single multi-aggregate operation
-            println!("🔍 [DEBUG] About to call save_events_multi_aggregate_in_transaction with {} aggregates", events_by_aggregate.len());
-            let mut insert_success = true;
-            if let Err(e) = event_store
+            println!("[DEBUG] execute_batch_transaction: About to call save_events_multi_aggregate_in_transaction with {} aggregates", events_by_aggregate.len());
+            let result = event_store
                 .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
-                .await
-            {
-                insert_success = false;
-                error!("Failed to save events in multi-aggregate batch: {:?}", e);
-            }
+                .await;
+            println!(
+                "[DEBUG] execute_batch_transaction: Transaction complete, results: {:?}",
+                result
+            );
 
-            if !insert_success {
+            if let Err(e) = result {
+                println!("[DEBUG] execute_batch_transaction: Failed to save events in multi-aggregate batch: {:?}", e);
+                error!("Failed to save events in multi-aggregate batch: {:?}", e);
                 // Rollback transaction on any error
                 let _ = transaction.rollback().await;
                 retry_count += 1;
@@ -1010,9 +1022,17 @@ impl WriteBatchingService {
                 ));
             }
 
+            println!(
+                "[DEBUG] execute_batch_transaction: Transaction complete, results: {:?}",
+                results
+            );
             return Ok(results);
         }
 
+        println!(
+            "[DEBUG] execute_batch_transaction: Finished transaction with results: {:?}",
+            results
+        );
         Ok(results)
     }
 

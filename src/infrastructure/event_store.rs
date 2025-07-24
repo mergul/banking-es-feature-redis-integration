@@ -534,6 +534,10 @@ impl EventStore {
         events: Vec<AccountEvent>,
         expected_version: i64,
     ) -> Result<(), EventStoreError> {
+        println!(
+            "[DEBUG] save_events: aggregate_id={:?}, events={:?}, expected_version={}",
+            aggregate_id, events, expected_version
+        );
         if events.is_empty() {
             return Ok(());
         }
@@ -567,6 +571,10 @@ impl EventStore {
         })?;
 
         // Send event to batch processor
+        println!(
+            "[DEBUG] save_events: sending to batch processor for aggregate_id={:?}",
+            aggregate_id
+        );
         self.batch_sender.send(batched_event).map_err(|e| {
             EventStoreError::InternalError(
                 "Failed to send event to batch processor: ".to_string() + &e.to_string(),
@@ -574,14 +582,33 @@ impl EventStore {
         })?;
 
         // Wait for response with timeout
+        println!("[DEBUG] save_events: sent to batch processor, waiting for response for aggregate_id={:?}", aggregate_id);
         match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(e)) => Err(EventStoreError::ResponseSendError(
-                "Failed to receive response: ".to_string() + &e.to_string(),
-            )),
-            Err(_) => Err(EventStoreError::InternalError(
-                "Operation timed out".to_string(),
-            )),
+            Ok(Ok(result)) => {
+                println!(
+                    "[DEBUG] save_events: got response for aggregate_id={:?}: {:?}",
+                    aggregate_id, result
+                );
+                result
+            }
+            Ok(Err(e)) => {
+                println!(
+                    "[DEBUG] save_events: error receiving response for aggregate_id={:?}: {:?}",
+                    aggregate_id, e
+                );
+                Err(EventStoreError::ResponseSendError(
+                    "Failed to receive response: ".to_string() + &e.to_string(),
+                ))
+            }
+            Err(_) => {
+                println!(
+                    "[DEBUG] save_events: operation timed out for aggregate_id={:?}",
+                    aggregate_id
+                );
+                Err(EventStoreError::InternalError(
+                    "Operation timed out".to_string(),
+                ))
+            }
         }
     }
 
