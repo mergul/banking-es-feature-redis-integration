@@ -661,37 +661,39 @@ impl CDCServiceManager {
     pub async fn stop(&self) -> Result<()> {
         self.set_state(ServiceState::Stopping).await;
 
-        info!("Starting graceful shutdown of CDC Service Manager");
-
+        info!("🛑 CDCServiceManager: Starting graceful shutdown of CDC Service Manager");
+        tracing::info!("🛑 CDCServiceManager: About to cancel shutdown_token");
         self.shutdown_token.cancel();
+        tracing::info!("🛑 CDCServiceManager: shutdown_token.cancel() called");
 
         // Wait for all tasks to complete with timeout
         let shutdown_timeout =
             Duration::from_secs(self.optimization_config.graceful_shutdown_timeout_secs);
-        let tasks = self.tasks.read().await;
-
-        let mut tasks_to_await = vec![];
-        for task in tasks.iter() {
+        let mut tasks = self.tasks.write().await;
+        let mut tasks_to_await = Vec::new();
+        for task in tasks.drain(..) {
             if !task.is_finished() {
-                tasks_to_await.push(async {
-                    let _ = task.await;
-                });
+                tasks_to_await.push(task);
             }
         }
-
-        let shutdown_future = join_all(tasks_to_await);
+        tracing::info!("🛑 CDCServiceManager: Awaiting all background tasks");
+        let shutdown_future = async {
+            for task in tasks_to_await {
+                let _ = task.await;
+            }
+        };
 
         match tokio::time::timeout(shutdown_timeout, shutdown_future).await {
             Ok(_) => {
-                info!("All CDC tasks stopped gracefully");
+                info!("✅ CDCServiceManager: All CDC tasks stopped gracefully");
             }
             Err(_) => {
-                warn!("Shutdown timeout exceeded, some tasks may not have stopped gracefully");
+                warn!("⚠️ CDCServiceManager: Shutdown timeout exceeded, some tasks may not have stopped gracefully");
             }
         }
 
         self.set_state(ServiceState::Stopped).await;
-        info!("CDC Service Manager stopped");
+        info!("✅ CDCServiceManager: CDC Service Manager stopped");
 
         Ok(())
     }

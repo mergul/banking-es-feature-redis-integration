@@ -1196,6 +1196,9 @@ async fn test_read_operations_after_writes() {
         println!("⚠️  Warning: Cleanup failed: {}", e);
     }
 
+    // Add a small delay to allow the consumer to shut down completely
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     println!("✅ All background tasks (including CDC consumer) stopped. Test complete.");
     println!("✅ Read operations test after writes (Multi-Row Insert) completed successfully!");
 }
