@@ -55,48 +55,48 @@ async fn setup_stress_test_environment(
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
         }),
         write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "50".to_string())
+            .unwrap_or_else(|_| "500".to_string())
             .parse()
-            .unwrap_or(50)
+            .unwrap_or(500)
             / 3, // Smaller write pool for testing
         write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "10".to_string())
+            .unwrap_or_else(|_| "250".to_string())
             .parse()
-            .unwrap_or(10)
+            .unwrap_or(250)
             / 3,
         read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "50".to_string())
+            .unwrap_or_else(|_| "500".to_string())
             .parse()
-            .unwrap_or(50)
+            .unwrap_or(500)
             * 2
             / 3,
         read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "10".to_string())
+            .unwrap_or_else(|_| "250".to_string())
             .parse()
-            .unwrap_or(10)
+            .unwrap_or(250)
             * 2
             / 3,
         acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT_SECS")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "15".to_string())
             .parse()
-            .unwrap_or(30), // Increased timeout
+            .unwrap_or(15), // Increased timeout
         read_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME_SECS")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "15".to_string())
             .parse()
-            .unwrap_or(30)
+            .unwrap_or(15)
             * 2, // Longer lifetime for reads
         write_idle_timeout_secs: std::env::var("DB_WRITE_IDLE_TIMEOUT_SECS")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "15".to_string())
             .parse()
-            .unwrap_or(30),
+            .unwrap_or(15),
         read_idle_timeout_secs: std::env::var("DB_READ_IDLE_TIMEOUT_SECS")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "15".to_string())
             .parse()
-            .unwrap_or(30),
+            .unwrap_or(15),
         write_max_lifetime_secs: std::env::var("DB_WRITE_MAX_LIFETIME_SECS")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "15".to_string())
             .parse()
-            .unwrap_or(30),
+            .unwrap_or(15),
     };
 
     let pools = Arc::new(PartitionedPools::new(pool_config).await?);
@@ -107,7 +107,7 @@ async fn setup_stress_test_environment(
     // Create consistency manager first
     let consistency_manager = Arc::new(
         banking_es::infrastructure::consistency_manager::ConsistencyManager::new(
-            Duration::from_secs(20), // max_wait_time - increased from 0s to 30s
+            Duration::from_secs(10), // max_wait_time - increased from 0s to 30s
             Duration::from_secs(60), // cleanup_interval
         ),
     );
@@ -535,7 +535,7 @@ async fn run_worker(
             // Read operation with timeout
             match op_num % 3 {
                 0 => tokio::time::timeout(
-                    Duration::from_secs(10), // Increased from 2s to 10s
+                    Duration::from_secs(2), // Decreased from 10s to 2s
                     cqrs_service.get_account(account_id),
                 )
                 .await
@@ -544,7 +544,7 @@ async fn run_worker(
                     banking_es::domain::AccountError::InfrastructureError("Timeout".to_string()),
                 )),
                 1 => tokio::time::timeout(
-                    Duration::from_secs(10), // Increased from 2s to 10s
+                    Duration::from_secs(2), // Decreased from 10s to 2s
                     cqrs_service.get_account_balance(account_id),
                 )
                 .await
@@ -553,7 +553,7 @@ async fn run_worker(
                     banking_es::domain::AccountError::InfrastructureError("Timeout".to_string()),
                 )),
                 _ => tokio::time::timeout(
-                    Duration::from_secs(10), // Increased from 2s to 10s
+                    Duration::from_secs(2), // Decreased from 10s to 2s
                     cqrs_service.is_account_active(account_id),
                 )
                 .await
@@ -566,7 +566,7 @@ async fn run_worker(
             // Write operation with timeout
             match op_num % 2 {
                 0 => tokio::time::timeout(
-                    Duration::from_secs(15), // Increased from 2s to 15s for writes
+                    Duration::from_secs(2), // Decreased from 15s to 2s for writes
                     cqrs_service.deposit_money(account_id, Decimal::new(10, 0)),
                 )
                 .await
@@ -574,7 +574,7 @@ async fn run_worker(
                     banking_es::domain::AccountError::InfrastructureError("Timeout".to_string()),
                 )),
                 _ => tokio::time::timeout(
-                    Duration::from_secs(15), // Increased from 2s to 15s for writes
+                    Duration::from_secs(2), // Decreased from 15s to 2s for writes
                     cqrs_service.withdraw_money(account_id, Decimal::new(5, 0)),
                 )
                 .await
@@ -908,7 +908,7 @@ async fn test_read_operations_after_writes() {
     let mut write_failed = 0;
     for (i, handle) in handles.into_iter().enumerate() {
         println!("Awaiting handle for operation {}", i);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(15), handle).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         match result {
             Ok(Ok(Ok(_))) => write_success += 1,
             Ok(Ok(Err(e))) => {
@@ -961,12 +961,12 @@ async fn test_read_operations_after_writes() {
     println!("⏳ Waiting for CDC to process all events...");
 
     // Wait for CDC processing with a timeout
-    let cdc_timeout = Duration::from_secs(30);
+    let cdc_timeout = Duration::from_secs(15);
     let cdc_start = Instant::now();
     let mut cdc_processed = false;
 
-    // Check CDC metrics every second for up to 30 seconds
-    for i in 0..30 {
+    // Check CDC metrics every second for up to 15 seconds
+    for i in 0..15 {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Get CDC metrics to check if processing is complete
@@ -1409,12 +1409,12 @@ async fn test_write_batching_multi_row_inserts() {
     println!("⏳ Waiting for CDC to process all events...");
 
     // Wait for CDC processing with a timeout
-    let cdc_timeout = Duration::from_secs(30);
+    let cdc_timeout = Duration::from_secs(15);
     let cdc_start = Instant::now();
     let mut cdc_processed = false;
 
-    // Check CDC metrics every second for up to 30 seconds
-    for i in 0..30 {
+    // Check CDC metrics every second for up to 15 seconds
+    for i in 0..15 {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Get CDC metrics to check if processing is complete

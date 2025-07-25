@@ -583,7 +583,7 @@ impl EventStore {
 
         // Wait for response with timeout
         println!("[DEBUG] save_events: sent to batch processor, waiting for response for aggregate_id={:?}", aggregate_id);
-        match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
+        match tokio::time::timeout(Duration::from_secs(5), response_rx).await {
             Ok(Ok(result)) => {
                 println!(
                     "[DEBUG] save_events: got response for aggregate_id={:?}: {:?}",
@@ -875,7 +875,7 @@ impl EventStore {
         }
 
         let write_pool = pools.select_pool(OperationType::Write);
-        let mut tx = tokio::time::timeout(Duration::from_secs(10), write_pool.begin())
+        let mut tx = tokio::time::timeout(Duration::from_secs(5), write_pool.begin())
             .await
             .map_err(|_| {
                 EventStoreError::DatabaseError(sqlx::Error::Configuration(
@@ -1276,7 +1276,7 @@ impl EventStore {
 
         tracing::info!("🔍 EventStore::get_events: About to acquire connection from pool");
         let connection_result = tokio::time::timeout(
-            Duration::from_secs(30), // Increased timeout for debugging
+            Duration::from_secs(15), // Decreased from 30s to 15s
             read_pool.acquire(),
         )
         .await;

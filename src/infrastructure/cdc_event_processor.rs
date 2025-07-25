@@ -203,7 +203,7 @@ impl AdvancedCircuitBreaker {
         Self {
             state: Arc::new(RwLock::new(AdvancedCircuitBreakerState::Closed)),
             failure_threshold: 10,                     // Increased threshold
-            recovery_timeout: Duration::from_secs(60), // Increased timeout
+            recovery_timeout: Duration::from_secs(30), // Increased timeout
             half_open_success_threshold: 5,
         }
     }

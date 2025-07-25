@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -868,7 +867,7 @@ impl CDCConsumer {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let mut offsets = offsets_clone.lock().await;
                 let should_commit = offsets.len() >= 100 || // Commit every 100 messages
-                                   last_commit_time.elapsed() > std::time::Duration::from_secs(2); // Or every 2 seconds
+                                   last_commit_time.elapsed() > std::time::Duration::from_millis(100); // Or every 100ms
 
                 if should_commit && !offsets.is_empty() {
                     // Only commit the highest offset per (topic, partition)

@@ -577,7 +577,7 @@ impl WriteBatchingService {
         }
 
         // Wait for the result with a reasonable timeout
-        let timeout = Duration::from_secs(30); // Increased timeout for high-load scenarios
+        let timeout = Duration::from_secs(15); // Increased timeout for high-load scenarios
         match tokio::time::timeout(timeout, async {
             // Poll for the result more efficiently with exponential backoff
             let mut poll_interval = Duration::from_millis(10);

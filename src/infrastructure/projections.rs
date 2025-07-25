@@ -243,19 +243,19 @@ impl ProjectionStore {
         Self::from_pools_with_config(pools, ProjectionConfig::default())
     }
 
-    pub fn new_test(pool: PgPool) -> Self {
-        let mut config = ProjectionConfig::default();
-        config.batch_size = 1; // Process immediately in test mode
-        config.batch_timeout_ms = 0; // No batching in test mode
-        let pools = Arc::new(PartitionedPools {
-            write_pool: pool.clone(),
-            read_pool: pool,
-            config:
-                crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default(
-                ),
-        });
-        Self::from_pools_with_config(pools, config)
-    }
+    // pub fn new_test(pool: PgPool) -> Self {
+    //     let mut config = ProjectionConfig::default();
+    //     config.batch_size = 1; // Process immediately in test mode
+    //     config.batch_timeout_ms = 0; // No batching in test mode
+    //     let pools = Arc::new(PartitionedPools {
+    //         write_pool: pool.clone(),
+    //         read_pool: pool,
+    //         config:
+    //             crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default(
+    //             ),
+    //     });
+    //     Self::from_pools_with_config(pools, config)
+    // }
 
     pub fn from_pool_with_config(pool: PgPool, config: ProjectionConfig) -> Self {
         let pools = Arc::new(PartitionedPools {
