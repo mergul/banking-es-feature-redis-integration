@@ -171,33 +171,52 @@ impl CQRSAccountService {
             {
                 Ok(operation_id) => {
                     // Wait for the operation to complete and get the actual account ID
-                    match batching_service.wait_for_result(operation_id).await {
+                    // Use a reasonable timeout that matches the test expectations
+                    match tokio::time::timeout(
+                        Duration::from_secs(30),
+                        batching_service.wait_for_result(operation_id),
+                    )
+                    .await
+                    {
                         Ok(result) => {
-                            if result.success {
-                                match result.result {
-                                    Some(account_id) => {
-                                        // Mark as pending CDC processing
-                                        self.consistency_manager.mark_pending(account_id).await;
-                                        // Mark as pending projection synchronization
-                                        self.consistency_manager
-                                            .mark_projection_pending(account_id)
-                                            .await;
+                            match result {
+                                Ok(result) => {
+                                    if result.success {
+                                        match result.result {
+                                            Some(account_id) => {
+                                                // Mark as pending CDC processing
+                                                self.consistency_manager.mark_pending(account_id).await;
+                                                // Mark as pending projection synchronization
+                                                self.consistency_manager
+                                                    .mark_projection_pending(account_id)
+                                                    .await;
 
-                                        Ok(account_id)
+                                                Ok(account_id)
+                                            }
+                                            None => Err(AccountError::InfrastructureError(
+                                                "Account creation succeeded but no account ID returned"
+                                                    .to_string(),
+                                            )),
+                                        }
+                                    } else {
+                                        Err(AccountError::InfrastructureError(
+                                            result
+                                                .error
+                                                .unwrap_or_else(|| "Unknown error".to_string()),
+                                        ))
                                     }
-                                    None => Err(AccountError::InfrastructureError(
-                                        "Account creation succeeded but no account ID returned"
-                                            .to_string(),
-                                    )),
                                 }
-                            } else {
-                                Err(AccountError::InfrastructureError(
-                                    result.error.unwrap_or_else(|| "Unknown error".to_string()),
-                                ))
+                                Err(e) => {
+                                    error!("Failed to wait for account creation result: {}", e);
+                                    // Fall back to direct handler
+                                    self.cqrs_handler
+                                        .create_account(owner_name.clone(), initial_balance)
+                                        .await
+                                }
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to wait for account creation result: {}", e);
+                        Err(_) => {
+                            error!("Timeout waiting for account creation result after 30 seconds");
                             // Fall back to direct handler
                             self.cqrs_handler
                                 .create_account(owner_name.clone(), initial_balance)
@@ -274,19 +293,35 @@ impl CQRSAccountService {
                 .await
             {
                 Ok(operation_id) => {
-                    // Wait for the operation to complete
-                    match batching_service.wait_for_result(operation_id).await {
+                    // Wait for the operation to complete with timeout
+                    match tokio::time::timeout(
+                        Duration::from_secs(30),
+                        batching_service.wait_for_result(operation_id),
+                    )
+                    .await
+                    {
                         Ok(result) => {
-                            if result.success {
-                                Ok(())
-                            } else {
-                                Err(AccountError::InfrastructureError(
-                                    result.error.unwrap_or_else(|| "Unknown error".to_string()),
-                                ))
+                            match result {
+                                Ok(result) => {
+                                    if result.success {
+                                        Ok(())
+                                    } else {
+                                        Err(AccountError::InfrastructureError(
+                                            result
+                                                .error
+                                                .unwrap_or_else(|| "Unknown error".to_string()),
+                                        ))
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to wait for deposit result: {}", e);
+                                    // Fall back to direct handler
+                                    self.cqrs_handler.deposit_money(account_id, amount).await
+                                }
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to wait for deposit result: {}", e);
+                        Err(_) => {
+                            error!("Timeout waiting for deposit result after 30 seconds");
                             // Fall back to direct handler
                             self.cqrs_handler.deposit_money(account_id, amount).await
                         }
@@ -357,19 +392,35 @@ impl CQRSAccountService {
                 .await
             {
                 Ok(operation_id) => {
-                    // Wait for the operation to complete
-                    match batching_service.wait_for_result(operation_id).await {
+                    // Wait for the operation to complete with timeout
+                    match tokio::time::timeout(
+                        Duration::from_secs(30),
+                        batching_service.wait_for_result(operation_id),
+                    )
+                    .await
+                    {
                         Ok(result) => {
-                            if result.success {
-                                Ok(())
-                            } else {
-                                Err(AccountError::InfrastructureError(
-                                    result.error.unwrap_or_else(|| "Unknown error".to_string()),
-                                ))
+                            match result {
+                                Ok(result) => {
+                                    if result.success {
+                                        Ok(())
+                                    } else {
+                                        Err(AccountError::InfrastructureError(
+                                            result
+                                                .error
+                                                .unwrap_or_else(|| "Unknown error".to_string()),
+                                        ))
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to wait for withdraw result: {}", e);
+                                    // Fall back to direct handler
+                                    self.cqrs_handler.withdraw_money(account_id, amount).await
+                                }
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to wait for withdraw result: {}", e);
+                        Err(_) => {
+                            error!("Timeout waiting for withdraw result after 30 seconds");
                             // Fall back to direct handler
                             self.cqrs_handler.withdraw_money(account_id, amount).await
                         }

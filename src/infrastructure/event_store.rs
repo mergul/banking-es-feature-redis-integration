@@ -902,20 +902,40 @@ impl EventStore {
 
             // Set correct versions for each aggregate's events
             for (aggregate_id, mut events) in events_by_aggregate {
-                // Get current version for this aggregate
-                let current_version = sqlx::query!(
-                    r#"
-                    SELECT COALESCE(MAX(version), 0) as version
-                    FROM events
-                    WHERE aggregate_id = $1
-                    "#,
-                    aggregate_id
-                )
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(EventStoreError::DatabaseError)?
-                .version
-                .unwrap_or(0);
+                // Use version cache first, fallback to database query
+                let current_version = if let Some(cached_version) = version_cache.get(&aggregate_id)
+                {
+                    *cached_version
+                } else {
+                    // Only query database if not in cache - use optimized query with shorter timeout
+                    let db_version = tokio::time::timeout(
+                        Duration::from_millis(100), // Very short timeout for version queries
+                        sqlx::query!(
+                            r#"
+                            SELECT COALESCE(MAX(version), 0) as version
+                            FROM events
+                            WHERE aggregate_id = $1
+                            ORDER BY version DESC
+                            LIMIT 1
+                            "#,
+                            aggregate_id
+                        )
+                        .fetch_one(&mut *tx),
+                    )
+                    .await
+                    .map_err(|_| {
+                        EventStoreError::DatabaseError(sqlx::Error::Configuration(
+                            "Version query timeout".into(),
+                        ))
+                    })?
+                    .map_err(EventStoreError::DatabaseError)?
+                    .version
+                    .unwrap_or(0);
+
+                    // Cache the result
+                    version_cache.insert(aggregate_id, db_version);
+                    db_version
+                };
 
                 // Set correct versions for events
                 let mut next_version = current_version + 1;
@@ -923,6 +943,9 @@ impl EventStore {
                     event.version = next_version;
                     next_version += 1;
                 }
+
+                // Update cache with new version
+                version_cache.insert(aggregate_id, next_version - 1);
 
                 all_events.extend(events);
             }
@@ -989,8 +1012,8 @@ impl EventStore {
             }
         }
 
-        // Commit transaction
-        tokio::time::timeout(Duration::from_secs(30), tx.commit())
+        // Commit transaction with shorter timeout for faster processing
+        tokio::time::timeout(Duration::from_secs(10), tx.commit())
             .await
             .map_err(|_| {
                 EventStoreError::DatabaseError(sqlx::Error::Configuration("Commit timeout".into()))
@@ -1103,8 +1126,8 @@ impl EventStore {
             // Use simple batch insert for better performance
             for event in &aggregate_events {
                 sqlx::query!(
-                    r#"
-                    INSERT INTO events (id, aggregate_id, event_type, event_data, version, timestamp, metadata)
+                r#"
+                INSERT INTO events (id, aggregate_id, event_type, event_data, version, timestamp, metadata)
                     VALUES ($1, $2, $3, $4, $5, $6, $7)
                     "#,
                     event.id,

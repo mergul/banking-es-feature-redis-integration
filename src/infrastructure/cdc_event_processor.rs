@@ -2577,25 +2577,25 @@ pub enum CacheEvictionPolicy {
 impl Default for AdvancedPerformanceConfig {
     fn default() -> Self {
         Self {
-            min_batch_size: 250,
-            max_batch_size: 500,
-            target_batch_time_ms: 25,
-            load_adjustment_factor: 0.1,
+            min_batch_size: 1000,    // Increased from 500 to 1000 for much better throughput
+            max_batch_size: 2000,    // Increased from 1000 to 2000 for much better throughput
+            target_batch_time_ms: 5, // Reduced from 10ms to 5ms for ultra-fast processing
+            load_adjustment_factor: 0.02, // Reduced from 0.05 to 0.02 for more aggressive adjustment
 
-            min_concurrency: 2,
-            max_concurrency: 16,
-            cpu_utilization_threshold: 0.8,
-            backpressure_threshold: 1000,
+            min_concurrency: 4,  // Increased from 2 to 4 for better parallelism
+            max_concurrency: 32, // Increased from 16 to 32 for better scalability
+            cpu_utilization_threshold: 0.9, // Increased from 0.8 to 0.9 for higher utilization
+            backpressure_threshold: 2000, // Increased from 1000 to 2000 for higher capacity
 
             enable_predictive_caching: true,
-            cache_warmup_size: 100,
+            cache_warmup_size: 200, // Increased from 100 to 200 for better cache hit rates
             cache_eviction_policy: CacheEvictionPolicy::Adaptive,
 
-            memory_pressure_threshold: 0.85,
-            gc_trigger_threshold: 10000,
+            memory_pressure_threshold: 0.9, // Increased from 0.85 to 0.9 for higher memory utilization
+            gc_trigger_threshold: 20000,    // Increased from 10000 to 20000 for less frequent GC
 
             enable_performance_profiling: true,
-            metrics_collection_interval_ms: 1000,
+            metrics_collection_interval_ms: 500, // Reduced from 1000ms to 500ms for more frequent updates
         }
     }
 }

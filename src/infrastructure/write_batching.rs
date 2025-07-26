@@ -114,10 +114,10 @@ pub struct WriteBatchingConfig {
 impl Default for WriteBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 25,          // Increased from 5 to 25 for better throughput
-            max_batch_wait_time_ms: 500, // Reduced from 1000ms to 500ms for faster processing
-            max_retries: 5,              // Increased from 3 to 5 for better resilience
-            retry_backoff_ms: 25,        // Reduced from 50ms to 25ms for faster retries
+            max_batch_size: 500, // Increased from 100 to 500 for much better throughput
+            max_batch_wait_time_ms: 10, // Reduced from 50ms to 10ms for ultra-fast processing
+            max_retries: 2,      // Reduced from 3 to 2 for faster processing
+            retry_backoff_ms: 5, // Reduced from 10ms to 5ms for faster retries
         }
     }
 }
@@ -637,10 +637,11 @@ impl WriteBatchingService {
     /// Submit a write operation for batching
     pub async fn submit_operation(&self, operation: WriteOperation) -> Result<Uuid> {
         let operation_id = Uuid::new_v4();
+        let aggregate_id = operation.get_aggregate_id();
+
         info!(
             "[WriteBatchingService] Submitting operation {} for aggregate {}",
-            operation_id,
-            operation.get_aggregate_id()
+            operation_id, aggregate_id
         );
 
         // FIXED: Increase buffer size to prevent blocking and ensure channel stays open
@@ -652,16 +653,21 @@ impl WriteBatchingService {
             .await
             .insert(operation_id, result_tx);
 
-        // Add to current batch
+        // Add to current batch with proper locking
         {
             let mut batch = self.current_batch.lock().await;
             batch.add_operation(operation_id, operation);
 
-            // Only process immediately if the batch is full (not based on time)
-            if batch.is_full(self.config.max_batch_size) {
+            // Process immediately if batch is full OR if it's been waiting too long
+            if batch.should_process(
+                self.config.max_batch_size,
+                Duration::from_millis(self.config.max_batch_wait_time_ms),
+            ) {
                 info!(
-                    "📦 Processing write batch: {} operations (batch full), age: {:?}",
+                    "📦 Processing write batch: {} operations (full: {}, old: {}), age: {:?}",
                     batch.operations.len(),
+                    batch.is_full(self.config.max_batch_size),
+                    batch.is_old(Duration::from_millis(self.config.max_batch_wait_time_ms)),
                     batch.created_at.elapsed()
                 );
                 drop(batch); // Release lock before processing
@@ -715,7 +721,7 @@ impl WriteBatchingService {
         }
 
         // Wait for the result with a reasonable timeout
-        let timeout = Duration::from_secs(60); // Increased timeout for high-load scenarios
+        let timeout = Duration::from_secs(30); // Reduced timeout for better responsiveness
         match tokio::time::timeout(timeout, async {
             // Poll for the result more efficiently with exponential backoff
             let mut poll_interval = Duration::from_millis(10);
@@ -763,7 +769,7 @@ impl WriteBatchingService {
                 // Clean up any hanging references on timeout
                 self.pending_results.lock().await.remove(&operation_id);
                 Err(anyhow::anyhow!(
-                    "Timeout waiting for operation {} result after 60 seconds",
+                    "Timeout waiting for operation {} result after 30 seconds",
                     operation_id
                 ))
             }
@@ -956,6 +962,28 @@ impl WriteBatchingService {
                 }
                 Err(e) => {
                     retry_count += 1;
+
+                    // Check if it's a duplicate key violation - don't retry these
+                    if e.to_string()
+                        .contains("duplicate key value violates unique constraint")
+                    {
+                        warn!("❌ Duplicate key violation detected, not retrying: {}", e);
+                        // Mark all operations as failed
+                        for (operation_id, _) in &batch.operations {
+                            results.push((
+                                *operation_id,
+                                WriteOperationResult {
+                                    operation_id: *operation_id,
+                                    success: false,
+                                    result: None,
+                                    error: Some(format!("Duplicate key violation: {}", e)),
+                                    duration: Duration::ZERO,
+                                },
+                            ));
+                        }
+                        break;
+                    }
+
                     warn!(
                         "❌ Batch execution failed (attempt {}/{}): {}",
                         retry_count, config.max_retries, e

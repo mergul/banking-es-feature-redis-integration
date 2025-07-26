@@ -29,11 +29,11 @@ pub enum EvictionPolicy {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            default_ttl: Duration::from_secs(3600),
-            max_size: 10000,
-            shard_count: 16,
-            warmup_batch_size: 100,
-            warmup_interval: Duration::from_secs(300),
+            default_ttl: Duration::from_secs(7200), // Increased from 3600 to 7200 for longer cache retention
+            max_size: 50000,        // Increased from 10000 to 50000 for larger cache
+            shard_count: 32,        // Increased from 16 to 32 for better concurrency
+            warmup_batch_size: 200, // Increased from 100 to 200 for faster warmup
+            warmup_interval: Duration::from_secs(180), // Reduced from 300 to 180 for more frequent warmup
             eviction_policy: EvictionPolicy::LRU,
         }
     }

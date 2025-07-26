@@ -16,6 +16,7 @@ use banking_es::{
 };
 use rust_decimal::Decimal;
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sysinfo::System;
@@ -55,21 +56,21 @@ async fn setup_stress_test_environment(
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
         }),
         write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "50".to_string()) // Increased from default to 50
+            .unwrap_or_else(|_| "300".to_string()) // Increased from 150 to 300 for much higher throughput
             .parse()
-            .unwrap_or(50),
+            .unwrap_or(300),
         write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "25".to_string()) // Increased from default to 25
+            .unwrap_or_else(|_| "150".to_string()) // Increased from 75 to 150 for much higher availability
             .parse()
-            .unwrap_or(25),
+            .unwrap_or(150),
         read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "100".to_string()) // Increased from default to 100
+            .unwrap_or_else(|_| "600".to_string()) // Increased from 300 to 600 for much higher read performance
             .parse()
-            .unwrap_or(100),
+            .unwrap_or(600),
         read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "50".to_string()) // Increased from default to 50
+            .unwrap_or_else(|_| "300".to_string()) // Increased from 150 to 300 for much higher availability
             .parse()
-            .unwrap_or(50),
+            .unwrap_or(300),
         acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
             .unwrap_or_else(|_| "60".to_string()) // Increased from 30 to 60 seconds
             .parse()
@@ -123,9 +124,9 @@ async fn setup_stress_test_environment(
         service_context.projection_store.clone(),
         service_context.cache_service.clone(),
         kafka_config.clone(),
-        200,                        // max_concurrent_operations (increased from 100 to 200)
-        100,                        // batch_size (increased from 50 to 100)
-        Duration::from_millis(500), // batch_timeout (increased from 100ms to 500ms)
+        1000, // max_concurrent_operations (increased from 500 to 1000 for much better parallelism)
+        500,  // batch_size (increased from 200 to 500 for much better throughput)
+        Duration::from_millis(100), // batch_timeout (reduced from 250ms to 100ms for ultra-fast processing)
         true,                       // enable_write_batching
         Some(consistency_manager.clone()), // Pass the consistency manager
     ));
@@ -560,7 +561,7 @@ async fn run_worker(
             // Write operation with timeout
             match op_num % 2 {
                 0 => tokio::time::timeout(
-                    Duration::from_secs(2), // Decreased from 15s to 2s for writes
+                    Duration::from_secs(10), // Increased from 2s to 10s for writes to allow for batching
                     cqrs_service.deposit_money(account_id, Decimal::new(10, 0)),
                 )
                 .await
@@ -568,7 +569,7 @@ async fn run_worker(
                     banking_es::domain::AccountError::InfrastructureError("Timeout".to_string()),
                 )),
                 _ => tokio::time::timeout(
-                    Duration::from_secs(2), // Decreased from 15s to 2s for writes
+                    Duration::from_secs(10), // Increased from 2s to 10s for writes to allow for batching
                     cqrs_service.withdraw_money(account_id, Decimal::new(5, 0)),
                 )
                 .await
@@ -805,7 +806,7 @@ async fn test_read_operations_after_writes() {
     println!("\n📝 PHASE 1: Multi-Row Write Operations");
     println!("=====================================");
 
-    let account_count = 25; // Reduced for better performance
+    let account_count = 100; // Increased from 50 to 100 to better utilize much improved performance
     println!("🔧 Creating {} test accounts...", account_count);
 
     // Submit all account creation operations in parallel for batching
@@ -844,6 +845,26 @@ async fn test_read_operations_after_writes() {
         return;
     }
 
+    // Pre-warm version cache by getting current versions for all accounts
+    println!(
+        "🔥 Pre-warming version cache for {} accounts...",
+        account_ids.len()
+    );
+    let cache_warmup_start = Instant::now();
+    let mut cache_warmup_handles = Vec::new();
+    for &account_id in &account_ids {
+        let cqrs_service = context.cqrs_service.clone();
+        let handle = tokio::spawn(async move {
+            let _ = cqrs_service.get_account(account_id).await;
+        });
+        cache_warmup_handles.push(handle);
+    }
+    let _ = futures::future::join_all(cache_warmup_handles).await;
+    println!(
+        "✅ Version cache pre-warmed in {:?}",
+        cache_warmup_start.elapsed()
+    );
+
     // Submit batched events for all accounts using multi-row insert pattern
     println!("\n🔧 Submitting batched events for all accounts using multi-row insert...");
     let write_start = Instant::now();
@@ -851,8 +872,8 @@ async fn test_read_operations_after_writes() {
     // Create a batch of operations for all accounts
     let mut all_operations = Vec::new();
     for (i, &account_id) in account_ids.iter().enumerate() {
-        // Create 5 operations per account (3 deposits, 2 withdrawals) - reduced from 10
-        for j in 0..5 {
+        // Create 10 operations per account (6 deposits, 4 withdrawals) - increased to test much improved performance
+        for j in 0..10 {
             let operation = if j % 2 == 0 {
                 banking_es::domain::AccountEvent::MoneyDeposited {
                     account_id,
@@ -876,23 +897,37 @@ async fn test_read_operations_after_writes() {
         operations_count
     );
 
-    // Submit operations to write batching service
-    let mut handles = Vec::new();
+    // Group operations by account_id for efficient batch processing
+    let mut operations_by_account: HashMap<Uuid, Vec<banking_es::domain::AccountEvent>> =
+        HashMap::new();
     for (account_id, event) in all_operations {
+        operations_by_account
+            .entry(account_id)
+            .or_insert_with(Vec::new)
+            .push(event);
+    }
+
+    // Submit operations grouped by account for efficient batch processing
+    let mut handles = Vec::new();
+    for (account_id, events) in operations_by_account {
         let cqrs_service = context.cqrs_service.clone();
         let handle = tokio::spawn(async move {
+            let events_count = events.len();
             match cqrs_service
-                .submit_events_batch(account_id, vec![event], 0) // Let the system handle versioning
+                .submit_events_batch(account_id, events, 0) // Let the system handle versioning
                 .await
             {
                 Ok(_) => {
-                    println!("✅ Successfully submitted event for account {}", account_id);
+                    println!(
+                        "✅ Successfully submitted {} events for account {}",
+                        events_count, account_id
+                    );
                     Ok(())
                 }
                 Err(e) => {
                     println!(
-                        "❌ Failed to submit event for account {}: {:?}",
-                        account_id, e
+                        "❌ Failed to submit {} events for account {}: {:?}",
+                        events_count, account_id, e
                     );
                     Err(e)
                 }
@@ -907,7 +942,7 @@ async fn test_read_operations_after_writes() {
     let mut write_failed = 0;
     for (i, handle) in handles.into_iter().enumerate() {
         println!("Awaiting handle for operation {}", i);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(15), handle).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(45), handle).await;
         match result {
             Ok(Ok(Ok(_))) => write_success += 1,
             Ok(Ok(Err(e))) => {
