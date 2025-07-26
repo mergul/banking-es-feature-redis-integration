@@ -10,8 +10,9 @@ use crate::infrastructure::event_store::EventStoreTrait;
 use crate::infrastructure::projections::{
     AccountProjection, ProjectionStoreTrait, TransactionProjection,
 };
+use crate::infrastructure::write_batching::save_events_with_retry;
 use crate::infrastructure::write_batching::{
-    WriteBatchingConfig, WriteBatchingService, WriteOperation,
+    PartitionedBatching, WriteBatchingConfig, WriteBatchingService, WriteOperation,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -28,7 +29,7 @@ use uuid::Uuid;
 pub struct CQRSAccountService {
     cqrs_handler: Arc<CQRSHandler>,
     batch_handler: Arc<BatchTransactionHandler>,
-    write_batching_service: Option<Arc<WriteBatchingService>>,
+    write_batching_service: Option<Arc<PartitionedBatching>>,
     consistency_manager: Arc<ConsistencyManager>,
     metrics: Arc<CQRSMetrics>,
     enable_write_batching: bool,
@@ -70,14 +71,28 @@ impl CQRSAccountService {
 
         // Initialize write batching service if enabled
         let write_batching_service = if enable_write_batching {
-            let config = WriteBatchingConfig::default();
-            let batching_service = Arc::new(WriteBatchingService::new(
-                config,
+            // Create CDC outbox repository for outbox batcher
+            let outbox_repo = Arc::new(
+                crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
+                    event_store.get_partitioned_pools().clone(),
+                ),
+            )
+                as Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait>;
+
+            // Create outbox batcher
+            let outbox_batcher = crate::infrastructure::cdc_debezium::OutboxBatcher::new_default(
+                outbox_repo,
+                event_store.get_partitioned_pools().clone(),
+            );
+
+            // Create partitioned batching service
+            let partitioned_batching = Arc::new(PartitionedBatching::new(
                 event_store.clone(),
                 projection_store.clone(),
                 event_store.get_partitioned_pools().write_pool_arc(),
+                outbox_batcher,
             ));
-            Some(batching_service)
+            Some(partitioned_batching)
         } else {
             None
         };
@@ -121,7 +136,7 @@ impl CQRSAccountService {
     }
 
     /// Get the write batching service for direct access
-    pub fn get_write_batching_service(&self) -> Option<&Arc<WriteBatchingService>> {
+    pub fn get_write_batching_service(&self) -> Option<&Arc<PartitionedBatching>> {
         self.write_batching_service.as_ref()
     }
 
@@ -144,11 +159,16 @@ impl CQRSAccountService {
         // Use write batching if available, otherwise fall back to direct handler
         let result = if let Some(ref batching_service) = self.write_batching_service {
             let operation = WriteOperation::CreateAccount {
+                account_id: Uuid::new_v4(),
                 owner_name: owner_name.clone(),
                 initial_balance,
             };
 
-            match batching_service.submit_operation(operation).await {
+            let aggregate_id = operation.get_aggregate_id();
+            match batching_service
+                .submit_operation(aggregate_id, operation)
+                .await
+            {
                 Ok(operation_id) => {
                     // Wait for the operation to complete and get the actual account ID
                     match batching_service.wait_for_result(operation_id).await {
@@ -248,8 +268,11 @@ impl CQRSAccountService {
         // Use write batching if available, otherwise fall back to direct handler
         let result = if let Some(ref batching_service) = self.write_batching_service {
             let operation = WriteOperation::DepositMoney { account_id, amount };
-
-            match batching_service.submit_operation(operation).await {
+            let aggregate_id = operation.get_aggregate_id();
+            match batching_service
+                .submit_operation(aggregate_id, operation)
+                .await
+            {
                 Ok(operation_id) => {
                     // Wait for the operation to complete
                     match batching_service.wait_for_result(operation_id).await {
@@ -327,8 +350,12 @@ impl CQRSAccountService {
         // Use write batching if available, otherwise fall back to direct handler
         let result = if let Some(ref batching_service) = self.write_batching_service {
             let operation = WriteOperation::WithdrawMoney { account_id, amount };
+            let aggregate_id = operation.get_aggregate_id();
 
-            match batching_service.submit_operation(operation).await {
+            match batching_service
+                .submit_operation(aggregate_id, operation)
+                .await
+            {
                 Ok(operation_id) => {
                     // Wait for the operation to complete
                     match batching_service.wait_for_result(operation_id).await {
@@ -697,17 +724,20 @@ impl CQRSAccountService {
         &self,
         account_id: Uuid,
         events: Vec<AccountEvent>,
-        expected_version: i64,
+        _expected_version: i64, // No longer used
     ) -> Result<(), AccountError> {
         println!(
-            "[DEBUG] submit_events_batch: account_id={:?}, events={:?}, expected_version={}",
-            account_id, events, expected_version
+            "[DEBUG] submit_events_batch: account_id={:?}, events={:?}",
+            account_id, events
         );
-        let result = self
-            .cqrs_handler
-            .event_store()
-            .save_events(account_id, events, expected_version)
-            .await;
+        let max_retries = 5;
+        let result = save_events_with_retry(
+            &self.cqrs_handler.event_store(),
+            account_id,
+            events,
+            max_retries,
+        )
+        .await;
         println!(
             "[DEBUG] submit_events_batch: completed for account_id={:?} with result={:?}",
             account_id, result

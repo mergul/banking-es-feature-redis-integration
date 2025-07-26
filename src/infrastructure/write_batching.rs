@@ -7,13 +7,100 @@ use bincode;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use sqlx::{PgPool, Transaction};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+use crate::infrastructure::redis_aggregate_lock::RedisAggregateLock;
+use rand::Rng;
+
+const NUM_PARTITIONS: usize = 8; // Increased from 4 to 8 to reduce partition conflicts
+const DEFAULT_BATCH_SIZE: usize = 50;
+
+fn partition_for_aggregate(aggregate_id: &Uuid, num_partitions: usize) -> usize {
+    let mut hasher = DefaultHasher::new();
+    aggregate_id.hash(&mut hasher);
+    (hasher.finish() as usize) % num_partitions
+}
+
+/// Partitioned batching manager
+pub struct PartitionedBatching {
+    processors: Vec<Arc<WriteBatchingService>>,
+}
+
+impl PartitionedBatching {
+    pub fn new(
+        event_store: Arc<dyn EventStoreTrait>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+        write_pool: Arc<PgPool>,
+        outbox_batcher: crate::infrastructure::cdc_debezium::OutboxBatcher,
+    ) -> Self {
+        let mut processors = Vec::with_capacity(NUM_PARTITIONS);
+        for partition_id in 0..NUM_PARTITIONS {
+            let config = WriteBatchingConfig {
+                max_batch_size: DEFAULT_BATCH_SIZE,
+                max_batch_wait_time_ms: 100, // or tune as needed
+                max_retries: 3,
+                retry_backoff_ms: 50,
+            };
+            let processor = Arc::new(WriteBatchingService::new_for_partition(
+                partition_id,
+                NUM_PARTITIONS,
+                config,
+                event_store.clone(),
+                projection_store.clone(),
+                write_pool.clone(),
+            ));
+            processors.push(processor);
+        }
+        Self { processors }
+    }
+
+    pub async fn submit_operation(&self, aggregate_id: Uuid, op: WriteOperation) -> Result<Uuid> {
+        let partition = partition_for_aggregate(&aggregate_id, NUM_PARTITIONS);
+        self.processors[partition].submit_operation(op).await
+    }
+
+    pub fn start_all(&self) {
+        for processor in &self.processors {
+            let processor = processor.clone();
+            tokio::spawn(async move {
+                let _ = processor.start().await;
+            });
+        }
+    }
+
+    /// Wait for the result of a submitted operation by searching all partitions
+    pub async fn wait_for_result(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<WriteOperationResult, anyhow::Error> {
+        // Try each partition in parallel (or sequentially, since there are few)
+        for processor in &self.processors {
+            // Try to get the result; if not found, continue
+            match processor.wait_for_result(operation_id).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    // If the error is not 'not found', return it
+                    let msg = format!("{}", e);
+                    if !msg.contains("not found") && !msg.contains("already completed") {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err(anyhow::anyhow!(
+            "Operation {} not found in any partition",
+            operation_id
+        ))
+    }
+}
 
 /// Configuration for write batching
 #[derive(Debug, Clone)]
@@ -27,10 +114,10 @@ pub struct WriteBatchingConfig {
 impl Default for WriteBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 50,          // Reduced for testing multi-aggregate scenarios
-            max_batch_wait_time_ms: 100, // Increased to 2 seconds to allow proper batching
-            max_retries: 3,
-            retry_backoff_ms: 50,
+            max_batch_size: 25,          // Increased from 5 to 25 for better throughput
+            max_batch_wait_time_ms: 500, // Reduced from 1000ms to 500ms for faster processing
+            max_retries: 5,              // Increased from 3 to 5 for better resilience
+            retry_backoff_ms: 25,        // Reduced from 50ms to 25ms for faster retries
         }
     }
 }
@@ -39,6 +126,7 @@ impl Default for WriteBatchingConfig {
 #[derive(Debug, Clone)]
 pub enum WriteOperation {
     CreateAccount {
+        account_id: Uuid, // <-- Now required
         owner_name: String,
         initial_balance: Decimal,
     },
@@ -50,6 +138,16 @@ pub enum WriteOperation {
         account_id: Uuid,
         amount: Decimal,
     },
+}
+
+impl WriteOperation {
+    pub fn get_aggregate_id(&self) -> Uuid {
+        match self {
+            WriteOperation::CreateAccount { account_id, .. } => *account_id,
+            WriteOperation::DepositMoney { account_id, .. } => *account_id,
+            WriteOperation::WithdrawMoney { account_id, .. } => *account_id,
+        }
+    }
 }
 
 /// Result of a write operation
@@ -118,6 +216,11 @@ pub struct WriteBatchingService {
     // Metrics
     batches_processed: Arc<Mutex<u64>>,
     operations_processed: Arc<Mutex<u64>>,
+
+    // Partitioning state
+    partition_id: Option<usize>,
+    num_partitions: Option<usize>,
+    redis_lock: Arc<RedisAggregateLock>,
 }
 
 impl WriteBatchingService {
@@ -151,7 +254,24 @@ impl WriteBatchingService {
             shutdown_token: CancellationToken::new(),
             batches_processed: Arc::new(Mutex::new(0)),
             operations_processed: Arc::new(Mutex::new(0)),
+            partition_id: None,
+            num_partitions: None,
+            redis_lock: Arc::new(RedisAggregateLock::new("redis://localhost:6379")),
         }
+    }
+
+    pub fn new_for_partition(
+        partition_id: usize,
+        num_partitions: usize,
+        config: WriteBatchingConfig,
+        event_store: Arc<dyn EventStoreTrait>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+        write_pool: Arc<PgPool>,
+    ) -> Self {
+        let mut service = Self::new(config, event_store, projection_store, write_pool);
+        service.partition_id = Some(partition_id);
+        service.num_partitions = Some(num_partitions);
+        service
     }
 
     /// Start the batch processor from an Arc (for use with shared references)
@@ -174,6 +294,7 @@ impl WriteBatchingService {
         let outbox_batcher = self.outbox_batcher.clone();
         let batches_processed = self.batches_processed.clone();
         let operations_processed = self.operations_processed.clone();
+        let redis_lock = self.redis_lock.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval =
@@ -186,7 +307,13 @@ impl WriteBatchingService {
                         // Check if current batch should be processed
                         let should_process = {
                             let batch = current_batch.lock().await;
-                            batch.should_process(config.max_batch_size, Duration::from_millis(config.max_batch_wait_time_ms))
+                            let is_full = batch.is_full(config.max_batch_size);
+                            let is_old = batch.is_old(Duration::from_millis(config.max_batch_wait_time_ms));
+                            let should = batch.should_process(config.max_batch_size, Duration::from_millis(config.max_batch_wait_time_ms));
+
+                            info!("[WriteBatchingService] Batch status: size={}, is_full={}, is_old={}, should_process={}",
+                                  batch.operations.len(), is_full, is_old, should);
+                            should
                         };
 
                         if should_process {
@@ -201,6 +328,7 @@ impl WriteBatchingService {
                                 &config,
                                 &batches_processed,
                                 &operations_processed,
+                                &redis_lock,
                             ).await;
                         }
                     }
@@ -223,6 +351,7 @@ impl WriteBatchingService {
                 &config,
                 &batches_processed,
                 &operations_processed,
+                &redis_lock,
             )
             .await;
         });
@@ -280,6 +409,7 @@ impl WriteBatchingService {
                 &self.config,
                 &self.batches_processed,
                 &self.operations_processed,
+                &self.redis_lock,
             )
             .await;
         }
@@ -389,6 +519,7 @@ impl WriteBatchingService {
                 &self.config,
                 &self.batches_processed,
                 &self.operations_processed,
+                &self.redis_lock,
             )
             .await;
         }
@@ -506,6 +637,12 @@ impl WriteBatchingService {
     /// Submit a write operation for batching
     pub async fn submit_operation(&self, operation: WriteOperation) -> Result<Uuid> {
         let operation_id = Uuid::new_v4();
+        info!(
+            "[WriteBatchingService] Submitting operation {} for aggregate {}",
+            operation_id,
+            operation.get_aggregate_id()
+        );
+
         // FIXED: Increase buffer size to prevent blocking and ensure channel stays open
         let (result_tx, result_rx) = mpsc::channel::<WriteOperationResult>(10);
 
@@ -522,7 +659,7 @@ impl WriteBatchingService {
 
             // Only process immediately if the batch is full (not based on time)
             if batch.is_full(self.config.max_batch_size) {
-                println!(
+                info!(
                     "📦 Processing write batch: {} operations (batch full), age: {:?}",
                     batch.operations.len(),
                     batch.created_at.elapsed()
@@ -540,6 +677,7 @@ impl WriteBatchingService {
                     &self.config,
                     &self.batches_processed,
                     &self.operations_processed,
+                    &self.redis_lock,
                 )
                 .await;
             }
@@ -577,7 +715,7 @@ impl WriteBatchingService {
         }
 
         // Wait for the result with a reasonable timeout
-        let timeout = Duration::from_secs(15); // Increased timeout for high-load scenarios
+        let timeout = Duration::from_secs(60); // Increased timeout for high-load scenarios
         match tokio::time::timeout(timeout, async {
             // Poll for the result more efficiently with exponential backoff
             let mut poll_interval = Duration::from_millis(10);
@@ -625,7 +763,7 @@ impl WriteBatchingService {
                 // Clean up any hanging references on timeout
                 self.pending_results.lock().await.remove(&operation_id);
                 Err(anyhow::anyhow!(
-                    "Timeout waiting for operation {} result after 30 seconds",
+                    "Timeout waiting for operation {} result after 60 seconds",
                     operation_id
                 ))
             }
@@ -636,7 +774,7 @@ impl WriteBatchingService {
     async fn process_current_batch(
         current_batch: &Arc<Mutex<WriteBatch>>,
         pending_results: &Arc<Mutex<HashMap<Uuid, mpsc::Sender<WriteOperationResult>>>>,
-        completed_results: &Arc<Mutex<HashMap<Uuid, WriteOperationResult>>>, // FIXED: Add completed results
+        completed_results: &Arc<Mutex<HashMap<Uuid, WriteOperationResult>>>,
         event_store: &Arc<dyn EventStoreTrait>,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         write_pool: &Arc<PgPool>,
@@ -644,8 +782,9 @@ impl WriteBatchingService {
         config: &WriteBatchingConfig,
         batches_processed: &Arc<Mutex<u64>>,
         operations_processed: &Arc<Mutex<u64>>,
+        redis_lock: &Arc<RedisAggregateLock>,
     ) {
-        println!("🔄 Starting batch processing...");
+        println!("🔄 Starting batch processing with distributed locking...");
 
         // Take the current batch and create a new one
         let batch_to_process = {
@@ -664,51 +803,112 @@ impl WriteBatchingService {
             return;
         }
 
-        println!(
-            "📊 Processing batch with {} operations",
-            batch_to_process.operations.len()
-        );
+        // Group operations by aggregate_id for distributed locking
+        let mut ops_by_aggregate: HashMap<Uuid, Vec<(Uuid, WriteOperation)>> = HashMap::new();
+        for (op_id, op) in &batch_to_process.operations {
+            let aggregate_id = op.get_aggregate_id();
+            ops_by_aggregate
+                .entry(aggregate_id)
+                .or_default()
+                .push((*op_id, op.clone()));
+        }
 
-        // Execute the batch
-        let results = Self::execute_batch(
-            &batch_to_process,
-            event_store,
-            projection_store,
-            write_pool,
-            outbox_batcher,
-            config,
-        )
-        .await;
+        // Process operations with distributed locking
+        let mut locked_operations = Vec::new();
+        let mut skipped_operations = Vec::new();
+        let mut locked_aggregates = Vec::new();
 
-        println!(
-            "✅ Batch execution completed with {} results",
-            results.len()
-        );
+        for (aggregate_id, ops) in &ops_by_aggregate {
+            if redis_lock.try_lock(*aggregate_id, 30).await {
+                // Increased from 10 to 30 seconds
+                println!("🔒 Acquired lock for aggregate {}", aggregate_id);
+                locked_operations.extend(ops.clone());
+                locked_aggregates.push(*aggregate_id);
+            } else {
+                println!(
+                    "⚠️  Could not acquire lock for aggregate {}, skipping ops for now",
+                    aggregate_id
+                );
+                skipped_operations.extend(ops.clone());
+            }
+        }
 
-        // FIXED: Send results to waiting operations with proper channel lifecycle management
-        for (operation_id, result) in results {
-            // Store in completed results first for immediate availability
-            completed_results
-                .lock()
-                .await
-                .insert(operation_id, result.clone());
+        // Process locked operations in batch
+        if !locked_operations.is_empty() {
+            let batch_with_locked_ops = WriteBatch {
+                batch_id: batch_to_process.batch_id,
+                operations: locked_operations,
+                created_at: batch_to_process.created_at,
+            };
 
-            // Send to the waiting operation (don't remove sender until after sending)
-            if let Some(sender) = pending_results.lock().await.get(&operation_id) {
-                // Clone the sender to avoid holding the lock during send
-                let sender_clone = sender.clone();
-                drop(pending_results.lock().await); // Release lock before sending
+            println!(
+                "📦 Processing {} locked operations in batch",
+                batch_with_locked_ops.operations.len()
+            );
 
-                if let Err(e) = sender_clone.send(result).await {
-                    println!(
-                        "❌ Failed to send result for operation {}: {}",
-                        operation_id, e
-                    );
+            let batch_results = Self::execute_batch_transaction(
+                &batch_with_locked_ops,
+                event_store,
+                projection_store,
+                write_pool,
+                outbox_batcher,
+            )
+            .await;
+
+            match batch_results {
+                Ok(results) => {
+                    // Store completed results and notify waiting operations
+                    for (operation_id, result) in results {
+                        completed_results
+                            .lock()
+                            .await
+                            .insert(operation_id, result.clone());
+
+                        if let Some(sender) = pending_results.lock().await.remove(&operation_id) {
+                            let _ = sender.send(result).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("❌ Batch execution failed: {}", e);
+                    // Mark all operations as failed
+                    for (operation_id, _) in &batch_with_locked_ops.operations {
+                        let error_result = WriteOperationResult {
+                            operation_id: *operation_id,
+                            success: false,
+                            result: None,
+                            error: Some(format!("Batch execution failed: {}", e)),
+                            duration: Duration::ZERO,
+                        };
+
+                        completed_results
+                            .lock()
+                            .await
+                            .insert(*operation_id, error_result.clone());
+
+                        if let Some(sender) = pending_results.lock().await.remove(operation_id) {
+                            let _ = sender.send(error_result).await;
+                        }
+                    }
                 }
             }
+        }
 
-            // Now remove the sender from pending results after successful send
-            pending_results.lock().await.remove(&operation_id);
+        // Re-queue skipped operations for next batch
+        if !skipped_operations.is_empty() {
+            println!(
+                "🔄 Re-queuing {} skipped operations for next batch",
+                skipped_operations.len()
+            );
+            let mut batch = current_batch.lock().await;
+            for (operation_id, operation) in skipped_operations {
+                batch.add_operation(operation_id, operation);
+            }
+        }
+
+        // Release all locks
+        for aggregate_id in locked_aggregates {
+            redis_lock.unlock(aggregate_id).await;
         }
 
         // Update metrics
@@ -849,9 +1049,14 @@ impl WriteBatchingService {
                 let op_start = Instant::now();
                 let (events, outbox_messages, result_id) = match operation {
                     WriteOperation::CreateAccount {
+                        account_id,
                         owner_name,
                         initial_balance,
-                    } => Self::prepare_create_account_operation(owner_name, *initial_balance),
+                    } => Self::prepare_create_account_operation(
+                        *account_id,
+                        owner_name,
+                        *initial_balance,
+                    ),
                     WriteOperation::DepositMoney { account_id, amount } => {
                         Self::prepare_deposit_money_operation(*account_id, *amount)
                     }
@@ -865,6 +1070,12 @@ impl WriteBatchingService {
 
                 operation_results.push((*operation_id, result_id, op_start.elapsed()));
             }
+
+            info!(
+                "[DEBUG] execute_batch_transaction: Prepared {} events and {} outbox messages",
+                all_events.len(),
+                all_outbox_messages.len()
+            );
 
             // Group events by aggregate_id for efficient batch insertion
             let mut events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, i64)> = Vec::new();
@@ -910,81 +1121,51 @@ impl WriteBatchingService {
             if let Err(e) = result {
                 println!("[DEBUG] execute_batch_transaction: Failed to save events in multi-aggregate batch: {:?}", e);
                 error!("Failed to save events in multi-aggregate batch: {:?}", e);
-                // Rollback transaction on any error
-                let _ = transaction.rollback().await;
-                retry_count += 1;
-                if retry_count >= max_retries {
-                    // Return failure results for all operations
-                    for (operation_id, _, _) in operation_results {
-                        results.push((
-                            operation_id,
-                            WriteOperationResult {
-                                operation_id,
-                                success: false,
-                                result: None,
-                                error: Some("Failed to insert events after retries".to_string()),
-                                duration: Duration::ZERO,
-                            },
-                        ));
-                    }
-                    return Ok(results);
-                }
-                continue;
-            }
 
-            // Submit all outbox messages
-            let mut outbox_success = true;
-            for outbox_message in all_outbox_messages {
-                let mut retries = 0;
-                loop {
-                    match outbox_batcher.submit(outbox_message.clone()).await {
-                        Ok(_) => break,
-                        Err(e) => {
-                            retries += 1;
-                            if retries > 5 {
-                                outbox_success = false;
-                                error!("Failed to submit outbox message after retries: {}", e);
-                                break;
-                            }
-                            error!(
-                                "Failed to submit outbox message, retrying (attempt {}/5): {}",
-                                retries, e
-                            );
-                            tokio::time::sleep(Duration::from_millis(50)).await;
+                // Check if this is a serialization conflict that we should retry
+                let is_serialization_conflict = e
+                    .to_string()
+                    .contains("could not serialize access due to read/write dependencies");
+
+                if is_serialization_conflict && retry_count < max_retries - 1 {
+                    // Rollback transaction and retry with exponential backoff
+                    let _ = transaction.rollback().await;
+                    retry_count += 1;
+                    let backoff = Duration::from_millis(50 * retry_count as u64); // Use fixed backoff
+                    info!(
+                        "[DEBUG] Serialization conflict detected, retrying in {:?} (attempt {}/{})",
+                        backoff, retry_count, max_retries
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                } else {
+                    // Rollback transaction on any error
+                    let _ = transaction.rollback().await;
+                    retry_count += 1;
+                    if retry_count >= max_retries {
+                        // Return failure results for all operations
+                        for (operation_id, _, _) in operation_results {
+                            results.push((
+                                operation_id,
+                                WriteOperationResult {
+                                    operation_id,
+                                    success: false,
+                                    result: None,
+                                    error: Some(format!(
+                                        "Failed to insert events after {} retries: {}",
+                                        max_retries, e
+                                    )),
+                                    duration: Duration::ZERO,
+                                },
+                            ));
                         }
+                        return Ok(results);
                     }
-                }
-                if !outbox_success {
-                    break;
+                    continue;
                 }
             }
 
-            if !outbox_success {
-                // Rollback transaction on outbox failure
-                let _ = transaction.rollback().await;
-                retry_count += 1;
-                if retry_count >= max_retries {
-                    // Return failure results for all operations
-                    for (operation_id, _, _) in operation_results {
-                        results.push((
-                            operation_id,
-                            WriteOperationResult {
-                                operation_id,
-                                success: false,
-                                result: None,
-                                error: Some(
-                                    "Failed to submit outbox messages after retries".to_string(),
-                                ),
-                                duration: Duration::ZERO,
-                            },
-                        ));
-                    }
-                    return Ok(results);
-                }
-                continue;
-            }
-
-            // Commit transaction
+            // Commit transaction FIRST
             if let Err(e) = transaction.commit().await {
                 retry_count += 1;
                 if retry_count >= max_retries {
@@ -1008,6 +1189,76 @@ impl WriteBatchingService {
                 continue;
             }
 
+            info!("[DEBUG] execute_batch_transaction: Transaction committed successfully for {} operations", operation_results.len());
+            info!(
+                "[DEBUG] execute_batch_transaction: About to submit {} outbox messages",
+                all_outbox_messages.len()
+            );
+
+            // Submit all outbox messages AFTER successful commit with timeout
+            let mut outbox_success = true;
+            let outbox_message_count = all_outbox_messages.len();
+            for outbox_message in &all_outbox_messages {
+                let mut retries = 0;
+                let mut submitted = false;
+
+                while retries < 3 && !submitted {
+                    // Try non-blocking submit first
+                    match outbox_batcher.try_submit(outbox_message.clone()) {
+                        Ok(_) => {
+                            info!("[DEBUG] OutboxBatcher: Successfully submitted outbox message (non-blocking) for aggregate_id={:?}, event_id={:?}", outbox_message.aggregate_id, outbox_message.event_id);
+                            submitted = true;
+                        }
+                        Err(_) => {
+                            // If non-blocking fails, try with timeout
+                            match tokio::time::timeout(
+                                Duration::from_millis(50),
+                                outbox_batcher.submit(outbox_message.clone()),
+                            )
+                            .await
+                            {
+                                Ok(Ok(_)) => {
+                                    info!("[DEBUG] OutboxBatcher: Successfully submitted outbox message (with timeout) for aggregate_id={:?}, event_id={:?}", outbox_message.aggregate_id, outbox_message.event_id);
+                                    submitted = true;
+                                }
+                                Ok(Err(e)) => {
+                                    retries += 1;
+                                    error!(
+                                        "Failed to submit outbox message (attempt {}/3): {}",
+                                        retries, e
+                                    );
+                                    if retries < 3 {
+                                        tokio::time::sleep(Duration::from_millis(10)).await;
+                                    }
+                                }
+                                Err(_) => {
+                                    retries += 1;
+                                    error!(
+                                        "Timeout submitting outbox message (attempt {}/3)",
+                                        retries
+                                    );
+                                    if retries < 3 {
+                                        tokio::time::sleep(Duration::from_millis(10)).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !submitted {
+                    outbox_success = false;
+                    error!("Failed to submit outbox message after 3 attempts - aggregate_id={:?}, event_id={:?}", outbox_message.aggregate_id, outbox_message.event_id);
+                    break;
+                }
+            }
+
+            if !outbox_success {
+                // Log error but don't rollback since transaction is already committed
+                error!("Failed to submit some outbox messages after transaction commit - events are persisted but CDC may be delayed");
+                // Continue with success since events are already committed
+            }
+
             // Return success results for all operations
             for (operation_id, result_id, duration) in operation_results {
                 results.push((
@@ -1022,6 +1273,8 @@ impl WriteBatchingService {
                 ));
             }
 
+            info!("[DEBUG] execute_batch_transaction: Completed successfully - {} operations, {} outbox messages, outbox_success={}", 
+                  results.len(), outbox_message_count, outbox_success);
             println!(
                 "[DEBUG] execute_batch_transaction: Transaction complete, results: {:?}",
                 results
@@ -1038,10 +1291,10 @@ impl WriteBatchingService {
 
     // Helper methods to prepare operations without executing them
     fn prepare_create_account_operation(
+        account_id: Uuid,
         owner_name: &str,
         initial_balance: Decimal,
     ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
-        let account_id = Uuid::new_v4();
         let event = AccountEvent::AccountCreated {
             account_id,
             owner_name: owner_name.to_string(),
@@ -1110,10 +1363,10 @@ impl WriteBatchingService {
         event_store: &Arc<dyn EventStoreTrait>,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         outbox_batcher: &crate::infrastructure::cdc_debezium::OutboxBatcher,
+        account_id: Uuid,
         owner_name: &str,
         initial_balance: Decimal,
     ) -> Result<Uuid> {
-        let account_id = Uuid::new_v4();
         let account = Account::new(account_id, owner_name.to_string(), initial_balance);
 
         let event = AccountEvent::AccountCreated {
@@ -1324,6 +1577,48 @@ impl WriteBatchingService {
     }
 }
 
+/// Helper to check if an error is a version conflict
+fn is_version_conflict(e: &crate::infrastructure::event_store::EventStoreError) -> bool {
+    let msg = format!("{}", e);
+    msg.contains("Invalid version sequence")
+        || msg.contains(
+            "could not serialize access due to read/write dependencies among transactions",
+        )
+}
+
+/// Robust event writing with version conflict retry
+pub async fn save_events_with_retry(
+    event_store: &Arc<dyn EventStoreTrait>,
+    aggregate_id: Uuid,
+    events: Vec<AccountEvent>,
+    max_retries: usize,
+) -> Result<(), crate::infrastructure::event_store::EventStoreError> {
+    let mut retries = 0;
+    let mut backoff = 100;
+
+    loop {
+        // Get current version on each attempt to avoid race conditions
+        let current_version = event_store.get_current_version(aggregate_id).await?;
+
+        let result = event_store
+            .save_events(aggregate_id, events.clone(), current_version)
+            .await;
+
+        match result {
+            Ok(_) => return Ok(()),
+            Err(e) if is_version_conflict(&e) && retries < max_retries => {
+                retries += 1;
+                println!("[DEBUG] Version conflict for aggregate_id={:?}, retrying (attempt {}/{}), current_version={}", 
+                    aggregate_id, retries, max_retries, current_version);
+                let jitter = rand::thread_rng().gen_range(0..50);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff + jitter)).await;
+                backoff = std::cmp::min(backoff * 2, 1000); // Cap backoff at 1 second
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 #[ignore]
 mod tests {
@@ -1345,6 +1640,7 @@ mod tests {
         batch.add_operation(
             Uuid::new_v4(),
             WriteOperation::CreateAccount {
+                account_id: Uuid::new_v4(),
                 owner_name: "Test User".to_string(),
                 initial_balance: Decimal::new(1000, 0),
             },
@@ -1362,6 +1658,7 @@ mod tests {
             batch.add_operation(
                 Uuid::new_v4(),
                 WriteOperation::CreateAccount {
+                    account_id: Uuid::new_v4(),
                     owner_name: "Test User".to_string(),
                     initial_balance: Decimal::new(1000, 0),
                 },

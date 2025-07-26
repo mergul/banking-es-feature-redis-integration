@@ -256,7 +256,7 @@ impl KafkaProducer {
                     .key(&key)
                     .payload(&payload)
                     .partition(partition),
-                Duration::from_secs(5),
+                Duration::from_secs(15),
             )
             .await
             .map_err(|(e, _)| {
@@ -291,7 +291,7 @@ impl KafkaProducer {
                     .key(&key)
                     .payload(&payload)
                     .partition(partition),
-                Duration::from_secs(5),
+                Duration::from_secs(15),
             )
             .await
             .map_err(|(e, _)| {
@@ -325,7 +325,7 @@ impl KafkaProducer {
                     .key(&key)
                     .payload(&payload)
                     .partition(partition),
-                Duration::from_secs(5),
+                Duration::from_secs(15),
             )
             .await
             .map_err(|(e, _)| {
@@ -362,7 +362,7 @@ impl KafkaProducer {
                 FutureRecord::to(topic)
                     .payload(&payload)
                     .key(&account_id.to_string()),
-                Timeout::After(Duration::from_secs(5)),
+                Timeout::After(Duration::from_secs(15)),
             )
             .await
             .map_err(|(e, _)| {
@@ -392,7 +392,7 @@ impl KafkaProducerTrait for KafkaProducer {
                 FutureRecord::to(topic)
                     .payload(payload.as_bytes())
                     .key(key.as_bytes()),
-                Timeout::After(Duration::from_secs(5)),
+                Timeout::After(Duration::from_secs(15)),
             )
             .await
             .map_err(|(e, _)| BankingKafkaError::ProducerError(format!("{:?}", e)))?;
@@ -415,7 +415,7 @@ impl KafkaProducerTrait for KafkaProducer {
             .unwrap()
             .send(
                 FutureRecord::to(topic).payload(payload).key(key.as_bytes()),
-                Timeout::After(Duration::from_secs(5)),
+                Timeout::After(Duration::from_secs(15)),
             )
             .await
             .map_err(|(e, _)| BankingKafkaError::ProducerError(format!("{:?}", e)))?;

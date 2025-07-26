@@ -251,7 +251,7 @@ impl OutboxBatcher {
         batch_size: usize,
         batch_timeout: Duration,
     ) -> Self {
-        let (sender, mut receiver) = mpsc::channel(1000);
+        let (sender, mut receiver) = mpsc::channel(5000);
         let mut buffer = Vec::new();
         let mut last_flush = tokio::time::Instant::now();
 
@@ -296,6 +296,14 @@ impl OutboxBatcher {
             .send(msg)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send message: {}", e))
+    }
+
+    /// Non-blocking submit method to prevent system from getting stuck
+    pub fn try_submit(&self, msg: crate::infrastructure::outbox::OutboxMessage) -> Result<()> {
+        println!("[DEBUG] OutboxBatcher::try_submit: Attempting non-blocking submit for aggregate_id={:?}, event_id={:?}", msg.aggregate_id, msg.event_id);
+        self.sender
+            .try_send(msg)
+            .map_err(|e| anyhow::anyhow!("Failed to send message (non-blocking): {}", e))
     }
 
     async fn flush(
@@ -350,7 +358,8 @@ impl OutboxBatcher {
         pools: Arc<PartitionedPools>,
     ) -> Self {
         // OPTIMIZED: Updated batch size and timeout for better performance
-        Self::new(repo, pools, 250, Duration::from_millis(25))
+        // Reduced batch size and increased timeout to prevent blocking
+        Self::new(repo, pools, 50, Duration::from_millis(100))
     }
 }
 
@@ -867,7 +876,7 @@ impl CDCConsumer {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let mut offsets = offsets_clone.lock().await;
                 let should_commit = offsets.len() >= 100 || // Commit every 100 messages
-                                   last_commit_time.elapsed() > std::time::Duration::from_millis(100); // Or every 100ms
+                                   last_commit_time.elapsed() > std::time::Duration::from_millis(500); // Or every 500ms
 
                 if should_commit && !offsets.is_empty() {
                     // Only commit the highest offset per (topic, partition)

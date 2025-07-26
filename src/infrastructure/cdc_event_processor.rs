@@ -1040,12 +1040,14 @@ impl UltraOptimizedCDCEventProcessor {
         consistency_manager: Option<&Arc<ConsistencyManager>>,
         metrics: &Arc<EnhancedCDCMetrics>,
     ) {
+        let mut successful_updates = 0;
         for aggregate_id in processed_aggregates {
             let success = upsert_results.get(&aggregate_id).copied().unwrap_or(false);
             if let Some(cm) = consistency_manager {
                 if success {
                     cm.mark_projection_completed(aggregate_id).await;
                     cm.mark_completed(aggregate_id).await;
+                    successful_updates += 1;
                 } else {
                     let err_msg = "DB upsert failed".to_string();
                     cm.mark_projection_failed(aggregate_id, err_msg.clone())
@@ -1058,6 +1060,17 @@ impl UltraOptimizedCDCEventProcessor {
                     .events_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+        }
+
+        // Update projection_updates metric
+        if successful_updates > 0 {
+            metrics
+                .projection_updates
+                .fetch_add(successful_updates, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(
+                "CDC Event Processor: Updated {} projections successfully",
+                successful_updates
+            );
         }
     }
 
@@ -1810,7 +1823,7 @@ impl UltraOptimizedCDCEventProcessor {
         let consistency_manager = self.consistency_manager.clone();
 
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5)); // Flush every 5 seconds
+            let mut interval = tokio::time::interval(Duration::from_secs(15)); // Flush every 5 seconds
             loop {
                 interval.tick().await;
 

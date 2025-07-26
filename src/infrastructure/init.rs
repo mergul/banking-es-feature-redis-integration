@@ -87,15 +87,15 @@ pub async fn init_all_services(
         ),
         health_check_timeout: Duration::from_secs(
             std::env::var("HEALTH_CHECK_TIMEOUT")
-                .unwrap_or_else(|_| "10".to_string())
+                .unwrap_or_else(|_| "30".to_string())
                 .parse()
-                .unwrap_or(10),
+                .unwrap_or(30),
         ),
         connection_acquire_timeout: Duration::from_secs(
             std::env::var("CONNECTION_ACQUIRE_TIMEOUT")
-                .unwrap_or_else(|_| "10".to_string())
+                .unwrap_or_else(|_| "30".to_string())
                 .parse()
-                .unwrap_or(10),
+                .unwrap_or(30),
         ),
         transaction_timeout: Duration::from_secs(
             std::env::var("TRANSACTION_TIMEOUT")
@@ -211,9 +211,9 @@ pub async fn init_all_services(
             .parse()
             .unwrap_or(1000),
         batch_timeout_ms: std::env::var("DB_BATCH_TIMEOUT_MS")
-            .unwrap_or_else(|_| "25".to_string())
+            .unwrap_or_else(|_| "250".to_string())
             .parse()
-            .unwrap_or(25),
+            .unwrap_or(250),
         max_batch_queue_size: std::env::var("DB_MAX_BATCH_QUEUE_SIZE")
             .unwrap_or_else(|_| "10000".to_string())
             .parse()
@@ -368,9 +368,9 @@ pub async fn init_all_services(
             .parse()
             .unwrap_or(5000),
         batch_timeout_ms: std::env::var("PROJECTION_BATCH_TIMEOUT_MS")
-            .unwrap_or_else(|_| "20".to_string())
+            .unwrap_or_else(|_| "500".to_string())
             .parse()
-            .unwrap_or(20),
+            .unwrap_or(500),
     };
 
     let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> = Arc::new(

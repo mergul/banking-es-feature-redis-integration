@@ -168,27 +168,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(100)
             * 2
             / 3,
-        acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT_SECS")
-            .unwrap_or_else(|_| "10".to_string())
+        acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
+            .unwrap_or_else(|_| "30".to_string())
             .parse()
-            .unwrap_or(10),
-        read_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME_SECS")
-            .unwrap_or_else(|_| "10".to_string())
+            .unwrap_or(30),
+        read_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
+            .unwrap_or_else(|_| "30".to_string())
             .parse()
-            .unwrap_or(10)
+            .unwrap_or(30)
             * 2, // Longer lifetime for reads
-        write_idle_timeout_secs: std::env::var("DB_WRITE_IDLE_TIMEOUT_SECS")
-            .unwrap_or_else(|_| "10".to_string())
+        write_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
+            .unwrap_or_else(|_| "30".to_string())
             .parse()
-            .unwrap_or(10),
-        read_idle_timeout_secs: std::env::var("DB_READ_IDLE_TIMEOUT_SECS")
-            .unwrap_or_else(|_| "10".to_string())
+            .unwrap_or(30),
+        read_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
+            .unwrap_or_else(|_| "30".to_string())
             .parse()
-            .unwrap_or(10),
-        write_max_lifetime_secs: std::env::var("DB_WRITE_MAX_LIFETIME_SECS")
-            .unwrap_or_else(|_| "10".to_string())
+            .unwrap_or(30),
+        write_max_lifetime_secs: std::env::var("DB_WRITE_MAX_LIFETIME")
+            .unwrap_or_else(|_| "30".to_string())
             .parse()
-            .unwrap_or(10),
+            .unwrap_or(30),
     };
 
     let pools = Arc::new(PartitionedPools::new(pool_config).await?);

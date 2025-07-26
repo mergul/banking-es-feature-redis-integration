@@ -27,6 +27,7 @@ pub mod logging;
 pub mod middleware;
 pub mod outbox; // Added
 pub mod outbox_poller;
+pub mod redis_aggregate_lock;
 
 pub mod projections;
 pub mod rate_limiter;
