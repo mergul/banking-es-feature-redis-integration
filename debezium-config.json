@@ -19,6 +19,21 @@
     "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
     "transforms.unwrap.drop.tombstones": "false",
     "transforms.unwrap.delete.handling.mode": "rewrite",
-    "transforms.unwrap.operation.header": "true"
+    "transforms.unwrap.operation.header": "true",
+
+    "poll.interval.ms": "100",
+    "max.queue.size": "8192",
+    "max.batch.size": "2048",
+    "snapshot.mode": "initial",
+    "snapshot.delay.ms": "0",
+    "snapshot.fetch.size": "1024",
+    "heartbeat.interval.ms": "1000",
+    "include.schema.changes": "false",
+    "provide.transaction.metadata": "false",
+    "tombstones.on.delete": "false",
+    "database.history.kafka.recovery.attempts": "3",
+    "database.history.kafka.recovery.poll.interval.ms": "100",
+    "database.history.store.only.captured.tables.ddl": "true",
+    "database.history.skip.unparseable.ddl": "true"
   }
 }

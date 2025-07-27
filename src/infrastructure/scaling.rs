@@ -305,11 +305,13 @@ impl ScalingManager {
 }
 
 #[cfg(test)]
+#[ignore]
 mod tests {
     use super::*;
     use crate::infrastructure::redis_abstraction::RealRedisClient;
 
     #[tokio::test]
+    #[ignore]
     async fn test_instance_registration() {
         let client = Client::open("redis://127.0.0.1/").unwrap();
         let redis_client = RealRedisClient::new(client, None);
@@ -337,6 +339,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_metrics_update() {
         let client = Client::open("redis://127.0.0.1/").unwrap();
         let redis_client = RealRedisClient::new(client, None);

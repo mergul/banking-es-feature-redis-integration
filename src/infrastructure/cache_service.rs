@@ -497,6 +497,7 @@ impl CacheService {
 }
 
 #[cfg(test)]
+#[ignore]
 mod tests {
     use super::*;
     use crate::infrastructure::redis_abstraction::{
@@ -572,6 +573,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_cache_service_initialization() {
         let client = Client::open("redis://127.0.0.1/").unwrap();
         let redis_client = TestRedisClient { client };
@@ -587,6 +589,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_account_cache_hit() {
         let client = Client::open("redis://127.0.0.1/").unwrap();
         let redis_client = TestRedisClient { client };

@@ -576,19 +576,43 @@ impl UltraOptimizedCDCEventProcessor {
         let consistency_manager = self.consistency_manager.clone();
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(batch_timeout);
+            let mut last_flush = tokio::time::Instant::now();
+
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Err(e) = Self::process_batch(
-                            &batch_queue,
-                            &projection_store,
-                            &projection_cache,
-                            &cache_service,
-                            &metrics,
-                            consistency_manager.as_ref(),
-                            batch_size,
-                        ).await {
-                            error!("Batch processing failed: {}", e);
+                        // Check if we have enough events to process immediately
+                        let queue_len = batch_queue.lock().await.len();
+                        if queue_len >= batch_size {
+                            // Process immediately when batch is full
+                            if let Err(e) = Self::process_batch(
+                                &batch_queue,
+                                &projection_store,
+                                &projection_cache,
+                                &cache_service,
+                                &metrics,
+                                consistency_manager.as_ref(),
+                                batch_size,
+                            ).await {
+                                error!("Batch processing failed: {}", e);
+                            }
+                            last_flush = tokio::time::Instant::now();
+                        } else if last_flush.elapsed() >= batch_timeout {
+                            // Process on timeout if we have any events
+                            if queue_len > 0 {
+                                if let Err(e) = Self::process_batch(
+                                    &batch_queue,
+                                    &projection_store,
+                                    &projection_cache,
+                                    &cache_service,
+                                    &metrics,
+                                    consistency_manager.as_ref(),
+                                    batch_size,
+                                ).await {
+                                    error!("Batch processing failed: {}", e);
+                                }
+                                last_flush = tokio::time::Instant::now();
+                            }
                         }
                     }
                     _ = shutdown_token.cancelled() => {
@@ -935,6 +959,8 @@ impl UltraOptimizedCDCEventProcessor {
         Vec<crate::infrastructure::projections::AccountProjection>,
         Vec<Uuid>,
     )> {
+        // Track transaction projections to create
+        let mut transaction_projections = Vec::new();
         let mut updated_projections = Vec::new();
         let mut processed_aggregates = Vec::new();
         let mut cache_guard = projection_cache.lock().await;
@@ -967,6 +993,43 @@ impl UltraOptimizedCDCEventProcessor {
                         .consecutive_failures
                         .store(0, std::sync::atomic::Ordering::Relaxed);
                 }
+
+                // Create transaction projections for money events
+                if let Ok(domain_event) = event.get_domain_event() {
+                    match domain_event {
+                        crate::domain::AccountEvent::MoneyDeposited {
+                            transaction_id,
+                            amount,
+                            ..
+                        } => {
+                            transaction_projections.push(
+                                crate::infrastructure::projections::TransactionProjection {
+                                    id: *transaction_id,
+                                    account_id: aggregate_id,
+                                    transaction_type: "MoneyDeposited".to_string(),
+                                    amount: *amount,
+                                    timestamp: chrono::Utc::now(),
+                                },
+                            );
+                        }
+                        crate::domain::AccountEvent::MoneyWithdrawn {
+                            transaction_id,
+                            amount,
+                            ..
+                        } => {
+                            transaction_projections.push(
+                                crate::infrastructure::projections::TransactionProjection {
+                                    id: *transaction_id,
+                                    account_id: aggregate_id,
+                                    transaction_type: "MoneyWithdrawn".to_string(),
+                                    amount: *amount,
+                                    timestamp: chrono::Utc::now(),
+                                },
+                            );
+                        }
+                        _ => {}
+                    }
+                }
             }
 
             cache_guard.put(aggregate_id, projection.clone());
@@ -975,6 +1038,31 @@ impl UltraOptimizedCDCEventProcessor {
                 aggregate_id,
             ));
             processed_aggregates.push(aggregate_id);
+        }
+
+        // Insert transaction projections if any were created
+        if !transaction_projections.is_empty() {
+            info!(
+                "🔧 [CDC] Inserting {} transaction projections",
+                transaction_projections.len()
+            );
+            if let Err(e) = projection_store
+                .insert_transactions_batch(transaction_projections.clone())
+                .await
+            {
+                error!("🔧 [CDC] Failed to insert transaction projections: {}", e);
+                // Don't fail the entire batch, just log the error
+            } else {
+                info!(
+                    "🔧 [CDC] Successfully inserted {} transaction projections",
+                    transaction_projections.len()
+                );
+                // Update projection updates metric
+                metrics.projection_updates.fetch_add(
+                    transaction_projections.len() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
         }
 
         Ok((updated_projections, processed_aggregates))
@@ -987,9 +1075,12 @@ impl UltraOptimizedCDCEventProcessor {
         metrics: &Arc<EnhancedCDCMetrics>,
     ) -> HashMap<Uuid, bool> {
         let upsert_start = Instant::now();
-        let max_concurrent = (projections.len() / 50).max(2).min(16);
+
+        // Optimize for bulk operations: use larger chunks and fewer concurrent operations
+        let chunk_size = 500; // Increased from ~50 to 500 for better bulk performance
+        let max_concurrent = (projections.len() / chunk_size).max(1).min(8); // Reduced max concurrency
+
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-        let chunk_size = (projections.len() / max_concurrent).max(1);
 
         let mut tasks = Vec::new();
         for chunk in projections.chunks(chunk_size) {
@@ -999,14 +1090,15 @@ impl UltraOptimizedCDCEventProcessor {
             tasks.push(tokio::spawn(async move {
                 let _permit = semaphore.acquire().await;
                 let mut last_err = None;
-                for _ in 0..3 {
+                for _ in 0..2 {
+                    // Reduced retries from 3 to 2 for faster failure detection
                     match store.upsert_accounts_batch(chunk_vec.clone()).await {
                         Ok(_) => return Ok(chunk_vec.iter().map(|p| p.id).collect::<Vec<_>>()),
                         Err(e) => last_err = Some(e),
                     }
                 }
                 Err(anyhow::anyhow!(
-                    "Upsert failed after 3 retries: {}",
+                    "Upsert failed after 2 retries: {}",
                     last_err.unwrap()
                 ))
             }));

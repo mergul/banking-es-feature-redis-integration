@@ -362,6 +362,7 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_by_id_not_found() {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()

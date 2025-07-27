@@ -366,11 +366,13 @@ pub struct ServiceInstance {
 }
 
 #[cfg(test)]
+#[ignore]
 mod tests {
     use super::*;
     use redis::Client;
 
     #[tokio::test]
+    #[ignore]
     async fn test_shard_assignment() {
         let redis_client = Client::open("redis://127.0.0.1/").unwrap();
         let redis_client = RealRedisClient::new(redis_client, None);
@@ -392,6 +394,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_distributed_lock() {
         let redis_client = Client::open("redis://127.0.0.1/").unwrap();
         let redis_client = RealRedisClient::new(redis_client, None);

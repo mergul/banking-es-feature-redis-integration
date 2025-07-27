@@ -140,6 +140,16 @@ impl EventStoreError {
     }
 }
 
+impl std::error::Error for EventStoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            EventStoreError::DatabaseError(e) => Some(e),
+            EventStoreError::SerializationErrorBincode(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Event {
     pub id: Uuid,
@@ -907,27 +917,19 @@ impl EventStore {
                 {
                     *cached_version
                 } else {
-                    // Only query database if not in cache - use optimized query with shorter timeout
-                    let db_version = tokio::time::timeout(
-                        Duration::from_millis(100), // Very short timeout for version queries
-                        sqlx::query!(
-                            r#"
-                            SELECT COALESCE(MAX(version), 0) as version
-                            FROM events
-                            WHERE aggregate_id = $1
-                            ORDER BY version DESC
-                            LIMIT 1
-                            "#,
-                            aggregate_id
-                        )
-                        .fetch_one(&mut *tx),
+                    // Only query database if not in cache - use optimized query
+                    let db_version = sqlx::query!(
+                        r#"
+                        SELECT COALESCE(MAX(version), 0) as version
+                        FROM events
+                        WHERE aggregate_id = $1
+                        ORDER BY version DESC
+                        LIMIT 1
+                        "#,
+                        aggregate_id
                     )
+                    .fetch_one(&mut *tx)
                     .await
-                    .map_err(|_| {
-                        EventStoreError::DatabaseError(sqlx::Error::Configuration(
-                            "Version query timeout".into(),
-                        ))
-                    })?
                     .map_err(EventStoreError::DatabaseError)?
                     .version
                     .unwrap_or(0);

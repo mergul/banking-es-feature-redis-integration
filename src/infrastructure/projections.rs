@@ -685,22 +685,19 @@ impl ProjectionStore {
             account_count,
             account_ids
         );
-        let tasks: Vec<_> = accounts
-            .into_iter()
-            .map(|account| {
-                let pool = pools.select_pool(OperationType::Write).clone();
-                tokio::spawn(async move {
-                    let mut tx = pool.begin().await?;
-                    Self::bulk_upsert_accounts(&mut tx, &[account]).await?;
-                    tx.commit().await?;
-                    Ok::<(), anyhow::Error>(())
-                })
-            })
-            .collect();
 
-        for task in tasks {
-            task.await??;
+        // Use bulk upsert instead of individual transactions for better performance
+        let pool = pools.select_pool(OperationType::Write).clone();
+        let mut tx = pool.begin().await?;
+
+        // Process accounts in chunks for better memory management
+        let chunk_size = 100; // Process 100 accounts at a time
+        for chunk in accounts.chunks(chunk_size) {
+            Self::bulk_upsert_accounts(&mut tx, chunk).await?;
         }
+
+        tx.commit().await?;
+
         // Increment batch_updates metric
         metrics
             .batch_updates
@@ -717,23 +714,17 @@ impl ProjectionStore {
         pools: &Arc<PartitionedPools>,
         transactions: Vec<TransactionProjection>,
     ) -> Result<()> {
-        let tasks: Vec<_> = transactions
-            .into_iter()
-            .map(|transaction| {
-                let pool = pools.select_pool(OperationType::Write).clone();
-                tokio::spawn(async move {
-                    let mut tx = pool.begin().await?;
-                    Self::bulk_insert_transactions(&mut tx, &[transaction]).await?;
-                    tx.commit().await?;
-                    Ok::<(), anyhow::Error>(())
-                })
-            })
-            .collect();
+        // Use bulk insert instead of individual transactions for better performance
+        let pool = pools.select_pool(OperationType::Write).clone();
+        let mut tx = pool.begin().await?;
 
-        for task in tasks {
-            task.await??;
+        // Process transactions in chunks for better memory management
+        let chunk_size = 100; // Process 100 transactions at a time
+        for chunk in transactions.chunks(chunk_size) {
+            Self::bulk_insert_transactions(&mut tx, chunk).await?;
         }
 
+        tx.commit().await?;
         Ok(())
     }
 
@@ -822,8 +813,8 @@ impl ProjectionStore {
             r#"
             INSERT INTO transaction_projections (id, account_id, transaction_type, amount, timestamp)
             SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::decimal[], $5::timestamptz[])
-            ON CONFLICT (id) DO NOTHING
-            "#, // Changed ON CONFLICT to just (id)
+            ON CONFLICT (id, timestamp) DO NOTHING
+            "#,
             &ids,
             &account_ids,
             &types,

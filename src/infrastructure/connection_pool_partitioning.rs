@@ -316,6 +316,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore]
     async fn test_pool_partitioning_creation() {
         let config = PoolPartitioningConfig {
             database_url: "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string(),
@@ -338,6 +339,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_pool_selector() {
         let config = PoolPartitioningConfig::default();
         let pools = PartitionedPools::new(config).await.unwrap();

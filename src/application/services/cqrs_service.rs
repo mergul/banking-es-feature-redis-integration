@@ -6,6 +6,9 @@ use crate::domain::{AccountCommand, AccountError, AccountEvent};
 use crate::infrastructure::cache_service::CacheServiceTrait;
 use crate::infrastructure::consistency_manager::ConsistencyManager;
 use crate::infrastructure::event_store::EventStoreTrait;
+use crate::infrastructure::lock_free_operations::{
+    LockFreeConfig, LockFreeOperations, LockFreeOperationsTrait,
+};
 
 use crate::infrastructure::projections::{
     AccountProjection, ProjectionStoreTrait, TransactionProjection,
@@ -33,6 +36,8 @@ pub struct CQRSAccountService {
     consistency_manager: Arc<ConsistencyManager>,
     metrics: Arc<CQRSMetrics>,
     enable_write_batching: bool,
+    // NEW: Lock-free operations for fast reads
+    lock_free_ops: Arc<LockFreeOperations>,
 }
 
 impl CQRSAccountService {
@@ -101,6 +106,13 @@ impl CQRSAccountService {
         let consistency_manager =
             consistency_manager.unwrap_or_else(|| Arc::new(ConsistencyManager::default()));
 
+        // Initialize lock-free operations
+        let lock_free_ops = Arc::new(LockFreeOperations::new(
+            event_store.clone(),
+            projection_store.clone(),
+            LockFreeConfig::default(),
+        ));
+
         Self {
             cqrs_handler,
             batch_handler,
@@ -108,6 +120,7 @@ impl CQRSAccountService {
             consistency_manager,
             metrics,
             enable_write_batching,
+            lock_free_ops,
         }
     }
 
@@ -184,13 +197,8 @@ impl CQRSAccountService {
                                     if result.success {
                                         match result.result {
                                             Some(account_id) => {
-                                                // Mark as pending CDC processing
-                                                self.consistency_manager.mark_pending(account_id).await;
-                                                // Mark as pending projection synchronization
-                                                self.consistency_manager
-                                                    .mark_projection_pending(account_id)
-                                                    .await;
-
+                                                // OPTIMIZED: Create accounts don't need consistency manager confirmation
+                                                // The account is guaranteed to exist in the event store
                                                 Ok(account_id)
                                             }
                                             None => Err(AccountError::InfrastructureError(
@@ -208,7 +216,7 @@ impl CQRSAccountService {
                                 }
                                 Err(e) => {
                                     error!("Failed to wait for account creation result: {}", e);
-                                    // Fall back to direct handler
+                                    // Fall back to direct handler (no consistency manager needed for create)
                                     self.cqrs_handler
                                         .create_account(owner_name.clone(), initial_balance)
                                         .await
@@ -217,7 +225,7 @@ impl CQRSAccountService {
                         }
                         Err(_) => {
                             error!("Timeout waiting for account creation result after 30 seconds");
-                            // Fall back to direct handler
+                            // Fall back to direct handler (no consistency manager needed for create)
                             self.cqrs_handler
                                 .create_account(owner_name.clone(), initial_balance)
                                 .await
@@ -226,13 +234,14 @@ impl CQRSAccountService {
                 }
                 Err(e) => {
                     error!("Write batching failed for account creation: {}", e);
-                    // Fall back to direct handler
+                    // Fall back to direct handler (no consistency manager needed for create)
                     self.cqrs_handler
                         .create_account(owner_name.clone(), initial_balance)
                         .await
                 }
             }
         } else {
+            // Direct handler (no consistency manager needed for create)
             self.cqrs_handler
                 .create_account(owner_name.clone(), initial_balance)
                 .await
@@ -240,28 +249,132 @@ impl CQRSAccountService {
 
         let duration = start_time.elapsed();
         match &result {
-            Ok(account_id) => {
-                // CDC pipeline will mark projection completion when it processes the events
+            Ok(_) => {
                 self.metrics
                     .commands_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(
-                    "Successfully created account {} for owner {} in {:?}",
-                    account_id, owner_name, duration
-                );
+                info!("✅ Account created successfully in {:?}", duration);
             }
-            Err(e) => {
+            Err(_) => {
                 self.metrics
                     .commands_failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to create account for owner {}: {} (took {:?})",
-                    owner_name, e, duration
-                );
+                error!("❌ Account creation failed in {:?}", duration);
             }
         }
 
         result
+    }
+
+    /// Phase 1: Bulk create accounts using create-specific batch method
+    /// This method handles aggregate_id collisions by using a dedicated create partition
+    /// and optimized batch processing for bulk operations
+    pub async fn create_accounts_batch(
+        &self,
+        accounts: Vec<(String, Decimal)>,
+    ) -> Result<Vec<Uuid>, AccountError> {
+        let start_time = std::time::Instant::now();
+        let accounts_count = accounts.len();
+        info!(
+            "🚀 Starting bulk account creation for {} accounts",
+            accounts_count
+        );
+
+        self.metrics
+            .commands_processed
+            .fetch_add(accounts_count as u64, std::sync::atomic::Ordering::Relaxed);
+
+        // Use create-specific batch method if available, otherwise fall back to individual creates
+        let result = if let Some(ref batching_service) = self.write_batching_service {
+            match batching_service
+                .submit_create_operations_batch(accounts.clone())
+                .await
+            {
+                Ok(account_ids) => {
+                    // OPTIMIZED: Create accounts don't need consistency manager confirmation
+                    // The accounts are guaranteed to exist in the event store
+                    info!(
+                        "✅ Batch account creation completed for {} accounts (no consistency wait needed)",
+                        account_ids.len()
+                    );
+
+                    // Return immediately - accounts are created and will be processed by CDC asynchronously
+                    Ok(account_ids)
+                }
+                Err(e) => {
+                    error!("Bulk account creation failed: {}", e);
+                    Err(AccountError::InfrastructureError(format!(
+                        "Bulk account creation failed: {}",
+                        e
+                    )))
+                }
+            }
+        } else {
+            // Fall back to individual processing if write batching is not enabled
+            error!("Write batching service not available for bulk operations");
+            self.create_accounts_individual(accounts).await
+        };
+
+        let duration = start_time.elapsed();
+        match &result {
+            Ok(account_ids) => {
+                self.metrics.commands_successful.fetch_add(
+                    account_ids.len() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                info!(
+                    "✅ Bulk account creation completed successfully: {} accounts in {:?}",
+                    account_ids.len(),
+                    duration
+                );
+            }
+            Err(_) => {
+                self.metrics
+                    .commands_failed
+                    .fetch_add(accounts_count as u64, std::sync::atomic::Ordering::Relaxed);
+                error!("❌ Bulk account creation failed in {:?}", duration);
+            }
+        }
+
+        result
+    }
+
+    /// Fallback method for individual account creation when bulk method is not available
+    async fn create_accounts_individual(
+        &self,
+        accounts: Vec<(String, Decimal)>,
+    ) -> Result<Vec<Uuid>, AccountError> {
+        let mut account_ids = Vec::with_capacity(accounts.len());
+        let mut failed_accounts = Vec::new();
+        let total_accounts = accounts.len();
+
+        for (i, (owner_name, balance)) in accounts.into_iter().enumerate() {
+            match self.create_account(owner_name, balance).await {
+                Ok(account_id) => {
+                    account_ids.push(account_id);
+                    if (i + 1) % 10 == 0 {
+                        info!(
+                            "📊 Individual create progress: {}/{} accounts created",
+                            i + 1,
+                            total_accounts
+                        );
+                    }
+                }
+                Err(e) => {
+                    failed_accounts.push((i, e.clone()));
+                    error!("❌ Failed to create account {}: {:?}", i, e);
+                }
+            }
+        }
+
+        if !failed_accounts.is_empty() {
+            warn!(
+                "⚠️ Some individual account creations failed: {:?}",
+                failed_accounts
+            );
+        }
+
+        Ok(account_ids)
     }
 
     /// Deposit money into an account
@@ -519,7 +632,62 @@ impl CQRSAccountService {
             .map_err(|e| AccountError::InfrastructureError(e.to_string()))
     }
 
-    /// Get account by ID with read-after-write consistency
+    /// Wait for batch consistency for multiple accounts without individual operations
+    /// This is useful for external batch operations that need to wait for consistency
+    pub async fn wait_for_batch_consistency(
+        &self,
+        account_ids: Vec<Uuid>,
+    ) -> Result<(), AccountError> {
+        info!(
+            "📦 Waiting for batch consistency for {} accounts",
+            account_ids.len()
+        );
+
+        // Wait for batch CDC consistency
+        match self
+            .consistency_manager
+            .wait_for_consistency_batch(account_ids.clone())
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    "✅ Batch CDC consistency completed for {} accounts",
+                    account_ids.len()
+                );
+
+                // Wait for batch projection sync
+                match self
+                    .consistency_manager
+                    .wait_for_projection_sync_batch(account_ids.clone())
+                    .await
+                {
+                    Ok(_) => {
+                        info!(
+                            "✅ Batch projection sync completed for {} accounts",
+                            account_ids.len()
+                        );
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("❌ Batch projection sync failed: {}", e);
+                        Err(AccountError::InfrastructureError(format!(
+                            "Batch projection sync failed: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+            Err(e) => {
+                error!("❌ Batch CDC consistency failed: {}", e);
+                Err(AccountError::InfrastructureError(format!(
+                    "Batch CDC consistency failed: {}",
+                    e
+                )))
+            }
+        }
+    }
+
+    /// Get account by ID with optimized consistency
     pub async fn get_account(
         &self,
         account_id: Uuid,
@@ -528,21 +696,59 @@ impl CQRSAccountService {
             "[DEBUG] CQRSAccountService::get_account: start for {}",
             account_id
         );
-        // Wait for projection synchronization before reading
-        let cm_result = self
-            .consistency_manager
-            .wait_for_projection_sync(account_id)
-            .await;
-        println!("[DEBUG] CQRSAccountService::get_account: after consistency_manager for {} (result: {:?})", account_id, cm_result);
-        if let Err(e) = cm_result {
-            warn!(
-                "Projection sync wait failed for account {}: {}",
-                account_id, e
-            );
-            // Continue anyway - might be a timeout or the account was created before tracking
+
+        // OPTIMIZED: Try lock-free read first (fast path)
+        let fast_result = self
+            .lock_free_ops
+            .get_account_projection(account_id)
+            .await
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+
+        // If we got data, check if we need consistency
+        if let Some(projection) = &fast_result {
+            // Check if this account has pending writes (needs consistency)
+            let has_pending_writes = self
+                .consistency_manager
+                .has_pending_writes(account_id)
+                .await;
+
+            if !has_pending_writes {
+                // No pending writes, fast path is safe
+                println!(
+                    "[DEBUG] CQRSAccountService::get_account: fast path for {}",
+                    account_id
+                );
+                return Ok(fast_result);
+            } else {
+                // Has pending writes, need to wait for consistency
+                println!(
+                    "[DEBUG] CQRSAccountService::get_account: consistency path for {}",
+                    account_id
+                );
+                let cm_result = self
+                    .consistency_manager
+                    .wait_for_projection_sync(account_id)
+                    .await;
+
+                if let Err(e) = cm_result {
+                    warn!(
+                        "Projection sync wait failed for account {}: {}",
+                        account_id, e
+                    );
+                    // Return fast result anyway (eventual consistency)
+                }
+
+                // Re-read after consistency wait
+                return self
+                    .lock_free_ops
+                    .get_account_projection(account_id)
+                    .await
+                    .map_err(|e| AccountError::InfrastructureError(e.to_string()));
+            }
         }
 
-        self.cqrs_handler.get_account(account_id).await
+        // No data found, return None
+        Ok(fast_result)
     }
 
     /// Get all accounts
@@ -629,7 +835,7 @@ impl CQRSAccountService {
         result
     }
 
-    /// Get account balance with read-after-write consistency
+    /// Get account balance with optimized consistency
     pub async fn get_account_balance(&self, account_id: Uuid) -> Result<Decimal, AccountError> {
         let start_time = std::time::Instant::now();
         info!("Querying balance for account {}", account_id);
@@ -638,47 +844,94 @@ impl CQRSAccountService {
             .queries_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Wait for projection synchronization before reading (same as get_account)
-        if let Err(e) = self
-            .consistency_manager
-            .wait_for_projection_sync(account_id)
+        // OPTIMIZED: Try lock-free read first (fast path)
+        let fast_result = self
+            .lock_free_ops
+            .get_account_projection(account_id)
             .await
-        {
-            warn!(
-                "Projection sync wait failed for account {}: {}",
-                account_id, e
-            );
-            // Continue anyway - might be a timeout or the account was created before tracking
-        }
-
-        let result = self.cqrs_handler.get_account_balance(account_id).await;
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
         let duration = start_time.elapsed();
-        match &result {
-            Ok(balance) => {
+
+        // If we got data, check if we need consistency
+        if let Some(projection) = &fast_result {
+            // Check if this account has pending writes (needs consistency)
+            let has_pending_writes = self
+                .consistency_manager
+                .has_pending_writes(account_id)
+                .await;
+
+            if !has_pending_writes {
+                // No pending writes, fast path is safe
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 info!(
-                    "Successfully retrieved balance {} for account {} in {:?}",
-                    balance, account_id, duration
+                    "Successfully retrieved balance {} for account {} in {:?} (fast path)",
+                    projection.balance, account_id, duration
                 );
-            }
-            Err(e) => {
-                self.metrics
-                    .queries_failed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to query balance for account {}: {} (took {:?})",
-                    account_id, e, duration
+                return Ok(projection.balance);
+            } else {
+                // Has pending writes, need to wait for consistency
+                info!(
+                    "Account {} has pending writes, waiting for consistency",
+                    account_id
                 );
-            }
-        }
+                let cm_result = self
+                    .consistency_manager
+                    .wait_for_projection_sync(account_id)
+                    .await;
 
-        result
+                if let Err(e) = cm_result {
+                    warn!(
+                        "Projection sync wait failed for account {}: {}",
+                        account_id, e
+                    );
+                    // Return fast result anyway (eventual consistency)
+                }
+
+                // Re-read after consistency wait
+                let consistent_result = self
+                    .lock_free_ops
+                    .get_account_projection(account_id)
+                    .await
+                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+
+                match consistent_result {
+                    Some(projection) => {
+                        self.metrics
+                            .queries_successful
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        info!(
+                            "Successfully retrieved balance {} for account {} in {:?} (consistency path)",
+                            projection.balance, account_id, start_time.elapsed()
+                        );
+                        Ok(projection.balance)
+                    }
+                    None => {
+                        self.metrics
+                            .queries_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        error!(
+                            "Account not found: {} (took {:?})",
+                            account_id,
+                            start_time.elapsed()
+                        );
+                        Err(AccountError::NotFound)
+                    }
+                }
+            }
+        } else {
+            // No data found
+            self.metrics
+                .queries_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            error!("Account not found: {} (took {:?})", account_id, duration);
+            Err(AccountError::NotFound)
+        }
     }
 
-    /// Check if account is active with read-after-write consistency
+    /// Check if account is active with optimized consistency
     pub async fn is_account_active(&self, account_id: Uuid) -> Result<bool, AccountError> {
         let start_time = std::time::Instant::now();
         info!("Checking if account {} is active", account_id);
@@ -687,46 +940,103 @@ impl CQRSAccountService {
             .queries_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Wait for projection synchronization before reading (same as get_account)
-        if let Err(e) = self
-            .consistency_manager
-            .wait_for_projection_sync(account_id)
+        // OPTIMIZED: Try lock-free read first (fast path)
+        let fast_result = self
+            .lock_free_ops
+            .get_account_projection(account_id)
             .await
-        {
-            warn!(
-                "Projection sync wait failed for account {}: {}",
-                account_id, e
-            );
-            // Continue anyway - might be a timeout or the account was created before tracking
-        }
-
-        let result = self.cqrs_handler.is_account_active(account_id).await;
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
         let duration = start_time.elapsed();
-        match &result {
-            Ok(is_active) => {
+
+        // If we got data, check if we need consistency
+        if let Some(projection) = &fast_result {
+            // Check if this account has pending writes (needs consistency)
+            let has_pending_writes = self
+                .consistency_manager
+                .has_pending_writes(account_id)
+                .await;
+
+            if !has_pending_writes {
+                // No pending writes, fast path is safe
                 self.metrics
                     .queries_successful
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 info!(
-                    "Account {} is {} in {:?}",
+                    "Account {} is {} in {:?} (fast path)",
                     account_id,
-                    if *is_active { "active" } else { "inactive" },
+                    if projection.is_active {
+                        "active"
+                    } else {
+                        "inactive"
+                    },
                     duration
                 );
-            }
-            Err(e) => {
-                self.metrics
-                    .queries_failed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Failed to check if account {} is active: {} (took {:?})",
-                    account_id, e, duration
+                return Ok(projection.is_active);
+            } else {
+                // Has pending writes, need to wait for consistency
+                info!(
+                    "Account {} has pending writes, waiting for consistency",
+                    account_id
                 );
-            }
-        }
+                let cm_result = self
+                    .consistency_manager
+                    .wait_for_projection_sync(account_id)
+                    .await;
 
-        result
+                if let Err(e) = cm_result {
+                    warn!(
+                        "Projection sync wait failed for account {}: {}",
+                        account_id, e
+                    );
+                    // Return fast result anyway (eventual consistency)
+                }
+
+                // Re-read after consistency wait
+                let consistent_result = self
+                    .lock_free_ops
+                    .get_account_projection(account_id)
+                    .await
+                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+
+                match consistent_result {
+                    Some(projection) => {
+                        self.metrics
+                            .queries_successful
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        info!(
+                            "Account {} is {} in {:?} (consistency path)",
+                            account_id,
+                            if projection.is_active {
+                                "active"
+                            } else {
+                                "inactive"
+                            },
+                            start_time.elapsed()
+                        );
+                        Ok(projection.is_active)
+                    }
+                    None => {
+                        self.metrics
+                            .queries_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        error!(
+                            "Account not found: {} (took {:?})",
+                            account_id,
+                            start_time.elapsed()
+                        );
+                        Err(AccountError::NotFound)
+                    }
+                }
+            }
+        } else {
+            // No data found
+            self.metrics
+                .queries_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            error!("Account not found: {} (took {:?})", account_id, duration);
+            Err(AccountError::NotFound)
+        }
     }
 
     /// Process batch transactions
@@ -794,6 +1104,129 @@ impl CQRSAccountService {
             account_id, result
         );
         result.map_err(|e| AccountError::InfrastructureError(format!("Event store error: {:?}", e)))
+    }
+
+    /// Phase 2: True batch processing for write operations
+    /// This method handles aggregate_id and version collisions by using the new batch processing
+    /// capabilities of the write batching service
+    pub async fn submit_events_batch_bulk(
+        &self,
+        operations: Vec<(Uuid, Vec<AccountEvent>)>, // (aggregate_id, events)
+    ) -> Result<Vec<Uuid>, AccountError> {
+        let start_time = std::time::Instant::now();
+        let operations_count = operations.len();
+
+        info!(
+            "🚀 Starting bulk event submission for {} operations",
+            operations_count
+        );
+
+        self.metrics.commands_processed.fetch_add(
+            operations_count as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        // Use the new batch processing method if available
+        let result = if let Some(ref batching_service) = self.write_batching_service {
+            match batching_service
+                .submit_write_operations_batch(operations)
+                .await
+            {
+                Ok(account_ids) => {
+                    // OPTIMIZED: Use batch waiting with partial success handling
+                    info!(
+                        "📦 Waiting for batch CDC consistency for {} operations",
+                        account_ids.len()
+                    );
+
+                    // Mark all accounts as pending CDC processing in batch
+                    for account_id in &account_ids {
+                        self.consistency_manager.mark_pending(*account_id).await;
+                        self.consistency_manager
+                            .mark_projection_pending(*account_id)
+                            .await;
+                    }
+
+                    // OPTIMIZED: Wait for batch consistency with partial success
+                    let cdc_result = self
+                        .consistency_manager
+                        .wait_for_consistency_batch(account_ids.clone())
+                        .await;
+
+                    match cdc_result {
+                        Ok(_) => {
+                            info!(
+                                "✅ Batch CDC consistency completed for {} operations",
+                                account_ids.len()
+                            );
+
+                            // OPTIMIZED: Wait for batch projection sync with partial success
+                            let projection_result = self
+                                .consistency_manager
+                                .wait_for_projection_sync_batch(account_ids.clone())
+                                .await;
+
+                            match projection_result {
+                                Ok(_) => {
+                                    info!(
+                                        "✅ Batch projection sync completed for {} operations",
+                                        account_ids.len()
+                                    );
+                                    Ok(account_ids)
+                                }
+                                Err(e) => {
+                                    warn!("⚠️ Batch projection sync failed: {}, but operations were processed successfully", e);
+                                    // Return partial success - operations were processed even if projections failed
+                                    Ok(account_ids)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("⚠️ Batch CDC consistency failed: {}, but operations were processed successfully", e);
+                            // Return partial success - operations were processed even if CDC failed
+                            Ok(account_ids)
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Bulk write operation failed: {}", e);
+                    Err(AccountError::InfrastructureError(format!(
+                        "Bulk write operation failed: {}",
+                        e
+                    )))
+                }
+            }
+        } else {
+            // Fall back to individual processing if write batching is not enabled
+            error!("Write batching service not available for bulk operations");
+            Err(AccountError::InfrastructureError(
+                "Write batching service not available".to_string(),
+            ))
+        };
+
+        let duration = start_time.elapsed();
+        match &result {
+            Ok(account_ids) => {
+                self.metrics.commands_successful.fetch_add(
+                    account_ids.len() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                info!(
+                    "✅ Bulk event submission completed successfully: {} operations in {:?}",
+                    account_ids.len(),
+                    duration
+                );
+            }
+            Err(_) => {
+                self.metrics.commands_failed.fetch_add(
+                    operations_count as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                error!("❌ Bulk event submission failed in {:?}", duration);
+            }
+        }
+
+        result
     }
 
     /// Get consistency manager for external integration

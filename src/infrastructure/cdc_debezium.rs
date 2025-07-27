@@ -377,143 +377,79 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         }
 
         let start_time = std::time::Instant::now();
+        let message_count = messages.len();
 
-        // OPTIMIZED: Use single bulk insert instead of chunking for small batches
-        if messages.len() <= 100 {
-            // Single bulk insert for small batches
-            let mut query = String::from(
-                "INSERT INTO kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) VALUES "
-            );
-
-            let mut values = Vec::new();
-            let mut params: Vec<(
-                Uuid,
-                Uuid,
-                String,
-                Vec<u8>,
-                String,
-                Option<serde_json::Value>,
-            )> = Vec::new();
-            let mut param_index = 1;
-
-            for msg in &messages {
-                values.push(format!(
-                    "(${},${},${},${},${},${},NOW(),NOW())",
-                    param_index,
-                    param_index + 1,
-                    param_index + 2,
-                    param_index + 3,
-                    param_index + 4,
-                    param_index + 5
-                ));
-
-                params.push((
-                    msg.aggregate_id,
-                    msg.event_id,
-                    msg.event_type.clone(),
-                    msg.payload.clone(),
-                    msg.topic.clone(),
-                    msg.metadata.clone(),
-                ));
-
-                param_index += 6;
-            }
-
-            query.push_str(&values.join(","));
-
-            let mut query = sqlx::query(&query);
-            for (aggregate_id, event_id, event_type, payload, topic, metadata) in params {
-                query = query
-                    .bind(aggregate_id)
-                    .bind(event_id)
-                    .bind(event_type)
-                    .bind(payload)
-                    .bind(topic)
-                    .bind(metadata);
-            }
-
-            let result = query.execute(&mut **tx).await;
-            if let Err(e) = &result {
-                tracing::error!(
-                    "CDCOutboxRepository: Failed to bulk insert OutboxMessages: {:?}",
-                    e
-                );
-                return Err(anyhow::anyhow!("Bulk insert failed: {:?}", e));
-            }
-        } else {
-            // Chunked insert for large batches
-            let chunk_size = 1000;
-            for chunk in messages.chunks(chunk_size) {
-                let mut query = String::from(
-                    "INSERT INTO kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) VALUES "
-                );
-
-                let mut values = Vec::new();
-                let mut params: Vec<(
-                    Uuid,
-                    Uuid,
-                    String,
-                    Vec<u8>,
-                    String,
-                    Option<serde_json::Value>,
-                )> = Vec::new();
-                let mut param_index = 1;
-
-                for msg in chunk {
-                    values.push(format!(
-                        "(${},${},${},${},${},${},NOW(),NOW())",
-                        param_index,
-                        param_index + 1,
-                        param_index + 2,
-                        param_index + 3,
-                        param_index + 4,
-                        param_index + 5
-                    ));
-
-                    params.push((
-                        msg.aggregate_id,
-                        msg.event_id,
-                        msg.event_type.clone(),
-                        msg.payload.clone(),
-                        msg.topic.clone(),
-                        msg.metadata.clone(),
-                    ));
-
-                    param_index += 6;
-                }
-
-                query.push_str(&values.join(","));
-
-                let mut query = sqlx::query(&query);
-                for (aggregate_id, event_id, event_type, payload, topic, metadata) in params {
-                    query = query
-                        .bind(aggregate_id)
-                        .bind(event_id)
-                        .bind(event_type)
-                        .bind(payload)
-                        .bind(topic)
-                        .bind(metadata);
-                }
-
-                let result = query.execute(&mut **tx).await;
-                if let Err(e) = &result {
-                    tracing::error!(
-                        "CDCOutboxRepository: Failed to batch insert OutboxMessages: {:?}",
-                        e
-                    );
-                    return Err(anyhow::anyhow!("Batch insert failed: {:?}", e));
-                }
-            }
-        }
-
-        let duration = start_time.elapsed();
-        tracing::debug!(
-            "CDCOutboxRepository: Inserted {} messages in {:?}",
-            messages.len(),
-            duration
+        tracing::info!(
+            "CDCOutboxRepository: Starting bulk insert of {} messages",
+            message_count
         );
 
-        Ok(())
+        // FIXED: Use proper bulk insert with UNNEST for better performance
+        let mut aggregate_ids = Vec::with_capacity(message_count);
+        let mut event_ids = Vec::with_capacity(message_count);
+        let mut event_types = Vec::with_capacity(message_count);
+        let mut payloads = Vec::with_capacity(message_count);
+        let mut topics = Vec::with_capacity(message_count);
+        let mut metadatas = Vec::with_capacity(message_count);
+
+        // Prepare data for bulk insert
+        for msg in &messages {
+            aggregate_ids.push(msg.aggregate_id);
+            event_ids.push(msg.event_id);
+            event_types.push(msg.event_type.clone());
+            payloads.push(msg.payload.clone());
+            topics.push(msg.topic.clone());
+            // Handle None values for JSONB column
+            metadatas.push(msg.metadata.clone().unwrap_or(serde_json::Value::Null));
+        }
+
+        // Execute bulk insert using UNNEST
+        let result = sqlx::query!(
+            r#"
+            INSERT INTO kafka_outbox_cdc 
+                (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at)
+            SELECT 
+                unnest($1::uuid[]) as aggregate_id,
+                unnest($2::uuid[]) as event_id,
+                unnest($3::text[]) as event_type,
+                unnest($4::bytea[]) as payload,
+                unnest($5::text[]) as topic,
+                unnest($6::jsonb[]) as metadata,
+                NOW() as created_at,
+                NOW() as updated_at
+            "#,
+            &aggregate_ids,
+            &event_ids,
+            &event_types,
+            &payloads,
+            &topics,
+            &metadatas
+        )
+        .execute(&mut **tx)
+        .await;
+
+        match result {
+            Ok(_) => {
+                let duration = start_time.elapsed();
+                tracing::info!(
+                    "CDCOutboxRepository: Successfully bulk inserted {} messages in {:?}",
+                    message_count,
+                    duration
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    "CDCOutboxRepository: Failed to bulk insert {} messages: {:?}",
+                    message_count,
+                    e
+                );
+                Err(anyhow::anyhow!(
+                    "Failed to bulk insert outbox messages: {:?}",
+                    e
+                ))
+            }
+        }
     }
 
     async fn fetch_and_lock_pending_messages(

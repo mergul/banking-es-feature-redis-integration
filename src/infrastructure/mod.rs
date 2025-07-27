@@ -23,11 +23,13 @@ pub mod kafka_recovery;
 pub mod kafka_recovery_strategies;
 pub mod kafka_tracing;
 pub mod l1_cache_updater;
+pub mod lock_free_operations;
 pub mod logging;
 pub mod middleware;
 pub mod outbox; // Added
 pub mod outbox_poller;
 pub mod redis_aggregate_lock;
+pub mod redis_lock_monitor;
 
 pub mod projections;
 pub mod rate_limiter;

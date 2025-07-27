@@ -187,57 +187,57 @@ pub async fn init_all_services(
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
         }),
         max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "500".to_string())
+            .unwrap_or_else(|_| "800".to_string())
             .parse()
-            .unwrap_or(500),
+            .unwrap_or(800),
         min_connections: std::env::var("DB_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "250".to_string())
+            .unwrap_or_else(|_| "400".to_string())
             .parse()
-            .unwrap_or(250),
+            .unwrap_or(400),
         acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "10".to_string())
             .parse()
-            .unwrap_or(30),
+            .unwrap_or(10),
         idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-            .unwrap_or_else(|_| "600".to_string())
-            .parse()
-            .unwrap_or(600),
-        max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
-            .unwrap_or_else(|_| "1800".to_string())
-            .parse()
-            .unwrap_or(1800),
-        batch_size: std::env::var("DB_BATCH_SIZE")
-            .unwrap_or_else(|_| "1000".to_string())
-            .parse()
-            .unwrap_or(1000),
-        batch_timeout_ms: std::env::var("DB_BATCH_TIMEOUT_MS")
-            .unwrap_or_else(|_| "250".to_string())
-            .parse()
-            .unwrap_or(250),
-        max_batch_queue_size: std::env::var("DB_MAX_BATCH_QUEUE_SIZE")
-            .unwrap_or_else(|_| "10000".to_string())
-            .parse()
-            .unwrap_or(10000),
-        batch_processor_count: std::env::var("DB_BATCH_PROCESSOR_COUNT")
-            .unwrap_or_else(|_| "16".to_string())
-            .parse()
-            .unwrap_or(16),
-        snapshot_threshold: std::env::var("DB_SNAPSHOT_THRESHOLD")
-            .unwrap_or_else(|_| "1000".to_string())
-            .parse()
-            .unwrap_or(1000),
-        snapshot_interval_secs: std::env::var("DB_SNAPSHOT_INTERVAL")
             .unwrap_or_else(|_| "300".to_string())
             .parse()
             .unwrap_or(300),
+        max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
+            .unwrap_or_else(|_| "900".to_string())
+            .parse()
+            .unwrap_or(900),
+        batch_size: std::env::var("DB_BATCH_SIZE")
+            .unwrap_or_else(|_| "2000".to_string())
+            .parse()
+            .unwrap_or(2000),
+        batch_timeout_ms: std::env::var("DB_BATCH_TIMEOUT_MS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .unwrap_or(10),
+        max_batch_queue_size: std::env::var("DB_MAX_BATCH_QUEUE_SIZE")
+            .unwrap_or_else(|_| "20000".to_string())
+            .parse()
+            .unwrap_or(20000),
+        batch_processor_count: std::env::var("DB_BATCH_PROCESSOR_COUNT")
+            .unwrap_or_else(|_| "32".to_string())
+            .parse()
+            .unwrap_or(32),
+        snapshot_threshold: std::env::var("DB_SNAPSHOT_THRESHOLD")
+            .unwrap_or_else(|_| "2000".to_string())
+            .parse()
+            .unwrap_or(2000),
+        snapshot_interval_secs: std::env::var("DB_SNAPSHOT_INTERVAL")
+            .unwrap_or_else(|_| "600".to_string())
+            .parse()
+            .unwrap_or(600),
         snapshot_cache_ttl_secs: std::env::var("DB_SNAPSHOT_CACHE_TTL")
             .unwrap_or_else(|_| "3600".to_string())
             .parse()
             .unwrap_or(3600),
         max_snapshots_per_run: std::env::var("DB_MAX_SNAPSHOTS_PER_RUN")
-            .unwrap_or_else(|_| "100".to_string())
+            .unwrap_or_else(|_| "50".to_string())
             .parse()
-            .unwrap_or(100),
+            .unwrap_or(50),
     };
 
     let event_store: Arc<dyn EventStoreTrait + Send + Sync> =
@@ -255,26 +255,26 @@ pub async fn init_all_services(
     let pool_monitor_config = crate::infrastructure::connection_pool_monitor::PoolMonitorConfig {
         health_check_interval: Duration::from_secs(
             std::env::var("POOL_HEALTH_CHECK_INTERVAL")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()
-                .unwrap_or(10),
-        ),
-        connection_timeout: Duration::from_secs(
-            std::env::var("POOL_CONNECTION_TIMEOUT")
-                .unwrap_or_else(|_| "30".to_string())
-                .parse()
-                .unwrap_or(30),
-        ),
-        max_connection_wait_time: Duration::from_secs(
-            std::env::var("POOL_MAX_WAIT_TIME")
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()
                 .unwrap_or(5),
         ),
+        connection_timeout: Duration::from_secs(
+            std::env::var("POOL_CONNECTION_TIMEOUT")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+        ),
+        max_connection_wait_time: Duration::from_secs(
+            std::env::var("POOL_MAX_WAIT_TIME")
+                .unwrap_or_else(|_| "2".to_string())
+                .parse()
+                .unwrap_or(2),
+        ),
         pool_exhaustion_threshold: std::env::var("POOL_EXHAUSTION_THRESHOLD")
-            .unwrap_or_else(|_| "0.8".to_string())
+            .unwrap_or_else(|_| "0.9".to_string())
             .parse()
-            .unwrap_or(0.8),
+            .unwrap_or(0.9),
         enable_auto_scaling: std::env::var("POOL_AUTO_SCALING")
             .unwrap_or_else(|_| "true".to_string())
             .parse()

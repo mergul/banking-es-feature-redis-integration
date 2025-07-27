@@ -117,7 +117,7 @@ impl ConnectionPoolMonitor {
     async fn check_pool_health(&self) -> Result<(), Box<dyn std::error::Error>> {
         let total = self.pool.size();
         let idle = self.pool.num_idle() as u32;
-        let active = total - idle;
+        let active = if idle > total { 0 } else { total - idle }; // Fix integer overflow
 
         let mut metrics = self.metrics.write().await;
         metrics.total_connections = total;
@@ -126,7 +126,11 @@ impl ConnectionPoolMonitor {
         metrics.last_health_check = Instant::now();
 
         // Check for pool exhaustion
-        let utilization = active as f64 / total as f64;
+        let utilization = if total > 0 {
+            active as f64 / total as f64
+        } else {
+            0.0
+        };
         if utilization > self.config.pool_exhaustion_threshold {
             warn!(
                 "Connection pool utilization high: {:.1}% ({}/{})",
@@ -173,7 +177,11 @@ impl ConnectionPoolMonitor {
 
     async fn auto_scale_pool(&self) -> Result<(), Box<dyn std::error::Error>> {
         let metrics = self.metrics.read().await;
-        let utilization = metrics.active_connections as f64 / metrics.total_connections as f64;
+        let utilization = if metrics.total_connections > 0 {
+            metrics.active_connections as f64 / metrics.total_connections as f64
+        } else {
+            0.0
+        };
 
         if utilization > 0.9 && metrics.total_connections < self.config.max_connections {
             // Scale up
