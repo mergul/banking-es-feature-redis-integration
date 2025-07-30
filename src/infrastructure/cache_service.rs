@@ -6,7 +6,7 @@ use bincode;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -233,27 +233,62 @@ impl CacheServiceTrait for CacheService {
                     "[DEBUG] CacheService::get_account: Redis hit for {}",
                     account_id
                 );
-                let account: Account = bincode::deserialize(&data_bytes)?;
 
-                // Store in L1 cache
-                let entry = CacheEntry {
-                    value: account.clone(),
-                    created_at: Instant::now(),
-                    last_accessed: Instant::now(),
-                    access_count: 1,
-                    ttl: self.config.default_ttl,
-                };
-                shard.insert(account_id, entry);
+                // Enhanced error handling for bincode deserialization
+                let account_result = bincode::deserialize::<Account>(&data_bytes);
+                match account_result {
+                    Ok(account) => {
+                        // Store in L1 cache
+                        let entry = CacheEntry {
+                            value: account.clone(),
+                            created_at: Instant::now(),
+                            last_accessed: Instant::now(),
+                            access_count: 1,
+                            ttl: self.config.default_ttl,
+                        };
+                        shard.insert(account_id, entry);
 
-                self.metrics
-                    .hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!("[CacheService] L2 cache hit for account: {}", account_id);
-                println!(
-                    "[DEBUG] CacheService::get_account: returning from Redis for {}",
-                    account_id
-                );
-                Ok(Some(account))
+                        self.metrics
+                            .hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        info!("[CacheService] L2 cache hit for account: {}", account_id);
+                        println!(
+                            "[DEBUG] CacheService::get_account: returning from Redis for {}",
+                            account_id
+                        );
+                        Ok(Some(account))
+                    }
+                    Err(e) => {
+                        // Log the deserialization error
+                        error!(
+                            "[CacheService] Failed to deserialize account {} from Redis: {:?}. Data length: {} bytes",
+                            account_id, e, data_bytes.len()
+                        );
+
+                        // Increment error metrics
+                        self.metrics
+                            .errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        // Remove corrupted data from Redis
+                        if let Err(delete_err) = self.redis_client.del(&key).await {
+                            warn!(
+                                "[CacheService] Failed to delete corrupted account data for {}: {:?}",
+                                account_id, delete_err
+                            );
+                        }
+
+                        // Return cache miss instead of error
+                        self.metrics
+                            .misses
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        println!(
+                            "[DEBUG] CacheService::get_account: returning None (deserialization error) for {}",
+                            account_id
+                        );
+                        Ok(None)
+                    }
+                }
             }
             Ok(None) => {
                 println!(
@@ -359,22 +394,52 @@ impl CacheServiceTrait for CacheService {
         let key = format!("events:{}", account_id);
         match self.redis_get_bin(&key).await {
             Ok(Some(data_bytes)) => {
-                let events: Vec<AccountEvent> = bincode::deserialize(&data_bytes)?;
+                // Enhanced error handling for bincode deserialization
+                let events_result = bincode::deserialize::<Vec<AccountEvent>>(&data_bytes);
+                match events_result {
+                    Ok(events) => {
+                        // Store in L1 cache
+                        let entry = CacheEntry {
+                            value: events.clone(),
+                            created_at: Instant::now(),
+                            last_accessed: Instant::now(),
+                            access_count: 1,
+                            ttl: self.config.default_ttl,
+                        };
+                        shard.insert(account_id, entry);
 
-                // Store in L1 cache
-                let entry = CacheEntry {
-                    value: events.clone(),
-                    created_at: Instant::now(),
-                    last_accessed: Instant::now(),
-                    access_count: 1,
-                    ttl: self.config.default_ttl,
-                };
-                shard.insert(account_id, entry);
+                        self.metrics
+                            .hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(Some(events))
+                    }
+                    Err(e) => {
+                        // Log the deserialization error
+                        error!(
+                            "[CacheService] Failed to deserialize events for account {} from Redis: {:?}. Data length: {} bytes",
+                            account_id, e, data_bytes.len()
+                        );
 
-                self.metrics
-                    .hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(Some(events))
+                        // Increment error metrics
+                        self.metrics
+                            .errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        // Remove corrupted data from Redis
+                        if let Err(delete_err) = self.redis_client.del(&key).await {
+                            warn!(
+                                "[CacheService] Failed to delete corrupted events data for account {}: {:?}",
+                                account_id, delete_err
+                            );
+                        }
+
+                        // Return cache miss instead of error
+                        self.metrics
+                            .misses
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(None)
+                    }
+                }
             }
             Ok(None) => {
                 self.metrics

@@ -187,7 +187,13 @@ impl RedisConnection {
             .arg(seconds)
             .query_async(&mut *conn)
             .await?;
-        Ok(result == RedisValue::Okay)
+
+        // Check for both "OK" and "ok" status responses
+        match result {
+            RedisValue::Status(status) => Ok(status == "OK" || status == "ok"),
+            RedisValue::Okay => Ok(true),
+            _ => Ok(false),
+        }
     }
 }
 

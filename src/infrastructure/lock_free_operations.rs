@@ -176,7 +176,11 @@ impl LockFreeOperations {
             .consistency_checks
             .fetch_add(1, Ordering::Relaxed);
 
-        match self.event_store.get_current_version(account_id).await {
+        match self
+            .event_store
+            .get_current_version(account_id, false)
+            .await
+        {
             Ok(current_version) => {
                 let is_consistent = current_version >= expected_version;
                 if !is_consistent {
@@ -206,7 +210,10 @@ impl LockFreeOperations {
             .fetch_add(1, Ordering::Relaxed);
 
         // Get current version for consistency check
-        let current_version = self.event_store.get_current_version(account_id).await?;
+        let current_version = self
+            .event_store
+            .get_current_version(account_id, false)
+            .await?;
 
         // Perform the read operation
         let result = operation().await?;
@@ -496,7 +503,7 @@ impl LockFreeOperationsTrait for LockFreeOperations {
 mod tests {
     use super::*;
     use crate::infrastructure::event_store::EventStore;
-    use crate::infrastructure::projections::ProjectionStore;
+    use crate::infrastructure::projections::{ProjectionConfig, ProjectionStore};
     use sqlx::PgPool;
 
     #[tokio::test]
@@ -506,7 +513,8 @@ mod tests {
             .await
             .unwrap();
         let event_store = Arc::new(EventStore::new(pool.clone()));
-        let projection_store = Arc::new(ProjectionStore::new(pool));
+        let projection_config = ProjectionConfig::default();
+        let projection_store = Arc::new(ProjectionStore::new(projection_config).await.unwrap());
         let config = LockFreeConfig::default();
 
         let lock_free_ops = LockFreeOperations::new(event_store, projection_store, config);
@@ -520,7 +528,8 @@ mod tests {
             .await
             .unwrap();
         let event_store = Arc::new(EventStore::new(pool.clone()));
-        let projection_store = Arc::new(ProjectionStore::new(pool));
+        let projection_config = ProjectionConfig::default();
+        let projection_store = Arc::new(ProjectionStore::new(projection_config).await.unwrap());
         let config = LockFreeConfig::default();
 
         let lock_free_ops = LockFreeOperations::new(event_store, projection_store, config);

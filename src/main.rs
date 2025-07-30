@@ -208,17 +208,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(500);
 
-    let cqrs_service = Arc::new(CQRSAccountService::new(
-        service_context.event_store.clone(),
-        service_context.projection_store.clone(),
-        service_context.cache_service.clone(),
-        kafka_config.clone(),              // Clone KafkaConfig for CQRS service
-        max_concurrent_operations,         // max_concurrent_operations from environment
-        500,                               // batch_size
-        Duration::from_millis(50),         // batch_timeout
-        true,                              // enable_write_batching
-        Some(consistency_manager.clone()), // Pass the consistency manager
-    ));
+    let cqrs_service = Arc::new(
+        CQRSAccountService::new(
+            service_context.event_store.clone(),
+            service_context.projection_store.clone(),
+            service_context.cache_service.clone(),
+            kafka_config.clone(),      // Clone KafkaConfig for CQRS service
+            max_concurrent_operations, // max_concurrent_operations from environment
+            500,                       // batch_size
+            Duration::from_millis(50), // batch_timeout
+            true,                      // enable_write_batching
+            Some(consistency_manager.clone()), // Pass the consistency manager
+        )
+        .await,
+    );
 
     // Start write batching service
     cqrs_service.start_write_batching().await?;

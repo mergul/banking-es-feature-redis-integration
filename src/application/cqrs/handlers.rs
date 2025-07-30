@@ -177,18 +177,19 @@ impl CQRSHandler {
         &self,
         account_id: Uuid,
     ) -> Result<Option<crate::infrastructure::projections::AccountProjection>, AccountError> {
-        println!("[DEBUG] CQRSHandler::get_account: start for {}", account_id);
+        // println!("[DEBUG] CQRSHandler::get_account: start for {}", account_id);
         let query = GetAccountQuery { account_id };
-        println!(
-            "[DEBUG] CQRSHandler::get_account: before execute_query for {}",
-            account_id
-        );
-        let result = self.execute_query(query).await;
-        println!(
-            "[DEBUG] CQRSHandler::get_account: after execute_query for {}",
-            account_id
-        );
-        result
+        // println!(
+        //     "[DEBUG] CQRSHandler::get_account: before execute_query for {}",
+        //     account_id
+        // );
+        // let result =
+        self.execute_query(query).await
+        // println!(
+        //     "[DEBUG] CQRSHandler::get_account: after execute_query for {}",
+        //     account_id
+        // );
+        // result
     }
 
     /// Get all accounts query

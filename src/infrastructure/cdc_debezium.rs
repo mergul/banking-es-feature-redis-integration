@@ -875,6 +875,17 @@ impl CDCConsumer {
 
         let mut message_stream = self.kafka_consumer.stream();
 
+        // Read CDC polling interval from environment variable
+        let poll_interval_ms = std::env::var("CDC_POLL_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(100); // Default to 100ms if not set
+
+        tracing::info!(
+            "CDCConsumer: Using polling interval: {}ms (from CDC_POLL_INTERVAL_MS env var)",
+            poll_interval_ms
+        );
+
         loop {
             tokio::select! {
                 _ = shutdown_token.cancelled() => {
@@ -882,18 +893,38 @@ impl CDCConsumer {
                     tracing::info!("CDCConsumer: Received shutdown signal, breaking loop");
                     break;
                 }
-                message_result = message_stream.next() => {
-                    if let Some(Ok(message)) = message_result {
-                        tracing::info!("Message received: {:?}", message);
-                        // Deserialize the message payload as CDC event
-                        match serde_json::from_slice::<serde_json::Value>(message.payload().unwrap()) {
-                            Ok(cdc_event) => {
-                                if let Err(e) = processor.process_cdc_event_ultra_fast(cdc_event).await {
-                                    tracing::error!("CDCConsumer: Failed to process CDC event: {:?}", e);
+                message_result = tokio::time::timeout(
+                    Duration::from_millis(poll_interval_ms),
+                    message_stream.next()
+                ) => {
+                    match message_result {
+                        Ok(Some(Ok(message))) => {
+                            tracing::info!("Message received: {:?}", message);
+                            // Deserialize the message payload as CDC event
+                            match serde_json::from_slice::<serde_json::Value>(message.payload().unwrap()) {
+                                Ok(cdc_event) => {
+                                    if let Err(e) = processor.process_cdc_event_ultra_fast(cdc_event).await {
+                                        tracing::error!("CDCConsumer: Failed to process CDC event: {:?}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("CDCConsumer: Failed to deserialize CDC event: {:?}", e);
                                 }
                             }
-                            Err(e) => {
-                                tracing::error!("CDCConsumer: Failed to deserialize CDC event: {:?}", e);
+                        }
+                        Ok(Some(Err(e))) => {
+                            tracing::error!("CDCConsumer: Error receiving message: {:?}", e);
+                        }
+                        Ok(None) => {
+                            // Stream ended
+                            tracing::info!("CDCConsumer: Message stream ended");
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout - this is expected and normal
+                            poll_count += 1;
+                            if poll_count % 1000 == 0 {
+                                tracing::debug!("CDCConsumer: Poll timeout (count: {})", poll_count);
                             }
                         }
                     }

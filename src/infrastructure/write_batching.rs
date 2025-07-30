@@ -39,7 +39,7 @@ pub struct PartitionedBatching {
 }
 
 impl PartitionedBatching {
-    pub fn new(
+    pub async fn new(
         event_store: Arc<dyn EventStoreTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
         write_pool: Arc<PgPool>,
@@ -51,7 +51,7 @@ impl PartitionedBatching {
                 // Optimized config for create operations - use same fast settings
                 WriteBatchingConfig {
                     max_batch_size: CREATE_BATCH_SIZE,
-                    max_batch_wait_time_ms: 10, // Same as other partitions for consistency
+                    max_batch_wait_time_ms: 100, // Increased from 500ms to 100ms for better batching
                     max_retries: 2,
                     retry_backoff_ms: 5,
                 }
@@ -59,19 +59,47 @@ impl PartitionedBatching {
                 // Standard config for update operations
                 WriteBatchingConfig {
                     max_batch_size: DEFAULT_BATCH_SIZE,
-                    max_batch_wait_time_ms: 10, // Same as other partitions for consistency
+                    max_batch_wait_time_ms: 100, // Increased from 500ms to 100ms for better batching
                     max_retries: 2,
                     retry_backoff_ms: 5,
                 }
             };
-            let processor = Arc::new(WriteBatchingService::new_for_partition(
-                partition_id,
-                NUM_PARTITIONS,
-                config,
-                event_store.clone(),
-                projection_store.clone(),
-                write_pool.clone(),
-            ));
+            let processor = Arc::new(
+                match WriteBatchingService::start_for_partition(
+                    partition_id,
+                    NUM_PARTITIONS,
+                    config.clone(),
+                    event_store.clone(),
+                    projection_store.clone(),
+                    write_pool.clone(),
+                )
+                .await
+                {
+                    Ok(service) => service,
+                    Err(e) => {
+                        error!(
+                            "Failed to start write batching service for partition {}: {}",
+                            partition_id, e
+                        );
+                        let mut service = WriteBatchingService::new_for_partition(
+                            partition_id,
+                            NUM_PARTITIONS,
+                            config,
+                            event_store.clone(),
+                            projection_store.clone(),
+                            write_pool.clone(),
+                        );
+                        // Start the service even if start_for_partition failed
+                        if let Err(start_error) = service.start().await {
+                            error!(
+                                "Failed to start write batching service for partition {} (fallback): {}",
+                                partition_id, start_error
+                            );
+                        }
+                        service
+                    }
+                },
+            );
             processors.push(processor);
         }
         Self { processors }
@@ -294,7 +322,8 @@ impl PartitionedBatching {
         let event_store = &self.processors[0].event_store;
 
         for aggregate_id in operations_by_aggregate.keys() {
-            let current_version = match event_store.get_current_version(*aggregate_id).await {
+            let current_version = match event_store.get_current_version(*aggregate_id, false).await
+            {
                 Ok(version) => version,
                 Err(_) => 0, // Default to 0 if aggregate doesn't exist
             };
@@ -621,10 +650,10 @@ pub struct WriteBatchingConfig {
 impl Default for WriteBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 50,         // Reduced from 100 to 50 for faster processing
-            max_batch_wait_time_ms: 10, // Reduced from 25ms to 10ms for faster processing
-            max_retries: 2,             // Reduced from 3 to 2 for faster processing
-            retry_backoff_ms: 5,        // Reduced from 10ms to 5ms for faster retries
+            max_batch_size: 50,          // Reduced from 100 to 50 for faster processing
+            max_batch_wait_time_ms: 100, // Increased from 10ms to 100ms for better batching
+            max_retries: 2,              // Reduced from 3 to 2 for faster processing
+            retry_backoff_ms: 5,         // Reduced from 10ms to 5ms for faster retries
         }
     }
 }
@@ -781,6 +810,27 @@ impl WriteBatchingService {
         service
     }
 
+    /// Start the batch processor for a partition
+    pub async fn start_for_partition(
+        partition_id: usize,
+        num_partitions: usize,
+        config: WriteBatchingConfig,
+        event_store: Arc<dyn EventStoreTrait>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+        write_pool: Arc<PgPool>,
+    ) -> Result<Self> {
+        let mut service = Self::new_for_partition(
+            partition_id,
+            num_partitions,
+            config,
+            event_store,
+            projection_store,
+            write_pool,
+        );
+        service.start().await?;
+        Ok(service)
+    }
+
     /// Start the batch processor from an Arc (for use with shared references)
     pub async fn start(&self) -> Result<()> {
         // Check if already running
@@ -810,7 +860,6 @@ impl WriteBatchingService {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        info!("[WriteBatchingService] Batch processor interval tick");
                         // Check if current batch should be processed
                         let should_process = {
                             let batch = current_batch.lock().await;
@@ -818,25 +867,37 @@ impl WriteBatchingService {
                             let is_old = batch.is_old(Duration::from_millis(config.max_batch_wait_time_ms));
                             let should = batch.should_process(config.max_batch_size, Duration::from_millis(config.max_batch_wait_time_ms));
 
-                            info!("[WriteBatchingService] Batch status: size={}, is_full={}, is_old={}, should_process={}",
-                                  batch.operations.len(), is_full, is_old, should);
+                            // Only log if there are operations
+                            if !batch.operations.is_empty() {
+                                info!("[WriteBatchingService] Batch processor interval tick");
+                                info!("[WriteBatchingService] Batch status: size={}, is_full={}, is_old={}, should_process={}",
+                                      batch.operations.len(), is_full, is_old, should);
+                            }
                             should
                         };
 
                         if should_process {
-                            Self::process_current_batch(
-                                &current_batch,
-                                &pending_results,
-                                &completed_results, // FIXED: Pass completed results
-                                &event_store,
-                                &projection_store,
-                                &write_pool,
-                                &outbox_batcher,
-                                &config,
-                                &batches_processed,
-                                &operations_processed,
-                                &redis_lock,
-                            ).await;
+                            // Check if batch has operations before processing
+                            let has_operations = {
+                                let batch = current_batch.lock().await;
+                                !batch.operations.is_empty()
+                            };
+
+                            if has_operations {
+                                Self::process_current_batch(
+                                    &current_batch,
+                                    &pending_results,
+                                    &completed_results, // FIXED: Pass completed results
+                                    &event_store,
+                                    &projection_store,
+                                    &write_pool,
+                                    &outbox_batcher,
+                                    &config,
+                                    &batches_processed,
+                                    &operations_processed,
+                                    &redis_lock,
+                                ).await;
+                            }
                         }
                     }
                     _ = shutdown_token.cancelled() => {
@@ -1146,8 +1207,8 @@ impl WriteBatchingService {
         let operation_id = Uuid::new_v4();
         let aggregate_id = operation.get_aggregate_id();
 
-        info!(
-            "[WriteBatchingService] Submitting operation {} for aggregate {}",
+        println!(
+            "🔍 [WriteBatchingService] Submitting operation {} for aggregate {}",
             operation_id, aggregate_id
         );
 
@@ -1165,12 +1226,19 @@ impl WriteBatchingService {
             let mut batch = self.current_batch.lock().await;
             batch.add_operation(operation_id, operation);
 
+            println!(
+                "🔍 Batch now has {} operations, max_size: {}, max_wait_time: {}ms",
+                batch.operations.len(),
+                self.config.max_batch_size,
+                self.config.max_batch_wait_time_ms
+            );
+
             // Process immediately if batch is full OR if it's been waiting too long
             if batch.should_process(
                 self.config.max_batch_size,
                 Duration::from_millis(self.config.max_batch_wait_time_ms),
             ) {
-                info!(
+                println!(
                     "📦 Processing write batch: {} operations (full: {}, old: {}), age: {:?}",
                     batch.operations.len(),
                     batch.is_full(self.config.max_batch_size),
@@ -1193,6 +1261,12 @@ impl WriteBatchingService {
                     &self.redis_lock,
                 )
                 .await;
+            } else {
+                println!(
+                    "⏳ Batch not ready yet: {} operations, age: {:?}",
+                    batch.operations.len(),
+                    batch.created_at.elapsed()
+                );
             }
         }
 
@@ -1228,7 +1302,7 @@ impl WriteBatchingService {
         }
 
         // Wait for the result with a reasonable timeout
-        let timeout = Duration::from_secs(30); // Reduced timeout for better responsiveness
+        let timeout = Duration::from_secs(30); // Reasonable timeout for batch processing
         match tokio::time::timeout(timeout, async {
             // Poll for the result more efficiently with exponential backoff
             let mut poll_interval = Duration::from_millis(10);
@@ -1297,8 +1371,6 @@ impl WriteBatchingService {
         operations_processed: &Arc<Mutex<u64>>,
         redis_lock: &Arc<RedisAggregateLock>,
     ) {
-        println!("🔄 Starting batch processing with distributed locking...");
-
         // Take the current batch and create a new one
         let batch_to_process = {
             let mut batch = current_batch.lock().await;
@@ -1312,9 +1384,11 @@ impl WriteBatchingService {
         };
 
         if batch_to_process.operations.is_empty() {
-            println!("⚠️  No operations to process in batch");
+            // Silently return for empty batches to reduce log spam
             return;
         }
+
+        println!("🔄 Starting batch processing with distributed locking...");
 
         // Group operations by aggregate_id for distributed locking
         let mut ops_by_aggregate: HashMap<Uuid, Vec<(Uuid, WriteOperation)>> = HashMap::new();
@@ -1443,8 +1517,6 @@ impl WriteBatchingService {
             let mut operations = operations_processed.lock().await;
             *operations += batch_to_process.operations.len() as u64;
         }
-
-        println!("📈 Batch processing metrics updated");
     }
 
     /// Execute a batch of operations in a single database transaction
@@ -1554,11 +1626,18 @@ impl WriteBatchingService {
                     }
                     None => {
                         // Get current version for this aggregate (first event)
-                        let current_version =
-                            match event_store.get_current_version(aggregate_id).await {
-                                Ok(version) => version,
-                                Err(_) => 0, // Default to 0 if aggregate doesn't exist
-                            };
+                        // For new accounts, use is_new_aggregate: true
+                        let is_new_aggregate = match &event {
+                            AccountEvent::AccountCreated { .. } => true,
+                            _ => false,
+                        };
+                        let current_version = match event_store
+                            .get_current_version(aggregate_id, is_new_aggregate)
+                            .await
+                        {
+                            Ok(version) => version,
+                            Err(_) => 0, // Default to 0 if aggregate doesn't exist
+                        };
                         // First event uses current_version, subsequent events will increment
                         events_by_aggregate.push((aggregate_id, vec![event], current_version));
                     }
@@ -1814,8 +1893,16 @@ impl WriteBatchingService {
                     }
                     None => {
                         // Use pre-fetched version instead of calling get_current_version
-                        let current_version =
-                            current_versions.get(&aggregate_id).copied().unwrap_or(0);
+                        // For new accounts, use version 0
+                        let is_new_aggregate = match &event {
+                            AccountEvent::AccountCreated { .. } => true,
+                            _ => false,
+                        };
+                        let current_version = if is_new_aggregate {
+                            0 // New accounts start at version 0
+                        } else {
+                            current_versions.get(&aggregate_id).copied().unwrap_or(0)
+                        };
                         info!(
                             "[DEBUG] Using pre-fetched version {} for aggregate {}",
                             current_version, aggregate_id
@@ -2113,8 +2200,9 @@ impl WriteBatchingService {
         };
 
         // Get current version of the aggregate to avoid optimistic concurrency conflicts
+        // For existing accounts (deposit), use is_new_aggregate: false
         let current_version = event_store
-            .get_current_version(account_id)
+            .get_current_version(account_id, false)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get current version: {:?}", e))?;
 
@@ -2185,8 +2273,9 @@ impl WriteBatchingService {
         };
 
         // Get current version of the aggregate to avoid optimistic concurrency conflicts
+        // For existing accounts (withdraw), use is_new_aggregate: false
         let current_version = event_store
-            .get_current_version(account_id)
+            .get_current_version(account_id, false)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get current version: {:?}", e))?;
 
@@ -2290,7 +2379,7 @@ pub async fn save_events_with_retry(
 
     loop {
         // Get current version on each attempt to avoid race conditions
-        let current_version = event_store.get_current_version(aggregate_id).await?;
+        let current_version = event_store.get_current_version(aggregate_id, false).await?;
 
         let result = event_store
             .save_events(aggregate_id, events.clone(), current_version)
@@ -2321,7 +2410,7 @@ mod tests {
     async fn test_write_batching_config() {
         let config = WriteBatchingConfig::default();
         assert_eq!(config.max_batch_size, 50);
-        assert_eq!(config.max_batch_wait_time_ms, 10);
+        assert_eq!(config.max_batch_wait_time_ms, 100);
         assert_eq!(config.max_retries, 2);
     }
 

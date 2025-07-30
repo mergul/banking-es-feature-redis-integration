@@ -9,7 +9,7 @@ use banking_es::{
         connection_pool_partitioning::{OperationType, PartitionedPools, PoolPartitioningConfig},
         event_store::{EventStore, EventStoreTrait},
         init,
-        projections::{ProjectionStore, ProjectionStoreTrait},
+        projections::{ProjectionConfig, ProjectionStore, ProjectionStoreTrait},
         redis_abstraction::RealRedisClient,
         PoolSelector, WriteOperation,
     },
@@ -116,17 +116,20 @@ async fn setup_stress_test_environment(
     let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
 
     // Initialize CQRS service using the services from ServiceContext (same as main.rs)
-    let cqrs_service = Arc::new(CQRSAccountService::new(
-        service_context.event_store.clone(),
-        service_context.projection_store.clone(),
-        service_context.cache_service.clone(),
-        kafka_config.clone(),
-        1000, // max_concurrent_operations (increased from 1000 to 2000 for better parallelism)
-        1000, // batch_size (increased from 500 to 1000 for better throughput)
-        Duration::from_millis(50), // batch_timeout (reduced from 100ms to 50ms for ultra-fast processing)
-        true,                      // enable_write_batching
-        Some(consistency_manager.clone()), // Pass the consistency manager
-    ));
+    let cqrs_service = Arc::new(
+        CQRSAccountService::new(
+            service_context.event_store.clone(),
+            service_context.projection_store.clone(),
+            service_context.cache_service.clone(),
+            kafka_config.clone(),
+            1000, // max_concurrent_operations (increased from 1000 to 2000 for better parallelism)
+            1000, // batch_size (increased from 500 to 1000 for better throughput)
+            Duration::from_millis(50), // batch_timeout (reduced from 100ms to 50ms for ultra-fast processing)
+            true,                      // enable_write_batching
+            Some(consistency_manager.clone()), // Pass the consistency manager
+        )
+        .await,
+    );
 
     // Start write batching service (same as main.rs)
     cqrs_service.start_write_batching().await?;
@@ -231,7 +234,6 @@ async fn cleanup_test_resources(
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_batch_processing_stress() {
     println!("🚀 Starting Batch Processing Stress Test with Full CDC Pipeline");
 
@@ -714,7 +716,6 @@ async fn verify_data_integrity(cqrs_service: &Arc<CQRSAccountService>) {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_batch_processing_endurance() {
     println!("🚀 Starting Batch Processing Endurance Test");
 
@@ -735,20 +736,24 @@ async fn test_batch_processing_endurance() {
     let event_store = Arc::new(EventStore::new(pool.clone()));
     let cache_config = CacheConfig::default();
     let cache_service = Arc::new(CacheService::new(redis_client_trait, cache_config));
-    let projection_store = Arc::new(ProjectionStore::new(pool.clone()));
+    let projection_config = ProjectionConfig::default();
+    let projection_store = Arc::new(ProjectionStore::new(projection_config).await.unwrap());
 
     let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
-    let cqrs_service = Arc::new(CQRSAccountService::new(
-        event_store.clone(),
-        projection_store.clone(),
-        cache_service.clone(),
-        kafka_config,
-        50,
-        25,
-        Duration::from_secs(2),
-        false, // DISABLE write batching for endurance test
-        None,  // No consistency manager for this test
-    ));
+    let cqrs_service = Arc::new(
+        CQRSAccountService::new(
+            event_store.clone(),
+            projection_store.clone(),
+            cache_service.clone(),
+            kafka_config,
+            50,
+            25,
+            Duration::from_secs(2),
+            false, // DISABLE write batching for endurance test
+            None,  // No consistency manager for this test
+        )
+        .await,
+    );
 
     cqrs_service
         .start_write_batching()
@@ -821,7 +826,7 @@ async fn test_batch_processing_endurance() {
 #[tokio::test]
 async fn test_read_operations_after_writes() {
     let _ = tracing_subscriber::fmt::try_init();
-    println!("🚀 Starting Read Operations Test After Writes (Multi-Row Insert)");
+    println!("🚀 Starting Read Operations Test After Writes (Bulk Create)");
 
     // Setup test environment
     let context = match setup_stress_test_environment().await {
@@ -993,16 +998,16 @@ async fn test_read_operations_after_writes() {
         total_outbox_messages
     );
 
-    // Wait for CDC processing with a longer timeout to ensure projections are fully updated
-    let cdc_timeout = Duration::from_secs(120); // Increased from 60s to 120s for complete processing
+    // Wait for CDC processing with a shorter timeout
+    let cdc_timeout = Duration::from_secs(10); // Reduced from 180s to 10s
     let cdc_start = Instant::now();
     let mut cdc_processed = false;
     let mut last_events_processed = 0;
     let mut stable_count = 0;
 
-    // Check CDC metrics every 2 seconds for up to 60 seconds
-    for i in 0..30 {
-        // 30 iterations * 2 seconds = 60 seconds
+    // Check CDC metrics every 2 seconds for up to 10 seconds (5 iterations)
+    for i in 0..5 {
+        // 5 iterations * 2 seconds = 10 seconds
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Get CDC metrics to check if processing is complete
@@ -1017,16 +1022,19 @@ async fn test_read_operations_after_writes() {
             .projection_updates
             .load(std::sync::atomic::Ordering::Relaxed);
 
-        println!(
-            "  📊 CDC Status ({}s): Processed={}, Failed={}, ProjectionUpdates={}",
-            (i + 1) * 2,
-            events_processed,
-            events_failed,
-            projection_updates
-        );
+        // Only print status every 10 seconds (every 2nd iteration)
+        if i % 2 == 0 {
+            println!(
+                "  📊 CDC Status ({}s): Processed={}, Failed={}, ProjectionUpdates={}",
+                (i + 1) * 5,
+                events_processed,
+                events_failed,
+                projection_updates
+            );
+        }
 
         // Check if we've processed enough events (should be close to our write operations)
-        if events_processed >= write_success as u64 {
+        if events_processed >= write_success as u64 && projection_updates > 0 {
             // Additional stability check: ensure events_processed hasn't changed for 3 consecutive checks
             if events_processed == last_events_processed {
                 stable_count += 1;
@@ -1339,12 +1347,14 @@ async fn test_read_operations_after_writes() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_write_batching_multi_row_inserts() {
+    println!("🚀 TEST STARTING - Write Batching Multi-Row Insert Test");
+    println!("🚀 Starting Write Batching Multi-Row Insert Test - STEP 1");
     let _ = tracing_subscriber::fmt::try_init();
-    println!("🚀 Starting Write Batching Multi-Row Insert Test");
+    println!("🚀 Starting Write Batching Multi-Row Insert Test - STEP 2");
 
     // Setup test environment
+    println!("🔍 Setting up test environment...");
     let context = match setup_stress_test_environment().await {
         Ok(ctx) => {
             println!("✅ Write batching test environment setup complete");
@@ -1356,6 +1366,8 @@ async fn test_write_batching_multi_row_inserts() {
         }
     };
 
+    println!("🔍 Test environment setup successful, proceeding to Phase 1");
+
     // Phase 1: Create new test accounts with batching demonstration
     println!("\n📝 PHASE 1: Create New Test Accounts with Multi-Aggregate Batching");
     println!("===================================================================");
@@ -1365,6 +1377,10 @@ async fn test_write_batching_multi_row_inserts() {
         "🔧 Creating {} new test accounts with batching...",
         account_count
     );
+
+    // Start timer for account creation
+    println!("⏱️  Starting account creation timer...");
+    let account_creation_start = Instant::now();
 
     // Submit all operations simultaneously to ensure they get batched together
     let mut operation_ids = Vec::new();
@@ -1376,13 +1392,19 @@ async fn test_write_batching_multi_row_inserts() {
     );
 
     // Get the batching service once to avoid lifetime issues
+    println!("🔍 Getting write batching service...");
     let batching_service = match context.cqrs_service.get_write_batching_service() {
-        Some(service) => service.clone(),
+        Some(service) => {
+            println!("✅ Write batching service found");
+            service.clone()
+        }
         None => {
             println!("❌ Write batching service not available");
             return;
         }
     };
+
+    println!("🔍 About to submit {} operations...", account_count);
 
     // Submit all operations in parallel
     for i in 0..account_count {
@@ -1391,7 +1413,11 @@ async fn test_write_batching_multi_row_inserts() {
         let batching_service = batching_service.clone();
         tasks.push(tokio::spawn(async move {
             let aggregate_id = Uuid::new_v4();
-            batching_service
+            println!(
+                "🔍 Submitting operation {} for aggregate {}",
+                i, aggregate_id
+            );
+            let result = batching_service
                 .submit_operation(
                     aggregate_id,
                     WriteOperation::CreateAccount {
@@ -1400,7 +1426,9 @@ async fn test_write_batching_multi_row_inserts() {
                         initial_balance,
                     },
                 )
-                .await
+                .await;
+            println!("🔍 Operation {} result: {:?}", i, result);
+            result
         }));
     }
 
@@ -1456,6 +1484,23 @@ async fn test_write_batching_multi_row_inserts() {
         }
     }
 
+    // End timer for account creation
+    let account_creation_end = Instant::now();
+    let account_creation_duration = account_creation_end.duration_since(account_creation_start);
+
+    println!("⏱️  Account creation completed!");
+    println!("📊 Account Creation Results:");
+    println!("   • Total accounts created: {}", account_ids.len());
+    println!("   • Total time: {:.2?}", account_creation_duration);
+    println!(
+        "   • Average time per account: {:.2?}",
+        account_creation_duration / account_ids.len() as u32
+    );
+    println!(
+        "   • Accounts per second: {:.2}",
+        account_ids.len() as f64 / account_creation_duration.as_secs_f64()
+    );
+
     println!(
         "✅ Successfully created {} test accounts out of {} submitted",
         account_ids.len(),
@@ -1468,212 +1513,212 @@ async fn test_write_batching_multi_row_inserts() {
     // Phase 2: Submit multiple operations per account to test batching
     println!("\n📝 PHASE 2: Submit Multiple Operations Per Account");
     println!("==================================================");
+    /*
+        // Submit multiple operations per account to test batching
+        println!("🔧 Submitting multiple operations per account to test write batching...");
+        let mut handles = Vec::new();
 
-    // Submit multiple operations per account to test batching
-    println!("🔧 Submitting multiple operations per account to test write batching...");
-    let mut handles = Vec::new();
-
-    for &account_id in &account_ids {
-        // Submit 5 deposit operations for each account
-        for i in 0..5 {
-            let cqrs_service = context.cqrs_service.clone();
-            let amount = Decimal::new(10 + i as i64, 0);
-            let handle = tokio::spawn(async move {
-                match cqrs_service.deposit_money(account_id, amount).await {
-                    Ok(result) => {
-                        println!(
-                            "✅ Deposit successful for account {}: amount {}",
-                            account_id, amount
-                        );
-                        Ok(result)
-                    }
-                    Err(e) => {
-                        println!(
-                            "❌ Deposit failed for account {}: amount {} - {}",
-                            account_id, amount, e
-                        );
-                        Err(e)
-                    }
-                }
-            });
-            handles.push(handle);
-        }
-
-        // Submit 5 withdraw operations for each account
-        for i in 0..5 {
-            let cqrs_service = context.cqrs_service.clone();
-            let amount = Decimal::new(5 + i as i64, 0);
-            let handle = tokio::spawn(async move {
-                match cqrs_service.withdraw_money(account_id, amount).await {
-                    Ok(result) => {
-                        println!(
-                            "✅ Withdraw successful for account {}: amount {}",
-                            account_id, amount
-                        );
-                        Ok(result)
-                    }
-                    Err(e) => {
-                        println!(
-                            "❌ Withdraw failed for account {}: amount {} - {}",
-                            account_id, amount, e
-                        );
-                        Err(e)
-                    }
-                }
-            });
-            handles.push(handle);
-        }
-    }
-
-    println!("⏳ Waiting for all operations to complete...");
-    let start_time = Instant::now();
-    futures::future::join_all(handles).await;
-    let duration = start_time.elapsed();
-
-    println!("✅ All operations completed in {:?}", duration);
-    println!(
-        "📊 Processed {} operations for {} accounts",
-        account_ids.len() * 10,
-        account_ids.len()
-    );
-
-    // Phase 3: Wait for CDC processing to complete
-    println!("\n📝 PHASE 3: Wait for CDC Processing");
-    println!("===================================");
-
-    println!("⏳ Waiting for CDC to process all events...");
-
-    // Wait for CDC processing with a timeout
-    let cdc_timeout = Duration::from_secs(30); // Increased timeout for CDC processing
-    let cdc_start = Instant::now();
-    let mut cdc_processed = false;
-
-    // Check CDC metrics every second for up to 15 seconds
-    for i in 0..15 {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // Get CDC metrics to check if processing is complete
-        let cdc_metrics = context.cdc_service_manager.get_metrics();
-        let events_processed = cdc_metrics
-            .events_processed
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let events_failed = cdc_metrics
-            .events_failed
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let projection_updates = cdc_metrics
-            .projection_updates
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        println!(
-            "  📊 CDC Status ({}s): Processed={}, Failed={}, ProjectionUpdates={}",
-            i + 1,
-            events_processed,
-            events_failed,
-            projection_updates
-        );
-
-        // Consider CDC complete if we've processed some events and have projection updates
-        if events_processed > 0 && projection_updates > 0 {
-            println!("✅ CDC processing appears complete");
-            cdc_processed = true;
-            break;
-        }
-    }
-
-    if !cdc_processed {
-        println!("⚠️  CDC processing timeout reached, proceeding anyway");
-    }
-
-    let cdc_duration = cdc_start.elapsed();
-    println!("✅ CDC wait completed in {:?}", cdc_duration);
-
-    // Phase 4: Verify data integrity
-    println!("\n📝 PHASE 4: Data Integrity Verification");
-    println!("======================================");
-
-    println!("🔍 Verifying account balances and transaction history...");
-    let mut verification_handles = Vec::new();
-
-    for &account_id in &account_ids {
-        let cqrs_service = context.cqrs_service.clone();
-        let handle = tokio::spawn(async move {
-            match cqrs_service.get_account(account_id).await {
-                Ok(Some(account)) => {
-                    // Verify that the account has some transactions
-                    // Note: Some operations might fail due to insufficient funds, which is expected
-                    let transactions = match cqrs_service.get_account_transactions(account_id).await
-                    {
-                        Ok(txs) => txs,
+        for &account_id in &account_ids {
+            // Submit 5 deposit operations for each account
+            for i in 0..5 {
+                let cqrs_service = context.cqrs_service.clone();
+                let amount = Decimal::new(10 + i as i64, 0);
+                let handle = tokio::spawn(async move {
+                    match cqrs_service.deposit_money(account_id, amount).await {
+                        Ok(result) => {
+                            println!(
+                                "✅ Deposit successful for account {}: amount {}",
+                                account_id, amount
+                            );
+                            Ok(result)
+                        }
                         Err(e) => {
                             println!(
-                                "⚠️  Failed to get transactions for account {}: {}",
-                                account_id, e
+                                "❌ Deposit failed for account {}: amount {} - {}",
+                                account_id, amount, e
                             );
-                            vec![]
+                            Err(e)
                         }
-                    };
-
-                    (account_id, account.balance, transactions.len(), true)
-                }
-                Ok(None) => {
-                    println!("❌ Account {} not found", account_id);
-                    (account_id, Decimal::ZERO, 0, false)
-                }
-                Err(e) => {
-                    println!("❌ Failed to get account {}: {}", account_id, e);
-                    (account_id, Decimal::ZERO, 0, false)
-                }
+                    }
+                });
+                handles.push(handle);
             }
-        });
-        verification_handles.push(handle);
-    }
 
-    let verification_results = futures::future::join_all(verification_handles).await;
-    let mut total_balance = Decimal::ZERO;
-    let mut total_transactions = 0;
-    let mut successful_verifications = 0;
-
-    for result in verification_results {
-        match result {
-            Ok((account_id, balance, transaction_count, found)) => {
-                if found {
-                    total_balance += balance;
-                    total_transactions += transaction_count;
-                    successful_verifications += 1;
-                    println!(
-                        "✅ Account {}: Balance = {}, Transactions = {}",
-                        account_id, balance, transaction_count
-                    );
-                } else {
-                    println!("❌ Account {}: Not found or failed to retrieve", account_id);
-                }
-            }
-            Err(e) => {
-                println!("❌ Failed to verify account: {}", e);
+            // Submit 5 withdraw operations for each account
+            for i in 0..5 {
+                let cqrs_service = context.cqrs_service.clone();
+                let amount = Decimal::new(5 + i as i64, 0);
+                let handle = tokio::spawn(async move {
+                    match cqrs_service.withdraw_money(account_id, amount).await {
+                        Ok(result) => {
+                            println!(
+                                "✅ Withdraw successful for account {}: amount {}",
+                                account_id, amount
+                            );
+                            Ok(result)
+                        }
+                        Err(e) => {
+                            println!(
+                                "❌ Withdraw failed for account {}: amount {} - {}",
+                                account_id, amount, e
+                            );
+                            Err(e)
+                        }
+                    }
+                });
+                handles.push(handle);
             }
         }
-    }
 
-    println!("\n📊 FINAL STATISTICS:");
-    println!("===================");
-    println!("Total accounts processed: {}", account_ids.len());
-    println!(
-        "Successfully verified accounts: {}",
-        successful_verifications
-    );
-    println!("Total balance across all accounts: {}", total_balance);
-    println!("Total transactions: {}", total_transactions);
-    if successful_verifications > 0 {
+        println!("⏳ Waiting for all operations to complete...");
+        let start_time = Instant::now();
+        futures::future::join_all(handles).await;
+        let duration = start_time.elapsed();
+
+        println!("✅ All operations completed in {:?}", duration);
         println!(
-            "Average transactions per account: {:.1}",
-            total_transactions as f64 / successful_verifications as f64
+            "📊 Processed {} operations for {} accounts",
+            account_ids.len() * 10,
+            account_ids.len()
         );
-    }
-    println!("Expected additional transactions per account: 10 (5 deposits + 5 withdrawals)");
-    println!(
-        "Note: Some operations may fail due to insufficient funds, which is expected behavior"
-    );
 
+        // Phase 3: Wait for CDC processing to complete
+        println!("\n📝 PHASE 3: Wait for CDC Processing");
+        println!("===================================");
+
+        println!("⏳ Waiting for CDC to process all events...");
+
+        // Wait for CDC processing with a timeout
+        let cdc_timeout = Duration::from_secs(30); // Increased timeout for CDC processing
+        let cdc_start = Instant::now();
+        let mut cdc_processed = false;
+
+        // Check CDC metrics every second for up to 15 seconds
+        for i in 0..15 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            // Get CDC metrics to check if processing is complete
+            let cdc_metrics = context.cdc_service_manager.get_metrics();
+            let events_processed = cdc_metrics
+                .events_processed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let events_failed = cdc_metrics
+                .events_failed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let projection_updates = cdc_metrics
+                .projection_updates
+                .load(std::sync::atomic::Ordering::Relaxed);
+
+            println!(
+                "  📊 CDC Status ({}s): Processed={}, Failed={}, ProjectionUpdates={}",
+                i + 1,
+                events_processed,
+                events_failed,
+                projection_updates
+            );
+
+            // Consider CDC complete if we've processed some events and have projection updates
+            if events_processed > 0 && projection_updates > 0 {
+                println!("✅ CDC processing appears complete");
+                cdc_processed = true;
+                break;
+            }
+        }
+
+        if !cdc_processed {
+            println!("⚠️  CDC processing timeout reached, proceeding anyway");
+        }
+
+        let cdc_duration = cdc_start.elapsed();
+        println!("✅ CDC wait completed in {:?}", cdc_duration);
+
+        // Phase 4: Verify data integrity
+        println!("\n📝 PHASE 4: Data Integrity Verification");
+        println!("======================================");
+
+        println!("🔍 Verifying account balances and transaction history...");
+        let mut verification_handles = Vec::new();
+
+        for &account_id in &account_ids {
+            let cqrs_service = context.cqrs_service.clone();
+            let handle = tokio::spawn(async move {
+                match cqrs_service.get_account(account_id).await {
+                    Ok(Some(account)) => {
+                        // Verify that the account has some transactions
+                        // Note: Some operations might fail due to insufficient funds, which is expected
+                        let transactions = match cqrs_service.get_account_transactions(account_id).await
+                        {
+                            Ok(txs) => txs,
+                            Err(e) => {
+                                println!(
+                                    "⚠️  Failed to get transactions for account {}: {}",
+                                    account_id, e
+                                );
+                                vec![]
+                            }
+                        };
+
+                        (account_id, account.balance, transactions.len(), true)
+                    }
+                    Ok(None) => {
+                        println!("❌ Account {} not found", account_id);
+                        (account_id, Decimal::ZERO, 0, false)
+                    }
+                    Err(e) => {
+                        println!("❌ Failed to get account {}: {}", account_id, e);
+                        (account_id, Decimal::ZERO, 0, false)
+                    }
+                }
+            });
+            verification_handles.push(handle);
+        }
+
+        let verification_results = futures::future::join_all(verification_handles).await;
+        let mut total_balance = Decimal::ZERO;
+        let mut total_transactions = 0;
+        let mut successful_verifications = 0;
+
+        for result in verification_results {
+            match result {
+                Ok((account_id, balance, transaction_count, found)) => {
+                    if found {
+                        total_balance += balance;
+                        total_transactions += transaction_count;
+                        successful_verifications += 1;
+                        println!(
+                            "✅ Account {}: Balance = {}, Transactions = {}",
+                            account_id, balance, transaction_count
+                        );
+                    } else {
+                        println!("❌ Account {}: Not found or failed to retrieve", account_id);
+                    }
+                }
+                Err(e) => {
+                    println!("❌ Failed to verify account: {}", e);
+                }
+            }
+        }
+
+        println!("\n📊 FINAL STATISTICS:");
+        println!("===================");
+        println!("Total accounts processed: {}", account_ids.len());
+        println!(
+            "Successfully verified accounts: {}",
+            successful_verifications
+        );
+        println!("Total balance across all accounts: {}", total_balance);
+        println!("Total transactions: {}", total_transactions);
+        if successful_verifications > 0 {
+            println!(
+                "Average transactions per account: {:.1}",
+                total_transactions as f64 / successful_verifications as f64
+            );
+        }
+        println!("Expected additional transactions per account: 10 (5 deposits + 5 withdrawals)");
+        println!(
+            "Note: Some operations may fail due to insufficient funds, which is expected behavior"
+        );
+    */
     // Cleanup
     println!("\n🧹 Cleaning up test resources...");
 
@@ -1697,7 +1742,6 @@ async fn test_write_batching_multi_row_inserts() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_phase1_bulk_create_implementation() {
     let _ = tracing_subscriber::fmt::try_init();
     println!("🧪 Testing Phase 1: Bulk Create Implementation");

@@ -23,7 +23,7 @@ curl -X GET http://localhost:8083/connectors/banking-es-connector/status
 echo "✅ Debezium connector restarted with optimized configuration!"
 echo ""
 echo "🎯 Performance Optimizations Applied:"
-echo "   • poll.interval.ms: 100 (reduced from ~5000ms)"
+echo "   • poll.interval.ms: 25 (reduced from ~5000ms)"
 echo "   • max.queue.size: 8192 (increased buffer)"
 echo "   • max.batch.size: 2048 (larger batches)"
 echo "   • snapshot.delay.ms: 0 (no delay)"

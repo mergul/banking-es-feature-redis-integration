@@ -85,7 +85,7 @@ impl Default for OptimizationConfig {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct EnhancedCDCMetrics {
     // Existing metrics
     pub events_processed: std::sync::atomic::AtomicU64,
@@ -114,6 +114,9 @@ pub struct EnhancedCDCMetrics {
     pub consecutive_failures: std::sync::atomic::AtomicU64,
     pub last_error_time: std::sync::atomic::AtomicU64,
     pub error_rate: std::sync::atomic::AtomicU64,
+
+    // Duplicate detection
+    pub duplicate_events_skipped: std::sync::atomic::AtomicU64,
 
     // Integration helper status
     pub integration_helper_initialized: std::sync::atomic::AtomicBool,
@@ -200,10 +203,43 @@ impl Clone for EnhancedCDCMetrics {
             error_rate: std::sync::atomic::AtomicU64::new(
                 self.error_rate.load(std::sync::atomic::Ordering::Relaxed),
             ),
+            duplicate_events_skipped: std::sync::atomic::AtomicU64::new(
+                self.duplicate_events_skipped
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
             integration_helper_initialized: std::sync::atomic::AtomicBool::new(
                 self.integration_helper_initialized
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
+        }
+    }
+}
+
+impl Default for EnhancedCDCMetrics {
+    fn default() -> Self {
+        Self {
+            events_processed: std::sync::atomic::AtomicU64::new(0),
+            events_failed: std::sync::atomic::AtomicU64::new(0),
+            processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
+            total_latency_ms: std::sync::atomic::AtomicU64::new(0),
+            cache_invalidations: std::sync::atomic::AtomicU64::new(0),
+            projection_updates: std::sync::atomic::AtomicU64::new(0),
+            batches_processed: std::sync::atomic::AtomicU64::new(0),
+            circuit_breaker_trips: std::sync::atomic::AtomicU64::new(0),
+            consumer_restarts: std::sync::atomic::AtomicU64::new(0),
+            cleanup_cycles: std::sync::atomic::AtomicU64::new(0),
+            memory_usage_bytes: std::sync::atomic::AtomicU64::new(0),
+            active_connections: std::sync::atomic::AtomicU64::new(0),
+            queue_depth: std::sync::atomic::AtomicU64::new(0),
+            avg_batch_size: std::sync::atomic::AtomicU64::new(0),
+            p95_processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
+            p99_processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
+            throughput_per_second: std::sync::atomic::AtomicU64::new(0),
+            consecutive_failures: std::sync::atomic::AtomicU64::new(0),
+            last_error_time: std::sync::atomic::AtomicU64::new(0),
+            error_rate: std::sync::atomic::AtomicU64::new(0),
+            duplicate_events_skipped: std::sync::atomic::AtomicU64::new(0),
+            integration_helper_initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -766,7 +802,7 @@ impl CDCServiceManager {
             security_protocol: "PLAINTEXT".to_string(),
             sasl_mechanism: "PLAIN".to_string(),
             ssl_ca_location: None,
-            auto_offset_reset: "earliest".to_string(),
+            auto_offset_reset: "latest".to_string(),
             cache_invalidation_topic: "banking-es-cache-invalidation".to_string(),
             event_topic: "banking-es-events".to_string(),
         };

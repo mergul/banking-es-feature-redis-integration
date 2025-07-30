@@ -21,7 +21,7 @@
     "transforms.unwrap.delete.handling.mode": "rewrite",
     "transforms.unwrap.operation.header": "true",
 
-    "poll.interval.ms": "100",
+    "poll.interval.ms": "10",
     "max.queue.size": "8192",
     "max.batch.size": "2048",
     "snapshot.mode": "initial",

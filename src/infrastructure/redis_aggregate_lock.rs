@@ -2,12 +2,12 @@ use crate::infrastructure::redis_abstraction::{RedisClientTrait, RedisPoolConfig
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use redis::{aio::MultiplexedConnection, AsyncCommands, RedisError};
+use redis::{aio::MultiplexedConnection, AsyncCommands, RedisError, Value as RedisValue};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -30,14 +30,14 @@ impl Default for RedisLockConfig {
     fn default() -> Self {
         Self {
             connection_pool_size: 50,
-            lock_timeout_secs: 30,
-            batch_lock_timeout_secs: 60,
-            retry_attempts: 3,
-            retry_delay_ms: 100,
+            lock_timeout_secs: 30, // Increased to 30 seconds for better concurrency
+            batch_lock_timeout_secs: 45, // Increased to 45 seconds for batch operations
+            retry_attempts: 8,     // Increased from 5 to 8
+            retry_delay_ms: 500,   // Increased from 200 to 500ms
             enable_metrics: true,
             enable_lock_free_reads: true,
             max_batch_size: 100,
-            connection_timeout: Duration::from_secs(5),
+            connection_timeout: Duration::from_secs(10), // Increased from 5 to 10 seconds
             idle_timeout: Duration::from_secs(300),
         }
     }
@@ -236,12 +236,20 @@ impl RedisAggregateLock {
             .total_operations
             .fetch_add(1, Ordering::Relaxed);
 
+        println!(
+            "🔍 try_lock called for aggregate: {} with operation_type: {:?}",
+            aggregate_id, operation_type
+        );
+
         // Check if this is a read-only operation that can be lock-free
         if self.config.enable_lock_free_reads && operation_type == OperationType::Read {
             self.metrics
                 .lock_free_operations
                 .fetch_add(1, Ordering::Relaxed);
-            debug!("Lock-free read operation for aggregate: {}", aggregate_id);
+            println!(
+                "✅ Lock-free read operation for aggregate: {}",
+                aggregate_id
+            );
             return true;
         }
 
@@ -250,13 +258,19 @@ impl RedisAggregateLock {
             .insert(aggregate_id, operation_type);
 
         for attempt in 0..self.config.retry_attempts {
+            println!(
+                "🔍 Attempt {} to acquire lock for aggregate: {}",
+                attempt + 1,
+                aggregate_id
+            );
+
             match self.acquire_single_lock(aggregate_id).await {
                 Ok(acquired) => {
                     if acquired {
                         let duration = start.elapsed();
                         self.update_lock_metrics(duration, true);
                         self.lock_cache.insert(aggregate_id, Instant::now());
-                        info!(
+                        println!(
                             "🔒 Acquired lock for aggregate {} (attempt {})",
                             aggregate_id,
                             attempt + 1
@@ -266,7 +280,7 @@ impl RedisAggregateLock {
                         self.metrics
                             .lock_contention_count
                             .fetch_add(1, Ordering::Relaxed);
-                        warn!(
+                        println!(
                             "⚠️ Lock contention for aggregate {} (attempt {})",
                             aggregate_id,
                             attempt + 1
@@ -274,7 +288,7 @@ impl RedisAggregateLock {
                     }
                 }
                 Err(e) => {
-                    error!(
+                    println!(
                         "❌ Lock acquisition error for aggregate {}: {}",
                         aggregate_id, e
                     );
@@ -282,6 +296,10 @@ impl RedisAggregateLock {
             }
 
             if attempt < self.config.retry_attempts - 1 {
+                println!(
+                    "⏳ Waiting {}ms before retry...",
+                    self.config.retry_delay_ms
+                );
                 tokio::time::sleep(Duration::from_millis(self.config.retry_delay_ms)).await;
             }
         }
@@ -290,7 +308,7 @@ impl RedisAggregateLock {
         self.metrics
             .lock_timeout_count
             .fetch_add(1, Ordering::Relaxed);
-        error!(
+        println!(
             "❌ Failed to acquire lock for aggregate {} after {} attempts",
             aggregate_id, self.config.retry_attempts
         );
@@ -338,14 +356,21 @@ impl RedisAggregateLock {
 
         // Handle write operations that need locks
         if !write_aggregates.is_empty() {
-            let batch_results = self
+            match self
                 .acquire_batch_locks(write_aggregates, write_operation_types)
-                .await;
-
-            // Assign results to the correct positions
-            for (result_index, &original_index) in write_indices.iter().enumerate() {
-                if result_index < batch_results.len() {
-                    results[original_index] = batch_results[result_index];
+                .await
+            {
+                Ok(batch_results) => {
+                    // Assign results to the correct positions
+                    for (result_index, &original_index) in write_indices.iter().enumerate() {
+                        if result_index < batch_results.len() {
+                            results[original_index] = batch_results[result_index];
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Batch lock acquisition failed: {}", e);
+                    // Keep results as false (default)
                 }
             }
         }
@@ -458,88 +483,213 @@ impl RedisAggregateLock {
             .await?;
         let key = format!("lock:aggregate:{}", aggregate_id);
 
-        let result: Result<String, RedisError> = {
+        // Serialize process_id using bincode
+        let process_id_bytes = bincode::serialize(&self.process_id)?;
+
+        println!(
+            "🔍 Executing Redis command: SET {} {} NX EX {}",
+            key, self.process_id, self.config.lock_timeout_secs
+        );
+
+        let result: RedisValue = {
             let mut conn_guard = conn.get_mut_connection().await?;
             redis::cmd("SET")
                 .arg(&key)
-                .arg(&self.process_id)
+                .arg(&process_id_bytes)
                 .arg("NX")
                 .arg("EX")
                 .arg(self.config.lock_timeout_secs)
                 .query_async(&mut *conn_guard)
-                .await
+                .await?
         };
 
-        Ok(matches!(result, Ok(ref s) if s == "OK"))
+        let lock_acquired = match result {
+            RedisValue::Status(status) => {
+                let success = status == "OK" || status == "ok";
+                println!(
+                    "🔍 Redis response status: '{}', lock acquired: {}",
+                    status, success
+                );
+                success
+            }
+            RedisValue::Okay => {
+                println!("🔍 Redis response: OK, lock acquired: true");
+                true
+            }
+            RedisValue::Data(data) => {
+                println!("🔍 Found Data: {:?}", data);
+
+                // Try to parse as UTF-8 string first
+                if let Ok(s) = std::str::from_utf8(&data) {
+                    let success = s == "OK" || s == "ok";
+                    println!(
+                        "🔍 Parsed as UTF-8 string: '{}', treating as success: {}",
+                        s, success
+                    );
+                    success
+                } else {
+                    // Try to parse as bincode
+                    match bincode::deserialize::<String>(&data) {
+                        Ok(_) => {
+                            println!("🔍 Parsed as bincode string, treating as success: true");
+                            true
+                        }
+                        Err(e) => {
+                            println!("🔍 Failed to parse as bincode string: {:?}", e);
+                            // Try to parse as JSON
+                            if let Ok(json_value) =
+                                serde_json::from_slice::<serde_json::Value>(&data)
+                            {
+                                if let Some(s) = json_value.as_str() {
+                                    let success = s == "OK" || s == "ok";
+                                    println!(
+                                        "🔍 Parsed as JSON string: '{}', treating as success: {}",
+                                        s, success
+                                    );
+                                    success
+                                } else {
+                                    println!("🔍 JSON value is not a string");
+                                    false
+                                }
+                            } else {
+                                println!("🔍 Could not parse as string, bincode, or JSON");
+                                false
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                println!("🔍 Unexpected Redis response type: {:?}", result);
+                false
+            }
+        };
+
+        println!("🔍 Final lock acquisition result: {}", lock_acquired);
+        Ok(lock_acquired)
     }
 
     async fn acquire_batch_locks(
         &self,
         aggregate_ids: Vec<Uuid>,
         _operation_types: Vec<OperationType>,
-    ) -> Vec<bool> {
-        let mut results = vec![false; aggregate_ids.len()];
-        let mut conn = match self
+    ) -> Result<Vec<bool>> {
+        let mut conn = self
             .connection_pool
             .get_connection(&self.redis_client)
-            .await
-        {
-            Ok(conn) => conn,
-            Err(_) => {
-                return results;
-            }
-        };
+            .await?;
 
-        // Use Redis pipeline for batch operations
-        let mut pipe = redis::pipe();
+        let mut results = vec![false; aggregate_ids.len()];
+        let mut pipeline = redis::pipe();
 
-        for aggregate_id in &aggregate_ids {
+        // Serialize process_id using bincode
+        let process_id_bytes = bincode::serialize(&self.process_id)?;
+
+        // Add all lock commands to pipeline
+        for (i, &aggregate_id) in aggregate_ids.iter().enumerate() {
             let key = format!("lock:aggregate:{}", aggregate_id);
-            pipe.cmd("SET")
+            println!("🔍 Adding lock command for key: {}", key);
+
+            pipeline
+                .cmd("SET")
                 .arg(&key)
-                .arg(&self.process_id)
+                .arg(&process_id_bytes)
                 .arg("NX")
                 .arg("EX")
                 .arg(self.config.batch_lock_timeout_secs);
         }
 
-        let batch_results: Result<Vec<redis::Value>, RedisError> = {
-            let conn_guard = conn.get_mut_connection().await;
-            match conn_guard {
-                Ok(mut conn_guard) => pipe.query_async(&mut *conn_guard).await,
-                Err(_) => {
-                    return results;
-                }
-            }
+        println!(
+            "🔍 Executing batch lock pipeline with {} commands",
+            aggregate_ids.len()
+        );
+
+        let pipeline_results: Vec<RedisValue> = {
+            let mut conn_guard = conn.get_mut_connection().await?;
+            pipeline.query_async(&mut *conn_guard).await?
         };
 
-        match batch_results {
-            Ok(values) => {
-                for (i, value) in values.into_iter().enumerate() {
-                    // SET NX EX returns "OK" if lock was acquired, nil if already locked
-                    // This should match the logic in acquire_single_lock
-                    let acquired = match value {
-                        redis::Value::Status(status) => status == "OK",
-                        redis::Value::Nil => false, // Key already exists (lock held by someone else)
-                        _ => false,                 // Any other response is unexpected
-                    };
+        println!("🔍 Received {} pipeline results", pipeline_results.len());
 
-                    if i < results.len() {
-                        results[i] = acquired;
+        // Process each result
+        for (i, value) in pipeline_results.iter().enumerate() {
+            let success = match value {
+                RedisValue::Status(status) => {
+                    let success = status == "OK" || status == "ok";
+                    println!("🔍 Result {}: Status '{}', success: {}", i, status, success);
+                    success
+                }
+                RedisValue::Okay => {
+                    println!("🔍 Result {}: OK, success: true", i);
+                    true
+                }
+                RedisValue::Data(data) => {
+                    println!("🔍 Result {}: Found Data: {:?}", i, data);
 
-                        // Add acquired locks to cache
-                        if acquired {
-                            self.lock_cache.insert(aggregate_ids[i], Instant::now());
+                    // Try to parse as UTF-8 string first
+                    if let Ok(s) = std::str::from_utf8(&data) {
+                        let success = s == "OK" || s == "ok";
+                        println!(
+                            "🔍 Result {}: Parsed as UTF-8 string: '{}', success: {}",
+                            i, s, success
+                        );
+                        success
+                    } else {
+                        // Try to parse as bincode
+                        match bincode::deserialize::<String>(&data) {
+                            Ok(_) => {
+                                println!(
+                                    "🔍 Result {}: Parsed as bincode string, success: true",
+                                    i
+                                );
+                                true
+                            }
+                            Err(e) => {
+                                println!(
+                                    "🔍 Result {}: Failed to parse as bincode string: {:?}",
+                                    i, e
+                                );
+                                // Try to parse as JSON
+                                if let Ok(json_value) =
+                                    serde_json::from_slice::<serde_json::Value>(&data)
+                                {
+                                    if let Some(s) = json_value.as_str() {
+                                        let success = s == "OK" || s == "ok";
+                                        println!(
+                                            "🔍 Result {}: Parsed as JSON string: '{}', success: {}",
+                                            i, s, success
+                                        );
+                                        success
+                                    } else {
+                                        println!("🔍 Result {}: JSON value is not a string", i);
+                                        false
+                                    }
+                                } else {
+                                    println!(
+                                        "🔍 Result {}: Could not parse as string, bincode, or JSON",
+                                        i
+                                    );
+                                    false
+                                }
+                            }
                         }
                     }
                 }
-            }
-            Err(e) => {
-                error!("❌ Batch lock acquisition failed: {}", e);
-            }
+                _ => {
+                    println!("🔍 Result {}: Unexpected value type: {:?}", i, value);
+                    false
+                }
+            };
+
+            results[i] = success;
         }
 
-        results
+        println!(
+            "🔍 Batch lock acquisition completed: {}/{} successful",
+            results.iter().filter(|&&r| r).count(),
+            results.len()
+        );
+        Ok(results)
     }
 
     async fn release_single_lock(&self, aggregate_id: Uuid) -> Result<()> {

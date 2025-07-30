@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool};
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
@@ -231,16 +231,229 @@ impl ProjectionStoreTrait for ProjectionStore {
 }
 
 impl ProjectionStore {
-    pub fn new(pool: PgPool) -> Self {
-        // Create partitioned pools from the single pool
-        let pools = Arc::new(PartitionedPools {
-            write_pool: pool.clone(),
-            read_pool: pool,
-            config:
-                crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default(
-                ),
+    pub async fn new(config: ProjectionConfig) -> Result<Self, sqlx::Error> {
+        info!(
+            "🔧 [ProjectionStore] Creating projection store with optimized connection pooling..."
+        );
+
+        // Use default database URL for now
+        let database_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://localhost/test".to_string());
+
+        // OPTIMIZATION: Enhanced connection pooling with better timeout handling
+        let pool = PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .min_connections(config.min_connections)
+            .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
+            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
+            .test_before_acquire(true) // Test connections before use
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("SET statement_timeout = 10000; SET lock_timeout = 100; SET idle_in_transaction_session_timeout = 30000;")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await?;
+
+        // Create partitioned pools configuration
+        let pool_config =
+            crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig {
+                database_url,
+                write_pool_max_connections: config.max_connections / 3,
+                write_pool_min_connections: config.min_connections / 3,
+                read_pool_max_connections: config.max_connections * 2 / 3,
+                read_pool_min_connections: config.min_connections * 2 / 3,
+                acquire_timeout_secs: config.acquire_timeout_secs,
+                write_idle_timeout_secs: config.idle_timeout_secs,
+                read_idle_timeout_secs: config.idle_timeout_secs,
+                write_max_lifetime_secs: config.max_lifetime_secs,
+                read_max_lifetime_secs: config.max_lifetime_secs,
+            };
+
+        // OPTIMIZATION: Use partitioned pools for better performance
+        let partitioned_pools = Arc::new(PartitionedPools::new(pool_config).await?);
+
+        // Create update sender and receiver
+        let (update_sender, update_receiver) = mpsc::unbounded_channel::<ProjectionUpdate>();
+
+        // Create caches
+        let account_cache = Arc::new(RwLock::new(HashMap::new()));
+        let transaction_cache = Arc::new(RwLock::new(HashMap::new()));
+        let cache_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let metrics = Arc::new(ProjectionMetrics::default());
+
+        // Start background tasks
+        let pools_clone = partitioned_pools.clone();
+        let account_cache_clone = account_cache.clone();
+        let transaction_cache_clone = transaction_cache.clone();
+        let cache_version_clone = cache_version.clone();
+        let metrics_clone = metrics.clone();
+        let config_clone = config.clone();
+
+        tokio::spawn(async move {
+            Self::update_processor(
+                pools_clone,
+                update_receiver,
+                account_cache_clone,
+                transaction_cache_clone,
+                cache_version_clone,
+                metrics_clone,
+                config_clone,
+            )
+            .await;
         });
-        Self::from_pools_with_config(pools, ProjectionConfig::default())
+
+        // Start cache cleanup worker
+        let account_cache_cleanup = account_cache.clone();
+        let transaction_cache_cleanup = transaction_cache.clone();
+        tokio::spawn(async move {
+            Self::cache_cleanup_worker(account_cache_cleanup, transaction_cache_cleanup).await;
+        });
+
+        // Start metrics reporter
+        let metrics_reporter = metrics.clone();
+        tokio::spawn(async move {
+            Self::metrics_reporter(metrics_reporter).await;
+        });
+
+        Ok(Self {
+            pools: partitioned_pools,
+            account_cache,
+            transaction_cache,
+            update_sender,
+            cache_version,
+            metrics,
+            config,
+        })
+    }
+
+    // OPTIMIZATION: Enhanced connection acquisition with timeout and retry
+    async fn get_connection_with_timeout(
+        &self,
+    ) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, sqlx::Error> {
+        let connection_timeout = Duration::from_secs(5);
+        let max_retries = 3;
+        let retry_delay = Duration::from_millis(100);
+
+        for attempt in 1..=max_retries {
+            match tokio::time::timeout(connection_timeout, self.pools.write_pool.acquire()).await {
+                Ok(Ok(conn)) => {
+                    if attempt > 1 {
+                        info!(
+                            "🔧 [ProjectionStore] Connection acquired after {} attempts",
+                            attempt
+                        );
+                    }
+                    return Ok(conn);
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        "🔧 [ProjectionStore] Connection acquisition failed (attempt {}/{}): {}",
+                        attempt, max_retries, e
+                    );
+                    if attempt < max_retries {
+                        tokio::time::sleep(retry_delay).await;
+                    } else {
+                        return Err(e);
+                    }
+                }
+                Err(_) => {
+                    warn!(
+                        "🔧 [ProjectionStore] Connection acquisition timeout (attempt {}/{})",
+                        attempt, max_retries
+                    );
+                    if attempt < max_retries {
+                        tokio::time::sleep(retry_delay).await;
+                    } else {
+                        return Err(sqlx::Error::Configuration(
+                            "Connection acquisition timeout".into(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Err(sqlx::Error::Configuration(
+            "Failed to acquire connection after all retries".into(),
+        ))
+    }
+
+    // OPTIMIZATION: Batch upsert with connection pooling
+    async fn upsert_accounts_batch_with_pooling(
+        &self,
+        accounts: Vec<AccountProjection>,
+    ) -> Result<HashMap<Uuid, bool>> {
+        if accounts.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut results = HashMap::new();
+        let batch_size = 100; // Process in smaller batches for better connection utilization
+
+        for chunk in accounts.chunks(batch_size) {
+            let mut conn = self.get_connection_with_timeout().await?;
+
+            // OPTIMIZATION: Use transaction with timeout
+            let mut tx = conn.begin().await?;
+
+            // Set transaction timeout
+            sqlx::query("SET LOCAL statement_timeout = 15000") // 15 second timeout
+                .execute(&mut *tx)
+                .await?;
+
+            let mut chunk_results = HashMap::new();
+
+            for account in chunk {
+                let result = sqlx::query!(
+                    r#"
+                    INSERT INTO account_projections (id, owner_name, balance, is_active, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (id) DO UPDATE SET
+                        owner_name = EXCLUDED.owner_name,
+                        balance = EXCLUDED.balance,
+                        is_active = EXCLUDED.is_active,
+                        updated_at = EXCLUDED.updated_at
+                    "#,
+                    account.id,
+                    account.owner_name,
+                    account.balance,
+                    account.is_active,
+                    account.created_at,
+                    account.updated_at
+                )
+                .execute(&mut *tx)
+                .await;
+
+                chunk_results.insert(account.id, result.is_ok());
+            }
+
+            // Commit transaction with timeout
+            match tokio::time::timeout(Duration::from_secs(10), tx.commit()).await {
+                Ok(Ok(_)) => {
+                    results.extend(chunk_results);
+                }
+                Ok(Err(e)) => {
+                    error!("🔧 [ProjectionStore] Transaction commit failed: {}", e);
+                    // Mark all accounts in this chunk as failed
+                    for account in chunk {
+                        results.insert(account.id, false);
+                    }
+                }
+                Err(_) => {
+                    error!("🔧 [ProjectionStore] Transaction commit timeout");
+                    // Mark all accounts in this chunk as failed
+                    for account in chunk {
+                        results.insert(account.id, false);
+                    }
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     // pub fn new_test(pool: PgPool) -> Self {
@@ -737,23 +950,51 @@ impl ProjectionStore {
             "[ProjectionStore] bulk_upsert_accounts: about to upsert accounts: ids={:?}",
             account_ids
         );
-        for acc in accounts {
-            tracing::info!(
-                "[ProjectionStore] bulk_upsert_accounts: account_id={}, owner_name={}",
-                acc.id,
-                acc.owner_name
-            );
-        }
-        if accounts.is_empty() {
+
+        // Only deduplicate if we have more than 1 account to avoid unnecessary overhead
+        let accounts_to_upsert = if accounts.len() > 1 {
+            let mut unique_accounts = Vec::new();
+            let mut seen_ids = std::collections::HashSet::new();
+            let mut duplicate_count = 0;
+
+            for account in accounts {
+                if seen_ids.insert(account.id) {
+                    unique_accounts.push(account.clone());
+                } else {
+                    duplicate_count += 1;
+                }
+            }
+
+            // Only log if we actually found duplicates
+            if duplicate_count > 0 {
+                tracing::warn!(
+                    "[ProjectionStore] bulk_upsert_accounts: Found {} duplicates in batch of {} accounts",
+                    duplicate_count,
+                    accounts.len()
+                );
+            }
+
+            unique_accounts
+        } else {
+            accounts.to_vec()
+        };
+
+        if accounts_to_upsert.is_empty() {
             return Ok(());
         }
 
-        let ids: Vec<Uuid> = accounts.iter().map(|a| a.id).collect();
-        let owner_names: Vec<String> = accounts.iter().map(|a| a.owner_name.clone()).collect();
-        let balances: Vec<Decimal> = accounts.iter().map(|a| a.balance).collect();
-        let is_actives: Vec<bool> = accounts.iter().map(|a| a.is_active).collect();
-        let created_ats: Vec<DateTime<Utc>> = accounts.iter().map(|a| a.created_at).collect();
-        let updated_ats: Vec<DateTime<Utc>> = accounts.iter().map(|a| a.updated_at).collect();
+        let ids: Vec<Uuid> = accounts_to_upsert.iter().map(|a| a.id).collect();
+        let owner_names: Vec<String> = accounts_to_upsert
+            .iter()
+            .map(|a| a.owner_name.clone())
+            .collect();
+        let balances: Vec<Decimal> = accounts_to_upsert.iter().map(|a| a.balance).collect();
+        let is_actives: Vec<bool> = accounts_to_upsert.iter().map(|a| a.is_active).collect();
+        let created_ats: Vec<DateTime<Utc>> =
+            accounts_to_upsert.iter().map(|a| a.created_at).collect();
+        let updated_ats: Vec<DateTime<Utc>> =
+            accounts_to_upsert.iter().map(|a| a.updated_at).collect();
+
         let result = sqlx::query!(
             r#"
             INSERT INTO account_projections (id, owner_name, balance, is_active, created_at, updated_at)
@@ -773,6 +1014,7 @@ impl ProjectionStore {
         )
         .execute(&mut **tx)
         .await;
+
         match result {
             Ok(res) => {
                 tracing::info!(

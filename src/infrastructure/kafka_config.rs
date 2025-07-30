@@ -42,7 +42,7 @@ impl Default for KafkaConfig {
             group_id: "banking-es-group".to_string(),
             client_id: "banking-es-client".to_string(),
             topic_prefix: "banking-es".to_string(),
-            auto_offset_reset: "earliest".to_string(),
+            auto_offset_reset: "latest".to_string(),
             enable_auto_commit: true,
             session_timeout_ms: 30000,
             heartbeat_interval_ms: 10000,

@@ -41,7 +41,7 @@ pub struct CQRSAccountService {
 }
 
 impl CQRSAccountService {
-    pub fn new(
+    pub async fn new(
         event_store: Arc<dyn EventStoreTrait>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
         cache_service: Arc<dyn CacheServiceTrait>,
@@ -91,12 +91,15 @@ impl CQRSAccountService {
             );
 
             // Create partitioned batching service
-            let partitioned_batching = Arc::new(PartitionedBatching::new(
-                event_store.clone(),
-                projection_store.clone(),
-                event_store.get_partitioned_pools().write_pool_arc(),
-                outbox_batcher,
-            ));
+            let partitioned_batching = Arc::new(
+                PartitionedBatching::new(
+                    event_store.clone(),
+                    projection_store.clone(),
+                    event_store.get_partitioned_pools().write_pool_arc(),
+                    outbox_batcher,
+                )
+                .await,
+            );
             Some(partitioned_batching)
         } else {
             None
