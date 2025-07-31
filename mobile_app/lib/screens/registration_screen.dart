@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../api/auth_service.dart';
+import '../models/register_request.dart';
 
 class RegistrationScreen extends StatefulWidget {
   const RegistrationScreen({super.key});
@@ -8,9 +10,10 @@ class RegistrationScreen extends StatefulWidget {
 }
 
 class _RegistrationScreenState extends State<RegistrationScreen> {
-  final _ownerNameController = TextEditingController();
-  final _initialBalanceController = TextEditingController();
+  final _usernameController = TextEditingController();
+  final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _authService = AuthService();
 
   @override
   Widget build(BuildContext context) {
@@ -23,17 +26,17 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         child: Column(
           children: [
             TextField(
-              controller: _ownerNameController,
+              controller: _usernameController,
               decoration: const InputDecoration(
-                labelText: 'Owner Name',
+                labelText: 'Username',
               ),
             ),
             const SizedBox(height: 16.0),
             TextField(
-              controller: _initialBalanceController,
-              keyboardType: TextInputType.number,
+              controller: _emailController,
+              keyboardType: TextInputType.emailAddress,
               decoration: const InputDecoration(
-                labelText: 'Initial Balance',
+                labelText: 'Email',
               ),
             ),
             const SizedBox(height: 16.0),
@@ -46,8 +49,29 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
             ),
             const SizedBox(height: 32.0),
             ElevatedButton(
-              onPressed: () {
-                // TODO: Implement registration logic
+              onPressed: () async {
+                try {
+                  final request = RegisterRequest(
+                    username: _usernameController.text,
+                    email: _emailController.text,
+                    password: _passwordController.text,
+                  );
+                  
+                  await _authService.register(request);
+                  
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Registration successful!')),
+                    );
+                    Navigator.pop(context);
+                  }
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Registration failed: $e')),
+                    );
+                  }
+                }
               },
               child: const Text('Register'),
             ),

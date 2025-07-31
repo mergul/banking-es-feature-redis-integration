@@ -342,11 +342,11 @@ impl OutboxCleaner {
         let stats_query = r#"
             SELECT 
                 schemaname,
-                tablename,
+                relname,
                 n_dead_tup,
                 n_live_tup
             FROM pg_stat_user_tables 
-            WHERE tablename = 'kafka_outbox_cdc'
+            WHERE relname = 'kafka_outbox_cdc'
         "#;
 
         let row = sqlx::query(stats_query)

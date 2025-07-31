@@ -311,11 +311,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cqrs_router =
         create_cqrs_router(cqrs_service.clone(), service_context.auth_service.clone());
 
+    // Create auth router with proper state
+    let auth_router = Router::new()
+        .route("/api/auth/register", post(crate::web::handlers::register))
+        .route("/api/auth/login", post(crate::web::handlers::login))
+        .route("/api/auth/logout", post(crate::web::handlers::logout))
+        .with_state((cqrs_service.clone(), service_context.auth_service.clone()));
+
     // The main app is now just the CQRS router, potentially with some global/static routes.
     // For now, the root HTML page lists both old and new endpoints. This should be updated later.
     let app = Router::new()
         .route("/", get(root)) // Keep the root informational page for now
         .merge(cqrs_router)
+        .merge(auth_router)
         // Global middleware can still be applied here if needed, outside of create_cqrs_router
         .layer(
             ServiceBuilder::new()
