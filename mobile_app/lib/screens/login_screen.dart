@@ -13,8 +13,13 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
+  bool _isLoading = false;
 
   Future<void> _login() async {
+    setState(() {
+      _isLoading = true;
+    });
+
     final authProvider = Provider.of<AuthProvider>(context, listen: false);
     try {
       await authProvider.login(
@@ -27,6 +32,12 @@ class _LoginScreenState extends State<LoginScreen> {
           content: Text('Login Failed'),
         ),
       );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -55,10 +66,13 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             const SizedBox(height: 32.0),
-            ElevatedButton(
-              onPressed: _login,
-              child: const Text('Login'),
-            ),
+            if (_isLoading)
+              const CircularProgressIndicator()
+            else
+              ElevatedButton(
+                onPressed: _login,
+                child: const Text('Login'),
+              ),
             TextButton(
               onPressed: () {
                 Navigator.of(context).push(MaterialPageRoute(

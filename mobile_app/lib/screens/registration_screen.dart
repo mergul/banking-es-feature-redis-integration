@@ -14,6 +14,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _authService = AuthService();
+  bool _isLoading = false;
 
   @override
   Widget build(BuildContext context) {
@@ -48,33 +49,45 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
               ),
             ),
             const SizedBox(height: 32.0),
-            ElevatedButton(
-              onPressed: () async {
-                try {
-                  final request = RegisterRequest(
-                    username: _usernameController.text,
-                    email: _emailController.text,
-                    password: _passwordController.text,
-                  );
-
-                  await _authService.register(request);
-
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Registration successful!')),
+            if (_isLoading)
+              const CircularProgressIndicator()
+            else
+              ElevatedButton(
+                onPressed: () async {
+                  setState(() {
+                    _isLoading = true;
+                  });
+                  try {
+                    final request = RegisterRequest(
+                      username: _usernameController.text,
+                      email: _emailController.text,
+                      password: _passwordController.text,
                     );
-                    Navigator.pop(context);
+
+                    await _authService.register(request);
+
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Registration successful!')),
+                      );
+                      Navigator.pop(context);
+                    }
+                  } catch (e) {
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Registration failed: $e')),
+                      );
+                    }
+                  } finally {
+                    if (mounted) {
+                      setState(() {
+                        _isLoading = false;
+                      });
+                    }
                   }
-                } catch (e) {
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Registration failed: $e')),
-                    );
-                  }
-                }
-              },
-              child: const Text('Register'),
-            ),
+                },
+                child: const Text('Register'),
+              ),
           ],
         ),
       ),
