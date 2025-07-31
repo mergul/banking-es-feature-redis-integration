@@ -31,7 +31,12 @@ pub async fn register(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // Step 1: Create auth user
     let auth_result = auth_service
-        .register_user(&payload.username, &payload.email, &payload.password, vec![])
+        .register_user(
+            &payload.username,
+            &payload.email,
+            &payload.password,
+            vec![crate::infrastructure::auth::UserRole::Customer],
+        )
         .await;
 
     match auth_result {

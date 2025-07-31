@@ -21,13 +21,28 @@ class AuthProvider with ChangeNotifier {
       final loginRequest = LoginRequest(username: username, password: password);
       final loginResponse = await _authService.login(loginRequest);
       
-      _token = loginResponse.token['access_token']?.toString();
+      // Extract access_token safely
+      final accessToken = loginResponse.token['access_token'];
+      _token = accessToken?.toString() ?? '';
       _username = loginResponse.username;
       _loginResponse = loginResponse;
       _isAuthenticated = true;
       
       print('🔐 Login successful for user: $_username');
       print('🔑 Token: ${_token?.substring(0, 20)}...');
+      print('🔑 Full Token: $_token');
+      print('🔑 Token type: ${_token.runtimeType}');
+      print('🔑 Token length: ${_token?.length}');
+      print('🔑 Raw access_token: $accessToken');
+      print('🔑 Raw access_token type: ${accessToken.runtimeType}');
+      
+      // Debug: Check if accessToken is a Map
+      if (accessToken is Map) {
+        print('🔍 accessToken is a Map, extracting access_token value');
+        final actualToken = accessToken['access_token']?.toString() ?? '';
+        print('🔍 Actual token: ${actualToken.substring(0, 20)}...');
+        _token = actualToken;
+      }
       
       await _saveAuthData();
       notifyListeners();
@@ -48,9 +63,15 @@ class AuthProvider with ChangeNotifier {
 
   Future<void> _saveAuthData() async {
     final prefs = await SharedPreferences.getInstance();
-    if (_token != null) {
-      await prefs.setString('token', _token!);
-      print('💾 Saved token: ${_token!.substring(0, 20)}...');
+    if (_token != null && _token!.isNotEmpty) {
+      // Ensure token is a clean string
+      final cleanToken = _token!.trim();
+      await prefs.setString('token', cleanToken);
+      print('💾 Saved token: ${cleanToken.substring(0, 20)}...');
+      print('💾 Token type saved: ${cleanToken.runtimeType}');
+      print('💾 Token length saved: ${cleanToken.length}');
+    } else {
+      print('⚠️ Token is null or empty, not saving');
     }
     if (_username != null) {
       await prefs.setString('username', _username!);
@@ -77,6 +98,8 @@ class AuthProvider with ChangeNotifier {
     
     print('🔄 Auto login - Token: ${_token?.substring(0, 20)}...');
     print('🔄 Auto login - Username: $_username');
+    print('🔄 Auto login - Token type: ${_token.runtimeType}');
+    print('🔄 Auto login - Token length: ${_token?.length}');
     
     notifyListeners();
   }

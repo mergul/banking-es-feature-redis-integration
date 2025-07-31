@@ -240,8 +240,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     onPressed: () async {
                       try {
                         final username = authProvider.username ?? '';
+                        final token = authProvider.token ?? '';
+                        print('🔑 Full token from AuthProvider: $token');
                         await _accountService.createAdditionalAccount(token, username, 500.0);
-                        await _loadUserAccounts(); // Reload accounts
+                        
+                        // Wait a bit for projection to update
+                        await Future.delayed(const Duration(milliseconds: 1000));
+                        
+                        // Reload accounts and update state
+                        await _loadUserAccounts();
+                        
+                        // Force rebuild to show new account
+                        setState(() {});
+                        
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Additional account created successfully!')),
                         );

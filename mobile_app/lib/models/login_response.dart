@@ -14,9 +14,15 @@ class LoginResponse {
   });
 
   factory LoginResponse.fromJson(Map<String, dynamic> json) {
+    // Parse token more carefully
+    Map<String, dynamic> tokenMap = {};
+    if (json['token'] is Map) {
+      tokenMap = Map<String, dynamic>.from(json['token']);
+    }
+    
     return LoginResponse(
       message: json['message']?.toString() ?? '',
-      token: json['token'] is Map ? Map<String, dynamic>.from(json['token']) : {},
+      token: tokenMap,
       username: json['username']?.toString() ?? '',
       accounts: (json['accounts'] as List<dynamic>?)
           ?.map((account) => AccountInfo.fromJson(account))

@@ -174,8 +174,8 @@ impl CQRSAccountService {
     ) -> Result<Uuid, AccountError> {
         let start_time = std::time::Instant::now();
         info!(
-            "Creating account for owner: {} with initial balance: {}",
-            owner_name, initial_balance
+            "Creating account for auth_user_id: {} with owner_name: {} and initial balance: {}",
+            auth_user_id, owner_name, initial_balance
         );
 
         self.metrics
@@ -184,6 +184,8 @@ impl CQRSAccountService {
 
         // Use write batching if available, otherwise fall back to direct handler
         let result = if let Some(ref batching_service) = self.write_batching_service {
+            // For now, use owner_name as the identifier since auth_user_id is not yet integrated
+            // TODO: Integrate auth_user_id properly in the future
             let operation = WriteOperation::CreateAccount {
                 account_id: Uuid::new_v4(),
                 owner_name: owner_name.clone(),

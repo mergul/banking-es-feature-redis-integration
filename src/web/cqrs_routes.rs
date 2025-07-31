@@ -1,21 +1,60 @@
 use crate::application::services::CQRSAccountService;
-use crate::infrastructure::auth::AuthService;
+use crate::infrastructure::auth::{AuthService, Claims, TokenType};
 use axum::{
+    extract::State,
+    http::{Request, StatusCode},
+    middleware,
+    response::Response,
     routing::{get, post},
     Router,
 };
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+async fn auth_middleware(
+    State(auth_service): State<Arc<AuthService>>,
+    request: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<Response, StatusCode> {
+    // Extract token from Authorization header
+    let auth_header = request
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+
+    match auth_header {
+        Some(token) => {
+            // Validate token
+            match auth_service.validate_token(token, TokenType::Access).await {
+                Ok(_claims) => {
+                    // Token is valid, proceed with request
+                    Ok(next.run(request).await)
+                }
+                Err(_) => {
+                    // Token is invalid
+                    Err(StatusCode::UNAUTHORIZED)
+                }
+            }
+        }
+        None => {
+            // No Authorization header
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
 pub fn create_cqrs_router(
     account_service: Arc<CQRSAccountService>,
-    _auth_service: Arc<AuthService>,
+    auth_service: Arc<AuthService>,
 ) -> Router {
     Router::new()
-        // Account operations (Commands)
+        // Account operations (Commands) - Require authentication
         .route(
             "/api/cqrs/accounts",
             post(crate::web::cqrs_handlers::create_account),
@@ -32,7 +71,7 @@ pub fn create_cqrs_router(
             "/api/cqrs/accounts/{id}/close",
             post(crate::web::cqrs_handlers::close_account),
         )
-        // Account queries
+        // Account queries - Require authentication
         .route(
             "/api/cqrs/accounts",
             get(crate::web::cqrs_handlers::get_all_accounts),
@@ -53,17 +92,22 @@ pub fn create_cqrs_router(
             "/api/cqrs/accounts/{id}/transactions",
             get(crate::web::cqrs_handlers::get_account_transactions),
         )
-        // Batch operations
+        // Batch operations - Require authentication
         .route(
             "/api/cqrs/transactions/batch",
             post(crate::web::cqrs_handlers::batch_transactions),
         )
-        // Health and metrics
+        // Health and metrics - No auth required
         .route(
             "/api/cqrs/health",
             get(crate::web::cqrs_handlers::health_check),
         )
         .route("/api/cqrs/metrics", get(crate::web::cqrs_handlers::metrics))
+        // Add auth middleware for protected routes
+        .layer(middleware::from_fn_with_state(
+            auth_service.clone(),
+            auth_middleware,
+        ))
         // Add optimized middleware stack
         .layer(
             ServiceBuilder::new()
