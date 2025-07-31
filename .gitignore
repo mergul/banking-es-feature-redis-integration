@@ -1,4 +1,9 @@
-/target
-
-.fake
+# Rust
+/target/
 *.log
+logs/
+dump.rdb
+mobile_app/.dart_tool/
+mobile_app/build/
+.vscode/
+.idea/
