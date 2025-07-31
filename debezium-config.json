@@ -30,10 +30,12 @@
     "heartbeat.interval.ms": "1000",
     "include.schema.changes": "false",
     "provide.transaction.metadata": "false",
-    "tombstones.on.delete": "false",
+    "tombstones.on.delete": "true",
     "database.history.kafka.recovery.attempts": "3",
     "database.history.kafka.recovery.poll.interval.ms": "100",
     "database.history.store.only.captured.tables.ddl": "true",
-    "database.history.skip.unparseable.ddl": "true"
+    "database.history.skip.unparseable.ddl": "true",
+    "transforms.outbox.table.field.event.timestamp": "deleted_at",
+    "transforms.outbox.route.tombstone.on.empty.payload": "true"
   }
 }

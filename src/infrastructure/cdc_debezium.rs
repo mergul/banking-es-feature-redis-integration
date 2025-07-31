@@ -137,6 +137,11 @@ impl CDCOutboxRepository {
         Self { pools }
     }
 
+    /// Get access to the underlying pools
+    pub fn get_pools(&self) -> &Arc<PartitionedPools> {
+        &self.pools
+    }
+
     /// Create optimized outbox table for CDC
     pub async fn create_cdc_outbox_table(&self) -> Result<()> {
         let write_pool = self.pools.select_pool(OperationType::Write);
@@ -211,7 +216,21 @@ impl CDCOutboxRepository {
                 "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
                 "transforms.unwrap.drop.tombstones": false,
                 "transforms.unwrap.delete.handling.mode": "rewrite",
-                "transforms.unwrap.operation.header": true
+                "transforms.unwrap.operation.header": true,
+                "transforms.outbox.table.field.event.timestamp": "deleted_at",
+                "transforms.outbox.route.tombstone.on.empty.payload": "true",
+                "tombstones.on.delete": "true",
+                "max.queue.size": "8192",
+                "max.batch.size": "2048",
+                "snapshot.delay.ms": "0",
+                "snapshot.fetch.size": "1024",
+                "heartbeat.interval.ms": "1000",
+                "include.schema.changes": "false",
+                "provide.transaction.metadata": "false",
+                "database.history.kafka.recovery.attempts": "3",
+                "database.history.kafka.recovery.poll.interval.ms": "100",
+                "database.history.store.only.captured.tables.ddl": "true",
+                "database.history.skip.unparseable.ddl": "true"
             }
         })
     }

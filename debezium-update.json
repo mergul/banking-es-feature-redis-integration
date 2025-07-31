@@ -17,5 +17,7 @@
   "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
   "transforms.unwrap.drop.tombstones": "false",
   "transforms.unwrap.delete.handling.mode": "rewrite",
-  "transforms.unwrap.operation.header": "true"
+  "transforms.unwrap.operation.header": "true",
+  "transforms.outbox.table.field.event.timestamp": "deleted_at",
+  "transforms.outbox.route.tombstone.on.empty.payload": "true"
 }

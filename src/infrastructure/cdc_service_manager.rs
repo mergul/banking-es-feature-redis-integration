@@ -2,7 +2,9 @@ use crate::infrastructure::cache_service::CacheServiceTrait;
 use crate::infrastructure::cdc_debezium::{CDCConsumer, CDCOutboxRepository, DebeziumConfig};
 use crate::infrastructure::cdc_event_processor::UltraOptimizedCDCEventProcessor;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
+use crate::infrastructure::outbox_cleanup_service::{CleanupConfig, CleanupMetrics, OutboxCleaner}; // Added new cleanup service
 use crate::infrastructure::projections::ProjectionStoreTrait;
+use crate::infrastructure::PoolSelector;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -44,6 +46,9 @@ pub struct CDCServiceManager {
     // Consistency manager for projection synchronization
     consistency_manager:
         Option<Arc<crate::infrastructure::consistency_manager::ConsistencyManager>>,
+
+    // New advanced outbox cleanup service
+    outbox_cleaner: Option<Arc<OutboxCleaner>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -288,7 +293,14 @@ impl CDCServiceManager {
             health_checker,
             optimization_config,
             consistency_manager,
+            outbox_cleaner: None,
         })
+    }
+
+    /// Add a task to the task list
+    async fn add_task(&self, handle: tokio::task::JoinHandle<()>) {
+        let mut tasks = self.tasks.write().await;
+        tasks.push(handle);
     }
 
     /// Start the CDC service with optimized resource management
@@ -315,6 +327,13 @@ impl CDCServiceManager {
         tracing::info!("CDCServiceManager: Initializing infrastructure...");
         self.initialize_infrastructure().await?;
         tracing::info!("CDCServiceManager: Infrastructure initialized successfully");
+
+        // Initialize advanced outbox cleanup service
+        tracing::info!("CDCServiceManager: Initializing advanced outbox cleanup service...");
+        self.initialize_outbox_cleaner().await?;
+        tracing::info!(
+            "CDCServiceManager: Advanced outbox cleanup service initialized successfully"
+        );
 
         // Start core services
         tracing::info!("CDCServiceManager: Starting core services...");
@@ -408,25 +427,89 @@ impl CDCServiceManager {
         Ok(())
     }
 
+    /// Initialize the advanced outbox cleanup service
+    async fn initialize_outbox_cleaner(&mut self) -> Result<()> {
+        let pool = self
+            .outbox_repo
+            .get_pools()
+            .select_pool(crate::infrastructure::connection_pool_partitioning::OperationType::Write)
+            .clone();
+
+        let cleanup_config = CleanupConfig {
+            retention_hours: 24,            // Keep records for 24 hours
+            safety_margin_minutes: 30,      // 30 minute safety margin
+            cleanup_interval_minutes: 60,   // Run every hour
+            batch_size: 1000,               // Process 1000 records per batch
+            max_batches_per_cycle: 10,      // Max 10 batches per cycle
+            batch_delay_ms: 100,            // 100ms delay between batches
+            max_cycle_duration_minutes: 15, // Max 15 minutes per cycle
+            enable_vacuum: true,            // Enable vacuum for space reclamation
+        };
+
+        let cleaner = OutboxCleaner::new(pool, cleanup_config);
+        self.outbox_cleaner = Some(Arc::new(cleaner));
+
+        info!("✅ Advanced outbox cleanup service initialized");
+        Ok(())
+    }
+
     /// Start monitoring and maintenance tasks
     async fn start_monitoring_tasks(&self) -> Result<()> {
-        let mut tasks = self.tasks.write().await;
+        tracing::info!("CDC Service Manager: Starting monitoring tasks...");
 
-        // Health check task
+        // Start health monitoring
         let health_handle = self.start_health_monitor().await?;
-        tasks.push(health_handle);
+        self.add_task(health_handle).await;
 
-        // Cleanup task
-        let cleanup_handle = self.start_cleanup_task().await?;
-        tasks.push(cleanup_handle);
-
-        // Metrics collector
+        // Start metrics collection
         let metrics_handle = self.start_metrics_collector().await?;
-        tasks.push(metrics_handle);
+        self.add_task(metrics_handle).await;
 
-        // Circuit breaker monitor
+        // Start circuit breaker monitoring
         let circuit_breaker_handle = self.start_circuit_breaker_monitor().await?;
-        tasks.push(circuit_breaker_handle);
+        self.add_task(circuit_breaker_handle).await;
+
+        // Start advanced outbox cleanup service if available
+        if let Some(cleaner) = &self.outbox_cleaner {
+            let cleaner_arc = cleaner.clone();
+            let shutdown_token = self.shutdown_token.clone();
+
+            let cleanup_handle = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Run every hour
+
+                loop {
+                    tokio::select! {
+                        _ = shutdown_token.cancelled() => {
+                            info!("🛑 Outbox cleanup service shutting down");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            match cleaner_arc.cleanup_cycle().await {
+                                Ok(metrics) => {
+                                    info!(
+                                        "Advanced cleanup cycle completed - marked: {}, deleted: {}, duration: {}ms",
+                                        metrics.marked_for_deletion,
+                                        metrics.physically_deleted,
+                                        metrics.cleanup_duration_ms
+                                    );
+                                }
+                                Err(e) => {
+                                    error!("Advanced cleanup cycle failed: {:?}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            self.add_task(cleanup_handle).await;
+            info!("✅ Advanced outbox cleanup service started");
+        } else {
+            // Fallback to legacy cleanup
+            let cleanup_handle = self.start_cleanup_task().await?;
+            self.add_task(cleanup_handle).await;
+            info!("✅ Legacy outbox cleanup service started");
+        }
 
         tracing::info!("CDC Service Manager: ✅ Monitoring tasks started");
         Ok(())
@@ -701,7 +784,7 @@ impl CDCServiceManager {
         tracing::info!("🛑 CDCServiceManager: About to cancel shutdown_token");
         self.shutdown_token.cancel();
         tracing::info!("🛑 CDCServiceManager: shutdown_token.cancel() called");
-        info!("🛑 CDCServiceManager: Starting graceful shutdown of CDC Service Manager");
+        info!("�� CDCServiceManager: Starting graceful shutdown of CDC Service Manager");
         tracing::info!("🛑 CDCServiceManager: About to cancel shutdown_token");
         self.shutdown_token.cancel();
         tracing::info!("🛑 CDCServiceManager: shutdown_token.cancel() called");

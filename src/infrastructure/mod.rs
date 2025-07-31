@@ -27,6 +27,7 @@ pub mod lock_free_operations;
 pub mod logging;
 pub mod middleware;
 pub mod outbox; // Added
+pub mod outbox_cleanup_service; // Added new cleanup service
 pub mod outbox_poller;
 pub mod redis_aggregate_lock;
 pub mod redis_lock_monitor;
@@ -62,6 +63,9 @@ pub use middleware::*;
 pub use outbox::{
     OutboxMessage, OutboxRepositoryTrait, PersistedOutboxMessage, PostgresOutboxRepository,
 }; // Added PostgresOutboxRepository
+pub use outbox_cleanup_service::{
+    CleanupConfig, CleanupHealthCheck, CleanupMetrics, OutboxCleaner, OutboxStats,
+}; // Added new cleanup service exports
 pub use outbox_poller::{OutboxPollerConfig, OutboxPollingService};
 
 pub use projections::ProjectionStore;
