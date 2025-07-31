@@ -46,18 +46,5 @@ class AuthService {
     }
   }
 
-  Future<void> createAdditionalAccount(String ownerName, double initialBalance) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/accounts'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'owner_name': ownerName,
-        'initial_balance': initialBalance,
-      }),
-    );
 
-    if (response.statusCode != 200) {
-      throw Exception('Failed to create additional account');
-    }
-  }
 }

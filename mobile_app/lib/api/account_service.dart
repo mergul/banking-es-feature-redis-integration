@@ -104,4 +104,22 @@ class AccountService {
       throw Exception('Failed to withdraw');
     }
   }
+
+  Future<void> createAdditionalAccount(String token, String ownerName, double initialBalance) async {
+    final response = await http.post(
+      Uri.parse(baseUrl),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode({
+        'owner_name': ownerName,
+        'initial_balance': initialBalance,
+      }),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Failed to create additional account');
+    }
+  }
 }

@@ -162,6 +162,16 @@ impl CQRSAccountService {
         owner_name: String,
         initial_balance: Decimal,
     ) -> Result<Uuid, AccountError> {
+        self.create_account_with_auth_user(Uuid::nil(), owner_name, initial_balance)
+            .await
+    }
+
+    pub async fn create_account_with_auth_user(
+        &self,
+        auth_user_id: Uuid,
+        owner_name: String,
+        initial_balance: Decimal,
+    ) -> Result<Uuid, AccountError> {
         let start_time = std::time::Instant::now();
         info!(
             "Creating account for owner: {} with initial balance: {}",

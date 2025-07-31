@@ -4,6 +4,7 @@ import '../providers/account_provider.dart';
 import '../providers/auth_provider.dart';
 import '../models/login_response.dart';
 import '../api/auth_service.dart';
+import '../api/account_service.dart';
 import 'transfer_screen.dart';
 import 'transaction_history_screen.dart';
 
@@ -19,6 +20,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   AccountInfo? selectedAccount;
   bool isLoading = true;
   final AuthService _authService = AuthService();
+  final AccountService _accountService = AccountService();
 
   @override
   void initState() {
@@ -238,7 +240,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     onPressed: () async {
                       try {
                         final username = authProvider.username ?? '';
-                        await _authService.createAdditionalAccount(username, 500.0);
+                        await _accountService.createAdditionalAccount(token, username, 500.0);
                         await _loadUserAccounts(); // Reload accounts
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Additional account created successfully!')),

@@ -18,12 +18,6 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CreateAccountRequest {
-    pub owner_name: String,
-    pub initial_balance: Decimal,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterRequest {
     pub username: String,
     pub email: String,
@@ -41,24 +35,32 @@ pub async fn register(
         .await;
 
     match auth_result {
-        Ok(_) => {
-            info!("Auth user registered successfully: {}", payload.username);
+        Ok(auth_user) => {
+            info!(
+                "Auth user registered successfully: {} with ID: {}",
+                payload.username, auth_user.id
+            );
 
-            // Step 2: Create banking account for this user
+            // Step 2: Create banking account for this user using auth_user.id
             let initial_balance = Decimal::new(1000, 0); // Start with $1000
             let banking_account_result = cqrs_service
-                .create_account(payload.username.clone(), initial_balance)
+                .create_account_with_auth_user(
+                    auth_user.id,
+                    payload.username.clone(),
+                    initial_balance,
+                )
                 .await;
 
             match banking_account_result {
                 Ok(account_id) => {
                     info!(
-                        "Banking account created successfully for user: {} with account_id: {}",
-                        payload.username, account_id
+                        "Banking account created successfully for user: {} with account_id: {} and auth_user_id: {}",
+                        payload.username, account_id, auth_user.id
                     );
                     Ok(Json(json!({
                         "message": "User and banking account created successfully",
                         "username": payload.username,
+                        "auth_user_id": auth_user.id,
                         "account_id": account_id,
                         "initial_balance": initial_balance
                     })))
@@ -190,39 +192,6 @@ pub async fn get_user_accounts(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": "Failed to get user accounts",
-                    "details": format!("{}", e)
-                })),
-            ))
-        }
-    }
-}
-
-pub async fn create_additional_account(
-    State((cqrs_service, _)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
-    Json(payload): Json<CreateAccountRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let owner_name = payload.owner_name.clone();
-    let initial_balance = payload.initial_balance;
-
-    match cqrs_service
-        .create_account(owner_name.clone(), initial_balance)
-        .await
-    {
-        Ok(account_id) => {
-            info!("Additional account created successfully: {}", account_id);
-            Ok(Json(json!({
-                "message": "Additional account created successfully",
-                "account_id": account_id,
-                "owner_name": owner_name,
-                "initial_balance": initial_balance
-            })))
-        }
-        Err(e) => {
-            error!("Failed to create additional account: {}", e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Failed to create additional account",
                     "details": format!("{}", e)
                 })),
             ))
