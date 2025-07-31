@@ -56,9 +56,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                     email: _emailController.text,
                     password: _passwordController.text,
                   );
-                  
+
                   await _authService.register(request);
-                  
+
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Registration successful!')),

@@ -57,19 +57,54 @@ pub struct RegisterRequest {
 
 // Deprecated handlers - use CQRS handlers instead
 pub async fn register(
-    State((_, auth_service)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
+    State((cqrs_service, auth_service)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    match auth_service
+    // Step 1: Create auth user
+    let auth_result = auth_service
         .register_user(&payload.username, &payload.email, &payload.password, vec![])
-        .await
-    {
+        .await;
+
+    match auth_result {
         Ok(_) => {
-            info!("User registered successfully: {}", payload.username);
-            Ok(Json(json!({
-                "message": "User registered successfully",
-                "username": payload.username
-            })))
+            info!("Auth user registered successfully: {}", payload.username);
+
+            // Step 2: Create banking account for this user
+            let initial_balance = Decimal::new(1000, 0); // Start with $1000
+            let banking_account_result = cqrs_service
+                .create_account(payload.username.clone(), initial_balance)
+                .await;
+
+            match banking_account_result {
+                Ok(account_id) => {
+                    info!(
+                        "Banking account created successfully for user: {} with account_id: {}",
+                        payload.username, account_id
+                    );
+                    Ok(Json(json!({
+                        "message": "User and banking account created successfully",
+                        "username": payload.username,
+                        "account_id": account_id,
+                        "initial_balance": initial_balance
+                    })))
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to create banking account for user {}: {}",
+                        payload.username, e
+                    );
+                    // Auth user was created but banking account failed
+                    // We could delete the auth user here, but for now just return error
+                    Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "Registration partially failed",
+                            "message": "Auth user created but banking account creation failed",
+                            "details": e.to_string()
+                        })),
+                    ))
+                }
+            }
         }
         Err(e) => {
             error!("Registration failed: {}", e);
@@ -85,7 +120,7 @@ pub async fn register(
 }
 
 pub async fn login(
-    State((_, auth_service)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
+    State((cqrs_service, auth_service)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     match auth_service
@@ -94,11 +129,80 @@ pub async fn login(
     {
         Ok(token) => {
             info!("User logged in successfully: {}", payload.username);
-            Ok(Json(json!({
-                "message": "Login successful",
-                "token": token,
-                "username": payload.username
-            })))
+
+            // Find all banking accounts for this user
+            let accounts_result = cqrs_service.get_all_accounts().await;
+
+            match accounts_result {
+                Ok(accounts) => {
+                    // Find all accounts owned by this user
+                    let user_accounts: Vec<_> = accounts
+                        .into_iter()
+                        .filter(|account| account.owner_name == payload.username)
+                        .collect();
+
+                    if !user_accounts.is_empty() {
+                        info!(
+                            "Found {} banking accounts for user: {}",
+                            user_accounts.len(),
+                            payload.username
+                        );
+
+                        // Determine primary account (highest balance or first active)
+                        let primary_account = user_accounts
+                            .iter()
+                            .filter(|acc| acc.is_active)
+                            .max_by_key(|acc| acc.balance)
+                            .or(user_accounts.first());
+
+                        // Convert accounts to JSON format
+                        let accounts_json: Vec<serde_json::Value> = user_accounts
+                            .iter()
+                            .map(|account| {
+                                let is_primary =
+                                    primary_account.map(|p| p.id == account.id).unwrap_or(false);
+                                json!({
+                                    "id": account.id,
+                                    "balance": account.balance,
+                                    "is_active": account.is_active,
+                                    "is_primary": is_primary,
+                                    "created_at": account.created_at
+                                })
+                            })
+                            .collect();
+
+                        Ok(Json(json!({
+                            "message": "Login successful",
+                            "token": token,
+                            "username": payload.username,
+                            "accounts": accounts_json,
+                            "primary_account_id": primary_account.map(|acc| acc.id)
+                        })))
+                    } else {
+                        warn!("No banking accounts found for user: {}", payload.username);
+                        Ok(Json(json!({
+                            "message": "Login successful (no banking accounts found)",
+                            "token": token,
+                            "username": payload.username,
+                            "accounts": [],
+                            "primary_account_id": null
+                        })))
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to get accounts for user {}: {}",
+                        payload.username, e
+                    );
+                    Ok(Json(json!({
+                        "message": "Login successful (failed to get account info)",
+                        "token": token,
+                        "username": payload.username,
+                        "accounts": [],
+                        "primary_account_id": null
+                    })))
+                }
+            }
         }
         Err(e) => {
             error!("Login failed: {}", e);
@@ -317,6 +421,108 @@ pub async fn batch_transactions(
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": "Batch transactions failed",
+                    "message": e.to_string()
+                })),
+            ))
+        }
+    }
+}
+
+// New account management handlers
+pub async fn get_user_accounts(
+    State((cqrs_service, _)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
+    Path(username): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match cqrs_service.get_all_accounts().await {
+        Ok(accounts) => {
+            let user_accounts: Vec<_> = accounts
+                .into_iter()
+                .filter(|account| account.owner_name == username)
+                .collect();
+
+            if !user_accounts.is_empty() {
+                // Determine primary account (highest balance or first active)
+                let primary_account = user_accounts
+                    .iter()
+                    .filter(|acc| acc.is_active)
+                    .max_by_key(|acc| acc.balance)
+                    .or(user_accounts.first());
+
+                // Convert accounts to JSON format
+                let accounts_json: Vec<serde_json::Value> = user_accounts
+                    .iter()
+                    .map(|account| {
+                        let is_primary =
+                            primary_account.map(|p| p.id == account.id).unwrap_or(false);
+                        json!({
+                            "id": account.id,
+                            "balance": account.balance,
+                            "is_active": account.is_active,
+                            "is_primary": is_primary,
+                            "created_at": account.created_at
+                        })
+                    })
+                    .collect();
+
+                Ok(Json(json!({
+                    "message": "User accounts retrieved successfully",
+                    "username": username,
+                    "accounts": accounts_json,
+                    "primary_account_id": primary_account.map(|acc| acc.id),
+                    "total_accounts": user_accounts.len()
+                })))
+            } else {
+                Ok(Json(json!({
+                    "message": "No accounts found for user",
+                    "username": username,
+                    "accounts": [],
+                    "primary_account_id": null,
+                    "total_accounts": 0
+                })))
+            }
+        }
+        Err(e) => {
+            error!("Failed to get accounts for user {}: {}", username, e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Failed to get user accounts",
+                    "message": e.to_string()
+                })),
+            ))
+        }
+    }
+}
+
+pub async fn create_additional_account(
+    State((cqrs_service, _)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
+    Json(payload): Json<CreateAccountRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let owner_name = payload.owner_name.clone();
+    let initial_balance = payload.initial_balance;
+
+    match cqrs_service
+        .create_account(owner_name.clone(), initial_balance)
+        .await
+    {
+        Ok(account_id) => {
+            info!(
+                "Additional account created successfully: {} for user: {}",
+                account_id, owner_name
+            );
+            Ok(Json(json!({
+                "message": "Additional account created successfully",
+                "account_id": account_id,
+                "owner_name": owner_name,
+                "initial_balance": initial_balance
+            })))
+        }
+        Err(e) => {
+            error!("Additional account creation failed: {}", e);
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Account creation failed",
                     "message": e.to_string()
                 })),
             ))

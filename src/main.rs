@@ -316,6 +316,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/register", post(crate::web::handlers::register))
         .route("/api/auth/login", post(crate::web::handlers::login))
         .route("/api/auth/logout", post(crate::web::handlers::logout))
+        .route(
+            "/api/auth/accounts/{username}",
+            get(crate::web::handlers::get_user_accounts),
+        )
+        .route(
+            "/api/auth/accounts",
+            post(crate::web::handlers::create_additional_account),
+        )
         .with_state((cqrs_service.clone(), service_context.auth_service.clone()));
 
     // The main app is now just the CQRS router, potentially with some global/static routes.

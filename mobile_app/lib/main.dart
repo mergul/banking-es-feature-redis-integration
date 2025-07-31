@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'providers/auth_provider.dart';
+import 'providers/account_provider.dart';
 import 'screens/login_screen.dart';
 import 'screens/dashboard_screen.dart';
 
@@ -13,8 +14,11 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (ctx) => AuthProvider(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (ctx) => AuthProvider()),
+        ChangeNotifierProvider(create: (ctx) => AccountProvider()),
+      ],
       child: Consumer<AuthProvider>(
         builder: (ctx, auth, _) => MaterialApp(
           title: 'Banking App',
