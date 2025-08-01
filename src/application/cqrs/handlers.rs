@@ -95,6 +95,42 @@ impl CQRSHandler {
         result
     }
 
+    /// Execute batch commands
+    pub async fn execute_batch_commands(
+        &self,
+        commands: Vec<AccountCommand>,
+    ) -> Result<Vec<CommandResult>, AccountError> {
+        let _permit = self.semaphore.acquire().await.map_err(|e| {
+            error!("Failed to acquire semaphore permit: {}", e);
+            AccountError::InfrastructureError("Service overloaded".to_string())
+        })?;
+
+        let start_time = Instant::now();
+        self.metrics
+            .commands_processed
+            .fetch_add(commands.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
+        let results = self
+            .command_bus
+            .execute_batch_commands(commands.clone())
+            .await;
+
+        match &results {
+            Ok(_) => {
+                self.metrics
+                    .commands_successful
+                    .fetch_add(commands.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(_) => {
+                self.metrics
+                    .commands_failed
+                    .fetch_add(commands.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        results
+    }
+
     /// Execute a query with rate limiting
     pub async fn execute_query<Q, R>(&self, query: Q) -> Result<R, AccountError>
     where

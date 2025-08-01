@@ -197,6 +197,62 @@ reset_consumer_groups() {
     done
 }
 
+# Function to create missing partitions
+create_missing_partitions() {
+    log_step "Creating Missing Partitions"
+    
+    # Function to run SQL command
+    run_sql() {
+        local sql="$1"
+        local description="$2"
+        
+        log_info "Running: $description"
+        PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "$sql" >/dev/null 2>&1 || {
+            log_warning "Failed to execute: $description"
+        }
+    }
+    
+    # Get current year and month
+    local current_year=$(date +%Y)
+    local current_month=$(date +%m)
+    local next_month=$(date -d "$current_year-$current_month-01 +1 month" +%Y-%m)
+    
+    log_info "Creating partitions for current month: $current_year-$current_month"
+    log_info "Creating partitions for next month: $next_month"
+    
+    # Create current month partition
+    local current_partition="transaction_projections_${current_year}_${current_month}"
+    local current_start="${current_year}-${current_month}-01 03:00:00+03"
+    local current_end="${next_month}-01 03:00:00+03"
+    
+    run_sql "CREATE TABLE IF NOT EXISTS $current_partition PARTITION OF transaction_projections FOR VALUES FROM ('$current_start') TO ('$current_end');" "Creating $current_partition partition"
+    
+    # Create next month partition
+    local next_year=$(echo $next_month | cut -d'-' -f1)
+    local next_month_num=$(echo $next_month | cut -d'-' -f2)
+    local next_partition="transaction_projections_${next_year}_${next_month_num}"
+    local next_start="${next_month}-01 03:00:00+03"
+    local next_end=$(date -d "$next_month-01 +2 months" +%Y-%m-01)
+    local next_end="${next_end} 03:00:00+03"
+    
+    run_sql "CREATE TABLE IF NOT EXISTS $next_partition PARTITION OF transaction_projections FOR VALUES FROM ('$next_start') TO ('$next_end');" "Creating $next_partition partition"
+    
+    # Create a few more months ahead for safety
+    for i in {2..4}; do
+        local future_month=$(date -d "$next_month-01 +$i months" +%Y-%m)
+        local future_year=$(echo $future_month | cut -d'-' -f1)
+        local future_month_num=$(echo $future_month | cut -d'-' -f2)
+        local future_partition="transaction_projections_${future_year}_${future_month_num}"
+        local future_start="${future_month}-01 03:00:00+03"
+        local future_end=$(date -d "$future_month-01 +1 month" +%Y-%m-01)
+        local future_end="${future_end} 03:00:00+03"
+        
+        run_sql "CREATE TABLE IF NOT EXISTS $future_partition PARTITION OF transaction_projections FOR VALUES FROM ('$future_start') TO ('$future_end');" "Creating $future_partition partition"
+    done
+    
+    log_success "Partition creation completed"
+}
+
 # Function to cleanup database
 cleanup_database() {
     log_step "Cleaning up Database"
@@ -388,6 +444,9 @@ cleanup_all() {
     cleanup_kafka_topics
     reset_consumer_groups
     cleanup_database
+    
+    # Create missing partitions after cleanup
+    create_missing_partitions
     
     # Restart Debezium connector
     restart_debezium_connector

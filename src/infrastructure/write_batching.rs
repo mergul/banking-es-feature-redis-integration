@@ -636,6 +636,15 @@ impl PartitionedBatching {
             operation_id
         ))
     }
+
+    /// Get the current batch size across all partitions (for smart consistency management)
+    pub async fn get_current_batch_size(&self) -> usize {
+        let mut total_size = 0;
+        for processor in &self.processors {
+            total_size += processor.get_current_batch_size().await;
+        }
+        total_size
+    }
 }
 
 /// Configuration for write batching
@@ -1468,13 +1477,54 @@ impl WriteBatchingService {
                 batch_with_locked_ops.operations.len()
             );
 
-            let batch_results = Self::execute_batch(
+            // OPTIMIZED: Pre-fetch all versions in parallel
+            let aggregate_ids: Vec<Uuid> = batch_with_locked_ops
+                .operations
+                .iter()
+                .map(|(_, op)| op.get_aggregate_id())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+
+            let current_versions = if !aggregate_ids.is_empty() {
+                let futures: Vec<_> = aggregate_ids
+                    .into_iter()
+                    .map(|id| {
+                        let event_store = event_store.clone();
+                        async move {
+                            let version = event_store
+                                .get_current_version(id, false)
+                                .await
+                                .unwrap_or(0);
+                            (id, version)
+                        }
+                    })
+                    .collect();
+
+                let results = futures::future::join_all(futures).await;
+                let mut versions = HashMap::new();
+                for (id, version) in results {
+                    versions.insert(id, version);
+                }
+                versions
+            } else {
+                HashMap::new()
+            };
+
+            println!(
+                "✅ Pre-fetched versions for {} aggregates",
+                current_versions.len()
+            );
+
+            // Use optimized batch execution with pre-fetched versions
+            let batch_results = Self::execute_batch_with_versions(
                 &batch_with_locked_ops,
                 event_store,
                 projection_store,
                 write_pool,
                 outbox_batcher,
                 config,
+                &current_versions,
             )
             .await;
 
@@ -2355,6 +2405,11 @@ impl WriteBatchingService {
             "partition_id": self.partition_id,
             "num_partitions": self.num_partitions,
         })
+    }
+
+    /// Get the current batch size (for smart consistency management)
+    pub async fn get_current_batch_size(&self) -> usize {
+        self.current_batch.lock().await.operations.len()
     }
 }
 

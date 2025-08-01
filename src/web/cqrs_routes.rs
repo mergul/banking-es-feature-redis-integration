@@ -97,6 +97,27 @@ pub fn create_cqrs_router(
             "/api/cqrs/transactions/batch",
             post(crate::web::cqrs_handlers::batch_transactions),
         )
+        .route(
+            "/api/cqrs/operations/batch",
+            post(crate::web::cqrs_handlers::execute_batch_operations),
+        )
+        .route(
+            "/api/cqrs/commands/batch",
+            post(crate::web::cqrs_handlers::execute_batch_commands),
+        )
+        // Version and aggregate info endpoints
+        .route(
+            "/api/cqrs/aggregates/{id}/version",
+            get(crate::web::cqrs_handlers::get_aggregate_version),
+        )
+        .route(
+            "/api/cqrs/aggregates/versions",
+            post(crate::web::cqrs_handlers::get_aggregate_versions),
+        )
+        .route(
+            "/api/cqrs/aggregates/{id}/info",
+            get(crate::web::cqrs_handlers::get_aggregate_info),
+        )
         // Health and metrics - No auth required
         .route(
             "/api/cqrs/health",

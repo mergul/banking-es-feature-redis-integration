@@ -1513,212 +1513,212 @@ async fn test_write_batching_multi_row_inserts() {
     // Phase 2: Submit multiple operations per account to test batching
     println!("\n📝 PHASE 2: Submit Multiple Operations Per Account");
     println!("==================================================");
-    /*
-        // Submit multiple operations per account to test batching
-        println!("🔧 Submitting multiple operations per account to test write batching...");
-        let mut handles = Vec::new();
 
-        for &account_id in &account_ids {
-            // Submit 5 deposit operations for each account
-            for i in 0..5 {
-                let cqrs_service = context.cqrs_service.clone();
-                let amount = Decimal::new(10 + i as i64, 0);
-                let handle = tokio::spawn(async move {
-                    match cqrs_service.deposit_money(account_id, amount).await {
-                        Ok(result) => {
-                            println!(
-                                "✅ Deposit successful for account {}: amount {}",
-                                account_id, amount
-                            );
-                            Ok(result)
-                        }
-                        Err(e) => {
-                            println!(
-                                "❌ Deposit failed for account {}: amount {} - {}",
-                                account_id, amount, e
-                            );
-                            Err(e)
-                        }
-                    }
-                });
-                handles.push(handle);
-            }
+    // Submit multiple operations per account to test batching
+    println!("🔧 Submitting multiple operations per account to test write batching...");
+    let mut handles = Vec::new();
 
-            // Submit 5 withdraw operations for each account
-            for i in 0..5 {
-                let cqrs_service = context.cqrs_service.clone();
-                let amount = Decimal::new(5 + i as i64, 0);
-                let handle = tokio::spawn(async move {
-                    match cqrs_service.withdraw_money(account_id, amount).await {
-                        Ok(result) => {
-                            println!(
-                                "✅ Withdraw successful for account {}: amount {}",
-                                account_id, amount
-                            );
-                            Ok(result)
-                        }
-                        Err(e) => {
-                            println!(
-                                "❌ Withdraw failed for account {}: amount {} - {}",
-                                account_id, amount, e
-                            );
-                            Err(e)
-                        }
-                    }
-                });
-                handles.push(handle);
-            }
-        }
-
-        println!("⏳ Waiting for all operations to complete...");
-        let start_time = Instant::now();
-        futures::future::join_all(handles).await;
-        let duration = start_time.elapsed();
-
-        println!("✅ All operations completed in {:?}", duration);
-        println!(
-            "📊 Processed {} operations for {} accounts",
-            account_ids.len() * 10,
-            account_ids.len()
-        );
-
-        // Phase 3: Wait for CDC processing to complete
-        println!("\n📝 PHASE 3: Wait for CDC Processing");
-        println!("===================================");
-
-        println!("⏳ Waiting for CDC to process all events...");
-
-        // Wait for CDC processing with a timeout
-        let cdc_timeout = Duration::from_secs(30); // Increased timeout for CDC processing
-        let cdc_start = Instant::now();
-        let mut cdc_processed = false;
-
-        // Check CDC metrics every second for up to 15 seconds
-        for i in 0..15 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-
-            // Get CDC metrics to check if processing is complete
-            let cdc_metrics = context.cdc_service_manager.get_metrics();
-            let events_processed = cdc_metrics
-                .events_processed
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let events_failed = cdc_metrics
-                .events_failed
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let projection_updates = cdc_metrics
-                .projection_updates
-                .load(std::sync::atomic::Ordering::Relaxed);
-
-            println!(
-                "  📊 CDC Status ({}s): Processed={}, Failed={}, ProjectionUpdates={}",
-                i + 1,
-                events_processed,
-                events_failed,
-                projection_updates
-            );
-
-            // Consider CDC complete if we've processed some events and have projection updates
-            if events_processed > 0 && projection_updates > 0 {
-                println!("✅ CDC processing appears complete");
-                cdc_processed = true;
-                break;
-            }
-        }
-
-        if !cdc_processed {
-            println!("⚠️  CDC processing timeout reached, proceeding anyway");
-        }
-
-        let cdc_duration = cdc_start.elapsed();
-        println!("✅ CDC wait completed in {:?}", cdc_duration);
-
-        // Phase 4: Verify data integrity
-        println!("\n📝 PHASE 4: Data Integrity Verification");
-        println!("======================================");
-
-        println!("🔍 Verifying account balances and transaction history...");
-        let mut verification_handles = Vec::new();
-
-        for &account_id in &account_ids {
+    for &account_id in &account_ids {
+        // Submit 5 deposit operations for each account
+        for i in 0..5 {
             let cqrs_service = context.cqrs_service.clone();
+            let amount = Decimal::new(10 + i as i64, 0);
             let handle = tokio::spawn(async move {
-                match cqrs_service.get_account(account_id).await {
-                    Ok(Some(account)) => {
-                        // Verify that the account has some transactions
-                        // Note: Some operations might fail due to insufficient funds, which is expected
-                        let transactions = match cqrs_service.get_account_transactions(account_id).await
-                        {
-                            Ok(txs) => txs,
-                            Err(e) => {
-                                println!(
-                                    "⚠️  Failed to get transactions for account {}: {}",
-                                    account_id, e
-                                );
-                                vec![]
-                            }
-                        };
-
-                        (account_id, account.balance, transactions.len(), true)
-                    }
-                    Ok(None) => {
-                        println!("❌ Account {} not found", account_id);
-                        (account_id, Decimal::ZERO, 0, false)
+                match cqrs_service.deposit_money(account_id, amount).await {
+                    Ok(result) => {
+                        println!(
+                            "✅ Deposit successful for account {}: amount {}",
+                            account_id, amount
+                        );
+                        Ok(result)
                     }
                     Err(e) => {
-                        println!("❌ Failed to get account {}: {}", account_id, e);
-                        (account_id, Decimal::ZERO, 0, false)
+                        println!(
+                            "❌ Deposit failed for account {}: amount {} - {}",
+                            account_id, amount, e
+                        );
+                        Err(e)
                     }
                 }
             });
-            verification_handles.push(handle);
+            handles.push(handle);
         }
 
-        let verification_results = futures::future::join_all(verification_handles).await;
-        let mut total_balance = Decimal::ZERO;
-        let mut total_transactions = 0;
-        let mut successful_verifications = 0;
-
-        for result in verification_results {
-            match result {
-                Ok((account_id, balance, transaction_count, found)) => {
-                    if found {
-                        total_balance += balance;
-                        total_transactions += transaction_count;
-                        successful_verifications += 1;
+        // Submit 5 withdraw operations for each account
+        for i in 0..5 {
+            let cqrs_service = context.cqrs_service.clone();
+            let amount = Decimal::new(5 + i as i64, 0);
+            let handle = tokio::spawn(async move {
+                match cqrs_service.withdraw_money(account_id, amount).await {
+                    Ok(result) => {
                         println!(
-                            "✅ Account {}: Balance = {}, Transactions = {}",
-                            account_id, balance, transaction_count
+                            "✅ Withdraw successful for account {}: amount {}",
+                            account_id, amount
                         );
-                    } else {
-                        println!("❌ Account {}: Not found or failed to retrieve", account_id);
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        println!(
+                            "❌ Withdraw failed for account {}: amount {} - {}",
+                            account_id, amount, e
+                        );
+                        Err(e)
                     }
                 }
+            });
+            handles.push(handle);
+        }
+    }
+
+    println!("⏳ Waiting for all operations to complete...");
+    let start_time = Instant::now();
+    futures::future::join_all(handles).await;
+    let duration = start_time.elapsed();
+
+    println!("✅ All operations completed in {:?}", duration);
+    println!(
+        "📊 Processed {} operations for {} accounts",
+        account_ids.len() * 10,
+        account_ids.len()
+    );
+
+    // Phase 3: Wait for CDC processing to complete
+    println!("\n📝 PHASE 3: Wait for CDC Processing");
+    println!("===================================");
+
+    println!("⏳ Waiting for CDC to process all events...");
+
+    // Wait for CDC processing with a timeout
+    let cdc_timeout = Duration::from_secs(30); // Increased timeout for CDC processing
+    let cdc_start = Instant::now();
+    let mut cdc_processed = false;
+
+    // Check CDC metrics every second for up to 15 seconds
+    for i in 0..15 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Get CDC metrics to check if processing is complete
+        let cdc_metrics = context.cdc_service_manager.get_metrics();
+        let events_processed = cdc_metrics
+            .events_processed
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let events_failed = cdc_metrics
+            .events_failed
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let projection_updates = cdc_metrics
+            .projection_updates
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        println!(
+            "  📊 CDC Status ({}s): Processed={}, Failed={}, ProjectionUpdates={}",
+            i + 1,
+            events_processed,
+            events_failed,
+            projection_updates
+        );
+
+        // Consider CDC complete if we've processed some events and have projection updates
+        if events_processed > 0 && projection_updates > 0 {
+            println!("✅ CDC processing appears complete");
+            cdc_processed = true;
+            break;
+        }
+    }
+
+    if !cdc_processed {
+        println!("⚠️  CDC processing timeout reached, proceeding anyway");
+    }
+
+    let cdc_duration = cdc_start.elapsed();
+    println!("✅ CDC wait completed in {:?}", cdc_duration);
+
+    // Phase 4: Verify data integrity
+    println!("\n📝 PHASE 4: Data Integrity Verification");
+    println!("======================================");
+
+    println!("🔍 Verifying account balances and transaction history...");
+    let mut verification_handles = Vec::new();
+
+    for &account_id in &account_ids {
+        let cqrs_service = context.cqrs_service.clone();
+        let handle = tokio::spawn(async move {
+            match cqrs_service.get_account(account_id).await {
+                Ok(Some(account)) => {
+                    // Verify that the account has some transactions
+                    // Note: Some operations might fail due to insufficient funds, which is expected
+                    let transactions = match cqrs_service.get_account_transactions(account_id).await
+                    {
+                        Ok(txs) => txs,
+                        Err(e) => {
+                            println!(
+                                "⚠️  Failed to get transactions for account {}: {}",
+                                account_id, e
+                            );
+                            vec![]
+                        }
+                    };
+
+                    (account_id, account.balance, transactions.len(), true)
+                }
+                Ok(None) => {
+                    println!("❌ Account {} not found", account_id);
+                    (account_id, Decimal::ZERO, 0, false)
+                }
                 Err(e) => {
-                    println!("❌ Failed to verify account: {}", e);
+                    println!("❌ Failed to get account {}: {}", account_id, e);
+                    (account_id, Decimal::ZERO, 0, false)
                 }
             }
-        }
+        });
+        verification_handles.push(handle);
+    }
 
-        println!("\n📊 FINAL STATISTICS:");
-        println!("===================");
-        println!("Total accounts processed: {}", account_ids.len());
-        println!(
-            "Successfully verified accounts: {}",
-            successful_verifications
-        );
-        println!("Total balance across all accounts: {}", total_balance);
-        println!("Total transactions: {}", total_transactions);
-        if successful_verifications > 0 {
-            println!(
-                "Average transactions per account: {:.1}",
-                total_transactions as f64 / successful_verifications as f64
-            );
+    let verification_results = futures::future::join_all(verification_handles).await;
+    let mut total_balance = Decimal::ZERO;
+    let mut total_transactions = 0;
+    let mut successful_verifications = 0;
+
+    for result in verification_results {
+        match result {
+            Ok((account_id, balance, transaction_count, found)) => {
+                if found {
+                    total_balance += balance;
+                    total_transactions += transaction_count;
+                    successful_verifications += 1;
+                    println!(
+                        "✅ Account {}: Balance = {}, Transactions = {}",
+                        account_id, balance, transaction_count
+                    );
+                } else {
+                    println!("❌ Account {}: Not found or failed to retrieve", account_id);
+                }
+            }
+            Err(e) => {
+                println!("❌ Failed to verify account: {}", e);
+            }
         }
-        println!("Expected additional transactions per account: 10 (5 deposits + 5 withdrawals)");
+    }
+
+    println!("\n📊 FINAL STATISTICS:");
+    println!("===================");
+    println!("Total accounts processed: {}", account_ids.len());
+    println!(
+        "Successfully verified accounts: {}",
+        successful_verifications
+    );
+    println!("Total balance across all accounts: {}", total_balance);
+    println!("Total transactions: {}", total_transactions);
+    if successful_verifications > 0 {
         println!(
-            "Note: Some operations may fail due to insufficient funds, which is expected behavior"
+            "Average transactions per account: {:.1}",
+            total_transactions as f64 / successful_verifications as f64
         );
-    */
+    }
+    println!("Expected additional transactions per account: 10 (5 deposits + 5 withdrawals)");
+    println!(
+        "Note: Some operations may fail due to insufficient funds, which is expected behavior"
+    );
+
     // Cleanup
     println!("\n🧹 Cleaning up test resources...");
 

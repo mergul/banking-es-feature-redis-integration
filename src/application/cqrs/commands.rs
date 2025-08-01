@@ -67,10 +67,19 @@ impl CommandBus {
         let result = self.account_command_handler.handle(account_command).await?;
         Ok(R::from(result))
     }
+
+    pub async fn execute_batch_commands(
+        &self,
+        commands: Vec<AccountCommand>,
+    ) -> Result<Vec<CommandResult>, AccountError> {
+        self.account_command_handler
+            .handle_batch_commands(commands)
+            .await
+    }
 }
 
 /// Result of command execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CommandResult {
     pub success: bool,
     pub account_id: Option<Uuid>,
@@ -484,6 +493,233 @@ impl AccountCommandHandler {
             &message_prefix,
         )
         .await
+    }
+
+    /// Optimized batch command handler with pre-fetched versions
+    pub async fn handle_batch_commands(
+        &self,
+        commands: Vec<AccountCommand>,
+    ) -> Result<Vec<CommandResult>, AccountError> {
+        let start_time = std::time::Instant::now();
+        info!(
+            "🚀 Starting batch command processing for {} commands",
+            commands.len()
+        );
+
+        // 1. Extract all account IDs that need version checking
+        let mut account_ids = Vec::new();
+        let mut new_accounts = Vec::new();
+
+        for command in &commands {
+            match command {
+                AccountCommand::CreateAccount { .. } => {
+                    // New accounts don't need version checking
+                    new_accounts.push(command.clone());
+                }
+                AccountCommand::DepositMoney { account_id, .. } => {
+                    account_ids.push(*account_id);
+                }
+                AccountCommand::WithdrawMoney { account_id, .. } => {
+                    account_ids.push(*account_id);
+                }
+                AccountCommand::CloseAccount { account_id, .. } => {
+                    account_ids.push(*account_id);
+                }
+            }
+        }
+
+        // 2. Batch fetch all current versions
+        let versions = if !account_ids.is_empty() {
+            // Use the new batch version method
+            let event_store = self.event_store.as_ref();
+            let mut version_map = std::collections::HashMap::new();
+
+            // Process in parallel for better performance
+            let futures: Vec<_> = account_ids
+                .into_iter()
+                .map(|id| {
+                    let event_store = event_store.clone();
+                    async move {
+                        let version = event_store
+                            .get_current_version(id, false)
+                            .await
+                            .unwrap_or(0);
+                        (id, version)
+                    }
+                })
+                .collect();
+
+            let results = futures::future::join_all(futures).await;
+            for (account_id, version) in results {
+                version_map.insert(account_id, version);
+            }
+            version_map
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        info!(
+            "✅ Pre-fetched versions for {} accounts in {:?}",
+            versions.len(),
+            start_time.elapsed()
+        );
+
+        // 3. Process commands with pre-fetched versions
+        let mut results = Vec::new();
+
+        for command in commands {
+            let command_clone = command.clone();
+            let result = match command {
+                AccountCommand::CreateAccount {
+                    account_id,
+                    owner_name,
+                    initial_balance,
+                } => {
+                    self.handle_command_with_outbox(
+                        account_id,
+                        0, // New account version
+                        &command_clone,
+                        Account::default(),
+                        "Account created",
+                    )
+                    .await
+                }
+                AccountCommand::DepositMoney { account_id, .. } => {
+                    let version = versions.get(&account_id).unwrap_or(&0);
+
+                    // Get account state for validation
+                    let account = self.get_account_state(account_id).await?;
+
+                    self.handle_command_with_outbox(
+                        account_id,
+                        *version, // Pre-fetched version
+                        &command_clone,
+                        account,
+                        "Command executed",
+                    )
+                    .await
+                }
+                AccountCommand::WithdrawMoney { account_id, .. } => {
+                    let version = versions.get(&account_id).unwrap_or(&0);
+
+                    // Get account state for validation
+                    let account = self.get_account_state(account_id).await?;
+
+                    self.handle_command_with_outbox(
+                        account_id,
+                        *version, // Pre-fetched version
+                        &command_clone,
+                        account,
+                        "Command executed",
+                    )
+                    .await
+                }
+                AccountCommand::CloseAccount { account_id, .. } => {
+                    let version = versions.get(&account_id).unwrap_or(&0);
+
+                    // Get account state for validation
+                    let account = self.get_account_state(account_id).await?;
+
+                    self.handle_command_with_outbox(
+                        account_id,
+                        *version, // Pre-fetched version
+                        &command_clone,
+                        account,
+                        "Command executed",
+                    )
+                    .await
+                }
+            }?;
+
+            results.push(result);
+        }
+
+        info!(
+            "✅ Batch command processing completed in {:?}",
+            start_time.elapsed()
+        );
+        Ok(results)
+    }
+
+    /// Optimized single command handler with version caching
+    pub async fn handle_command_optimized(
+        &self,
+        command: AccountCommand,
+    ) -> Result<CommandResult, AccountError> {
+        let command_clone = command.clone();
+        match command {
+            AccountCommand::CreateAccount {
+                account_id,
+                owner_name,
+                initial_balance,
+            } => {
+                self.handle_command_with_outbox(
+                    account_id,
+                    0, // New account
+                    &command_clone,
+                    Account::default(),
+                    "Account created",
+                )
+                .await
+            }
+            AccountCommand::DepositMoney { account_id, .. } => {
+                // Use the new aggregate version method
+                let version = self
+                    .event_store
+                    .get_current_version(account_id, false)
+                    .await
+                    .unwrap_or(0);
+
+                let account = self.get_account_state(account_id).await?;
+
+                self.handle_command_with_outbox(
+                    account_id,
+                    version, // Pre-fetched version
+                    &command_clone,
+                    account,
+                    "Command executed",
+                )
+                .await
+            }
+            AccountCommand::WithdrawMoney { account_id, .. } => {
+                // Use the new aggregate version method
+                let version = self
+                    .event_store
+                    .get_current_version(account_id, false)
+                    .await
+                    .unwrap_or(0);
+
+                let account = self.get_account_state(account_id).await?;
+
+                self.handle_command_with_outbox(
+                    account_id,
+                    version, // Pre-fetched version
+                    &command_clone,
+                    account,
+                    "Command executed",
+                )
+                .await
+            }
+            AccountCommand::CloseAccount { account_id, .. } => {
+                // Use the new aggregate version method
+                let version = self
+                    .event_store
+                    .get_current_version(account_id, false)
+                    .await
+                    .unwrap_or(0);
+
+                let account = self.get_account_state(account_id).await?;
+
+                self.handle_command_with_outbox(
+                    account_id,
+                    version, // Pre-fetched version
+                    &command_clone,
+                    account,
+                    "Command executed",
+                )
+                .await
+            }
+        }
     }
 
     // OPTIMIZED: Fast account state loading with reduced logging
