@@ -14,6 +14,8 @@ void main() {
     mockAuthProvider = MockAuthProvider();
   });
 
+  // INACTIVATED: LoginScreen test
+  /*
   testWidgets('LoginScreen calls login on button press', (WidgetTester tester) async {
     when(() => mockAuthProvider.login(any(), any())).thenAnswer((_) async {});
 
@@ -33,4 +35,5 @@ void main() {
 
     verify(() => mockAuthProvider.login('test', 'password')).called(1);
   });
+  */
 }

@@ -42,6 +42,7 @@ base64 = "0.21"
 # Concurrency and performance
 rayon = "1.7"    # Data parallelism
 crossbeam = "0.8" # Lock-free data structures
+fxhash = "0.2"   # Fast hashing for partitioning
 
 # Utilities
 

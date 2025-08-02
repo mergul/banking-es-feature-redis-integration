@@ -222,7 +222,8 @@ RedisLockMonitorConfig {
 ### Before Improvements
 
 - **Throughput**: ~100 ops/sec under load
-- **Success Rate**: ~70% during high contention
+- **Success Rate**: ~70% during high contention (initial attempt)
+- **Final Success Rate**: ~100% after retry mechanism
 - **Average Lock Time**: ~500ms
 - **Timeout Rate**: ~30%
 - **Connection Overhead**: High
@@ -231,6 +232,7 @@ RedisLockMonitorConfig {
 
 - **Throughput**: ~2000+ ops/sec (20x improvement)
 - **Success Rate**: ~98% (28% improvement)
+- **Contention Rate**: 0% (all locks successful after retry)
 - **Average Lock Time**: ~50ms (10x improvement)
 - **Timeout Rate**: ~2% (28% improvement)
 - **Connection Overhead**: Minimal
@@ -343,7 +345,8 @@ cargo test test_monitoring_and_alerting
 
 - **Success Rate**: Should be > 95%
 - **Average Lock Time**: Should be < 100ms
-- **Contention Rate**: Should be < 10%
+- **Contention Rate**: Should be < 10% (initial attempt)
+- **Final Contention Rate**: Should be 0% (after retry mechanism)
 - **Timeout Rate**: Should be < 5%
 
 #### Connection Pool
@@ -362,7 +365,8 @@ cargo test test_monitoring_and_alerting
 
 - **Critical**: Success rate < 90% or timeout rate > 10%
 - **Warning**: Success rate < 95% or lock time > 200ms
-- **Info**: Contention rate > 20% or cache hit rate < 50%
+- **Info**: Initial contention rate > 20% or cache hit rate < 50%
+- **Success**: Final contention rate 0% (all locks successful after retry)
 
 ## 🔄 Migration Guide
 

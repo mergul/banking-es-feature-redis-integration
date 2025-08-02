@@ -107,7 +107,9 @@ impl PartitionedBatching {
 
     pub async fn submit_operation(&self, aggregate_id: Uuid, op: WriteOperation) -> Result<Uuid> {
         let partition = partition_for_aggregate(&aggregate_id, NUM_PARTITIONS);
-        self.processors[partition].submit_operation(op).await
+        self.processors[partition]
+            .submit_operation(aggregate_id, op)
+            .await
     }
 
     /// Phase 1: Create-specific batch method for bulk account creation
@@ -130,7 +132,7 @@ impl PartitionedBatching {
         let create_processor = &self.processors[CREATE_PARTITION_ID];
 
         // Create a single batch with all operations
-        let mut batch = WriteBatch::new();
+        let mut batch = WriteBatch::new(Some(CREATE_PARTITION_ID));
         let mut account_ids = Vec::with_capacity(accounts.len());
 
         for (owner_name, balance) in accounts {
@@ -163,6 +165,7 @@ impl PartitionedBatching {
             &create_processor.write_pool,
             &create_processor.outbox_batcher,
             &create_processor.config,
+            batch.partition_id,
         )
         .await;
 
@@ -227,7 +230,7 @@ impl PartitionedBatching {
             account_to_partition.insert(account_id, partition);
 
             let op_id = self.processors[partition]
-                .submit_operation(operation)
+                .submit_operation(account_id, operation)
                 .await?;
             operation_ids.push((op_id, account_id, partition));
         }
@@ -645,6 +648,284 @@ impl PartitionedBatching {
         }
         total_size
     }
+
+    /// Aggregate-based parallel batching - groups operations by aggregate_id
+    /// and processes different aggregates in parallel while keeping same aggregate_id
+    /// operations in the same batch to prevent serialization conflicts
+    pub async fn submit_operations_aggregate_based_parallel(
+        &self,
+        operations: Vec<WriteOperation>,
+    ) -> Result<Vec<Uuid>> {
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        info!(
+            "🚀 Starting aggregate-based parallel batching for {} operations",
+            operations.len()
+        );
+
+        // Group operations by aggregate_id
+        let mut aggregate_groups: HashMap<Uuid, Vec<WriteOperation>> = HashMap::new();
+        let operations_len = operations.len();
+        for operation in operations {
+            let aggregate_id = operation.get_aggregate_id();
+            aggregate_groups
+                .entry(aggregate_id)
+                .or_default()
+                .push(operation);
+        }
+
+        let aggregate_groups_len = aggregate_groups.len();
+        info!(
+            "📦 Grouped {} operations into {} aggregate groups",
+            operations_len, aggregate_groups_len
+        );
+
+        // Process each aggregate group in parallel
+        let mut futures = Vec::new();
+        let mut aggregate_to_operation_ids = HashMap::new();
+
+        for (aggregate_id, aggregate_operations) in aggregate_groups {
+            let processor =
+                &self.processors[partition_for_aggregate(&aggregate_id, NUM_PARTITIONS)];
+
+            // Create operation IDs for this aggregate's operations
+            let operation_ids: Vec<Uuid> = aggregate_operations
+                .iter()
+                .map(|_| Uuid::new_v4())
+                .collect();
+
+            aggregate_to_operation_ids.insert(aggregate_id, operation_ids.clone());
+
+            // Submit all operations for this aggregate to the same processor
+            let future = async move {
+                let mut results = Vec::new();
+                for (operation, operation_id) in aggregate_operations.into_iter().zip(operation_ids)
+                {
+                    match processor
+                        .submit_operation(operation.get_aggregate_id(), operation)
+                        .await
+                    {
+                        Ok(id) => results.push(id),
+                        Err(e) => {
+                            error!(
+                                "Failed to submit operation {} for aggregate {}: {}",
+                                operation_id, aggregate_id, e
+                            );
+                        }
+                    }
+                }
+                (aggregate_id, results)
+            };
+
+            futures.push(future);
+        }
+
+        // Wait for all parallel processing to complete
+        let results = futures::future::join_all(futures).await;
+
+        let mut all_operation_ids = Vec::new();
+        let mut successful_count = 0;
+        let mut failed_count = 0;
+
+        for (aggregate_id, operation_ids) in results {
+            all_operation_ids.extend(operation_ids.clone());
+            successful_count += operation_ids.len();
+            info!(
+                "✅ Processed {} operations for aggregate {}",
+                operation_ids.len(),
+                aggregate_id
+            );
+        }
+
+        info!(
+            "✅ Aggregate-based parallel batching completed: {} successful operations across {} aggregates",
+            successful_count,
+            aggregate_groups_len
+        );
+
+        Ok(all_operation_ids)
+    }
+
+    /// Advanced aggregate-based batching with bulk processing
+    /// Creates dedicated batches for each aggregate_id and processes them in parallel
+    /// This prevents serialization conflicts by ensuring same aggregate_id operations
+    /// are processed together in a single transaction
+    pub async fn submit_operations_aggregate_bulk_parallel(
+        &self,
+        operations: Vec<WriteOperation>,
+    ) -> Result<Vec<Uuid>> {
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        info!(
+            "🚀 Starting aggregate-based bulk parallel batching for {} operations",
+            operations.len()
+        );
+
+        // Group operations by aggregate_id
+        let mut aggregate_groups: HashMap<Uuid, Vec<WriteOperation>> = HashMap::new();
+        let operations_len = operations.len();
+        for operation in operations {
+            let aggregate_id = operation.get_aggregate_id();
+            aggregate_groups
+                .entry(aggregate_id)
+                .or_default()
+                .push(operation);
+        }
+
+        let aggregate_groups_len = aggregate_groups.len();
+        info!(
+            "📦 Grouped {} operations into {} aggregate groups",
+            operations_len, aggregate_groups_len
+        );
+
+        // Create dedicated batches for each aggregate and process in parallel
+        let mut futures = Vec::new();
+
+        for (aggregate_id, aggregate_operations) in aggregate_groups {
+            let processor =
+                &self.processors[partition_for_aggregate(&aggregate_id, NUM_PARTITIONS)];
+
+            // Create a dedicated batch for this aggregate
+            let mut dedicated_batch = WriteBatch::new(Some(processor.partition_id.unwrap()));
+            let mut operation_ids = Vec::new();
+
+            for operation in aggregate_operations {
+                let operation_id = Uuid::new_v4();
+                dedicated_batch.add_operation(operation_id, operation);
+                operation_ids.push(operation_id);
+            }
+
+            info!(
+                "📦 Created dedicated batch for aggregate {} with {} operations",
+                aggregate_id,
+                dedicated_batch.operations.len()
+            );
+
+            // Process this aggregate's batch in parallel
+            let future = async move {
+                let batch_start = Instant::now();
+
+                // Execute the dedicated batch
+                let results = WriteBatchingService::execute_batch(
+                    &dedicated_batch,
+                    &processor.event_store,
+                    &processor.projection_store,
+                    &processor.write_pool,
+                    &processor.outbox_batcher,
+                    &processor.config,
+                    dedicated_batch.partition_id,
+                )
+                .await;
+
+                let batch_duration = batch_start.elapsed();
+                let successful_count = results.iter().filter(|(_, r)| r.success).count();
+
+                info!(
+                    "✅ Aggregate {} batch completed in {:?}: {}/{} successful",
+                    aggregate_id,
+                    batch_duration,
+                    successful_count,
+                    results.len()
+                );
+
+                (aggregate_id, operation_ids, results)
+            };
+
+            futures.push(future);
+        }
+
+        // Wait for all parallel batch processing to complete
+        let results = futures::future::join_all(futures).await;
+
+        let mut all_operation_ids = Vec::new();
+        let mut total_successful = 0;
+        let mut total_failed = 0;
+
+        for (aggregate_id, operation_ids, batch_results) in results {
+            all_operation_ids.extend(operation_ids);
+
+            let successful = batch_results.iter().filter(|(_, r)| r.success).count();
+            let failed = batch_results.len() - successful;
+
+            total_successful += successful;
+            total_failed += failed;
+
+            if failed > 0 {
+                warn!(
+                    "⚠️ Aggregate {} had {} failed operations",
+                    aggregate_id, failed
+                );
+            }
+        }
+
+        info!(
+            "✅ Aggregate-based bulk parallel batching completed: {} successful, {} failed across {} aggregates",
+            total_successful,
+            total_failed,
+            aggregate_groups_len
+        );
+
+        Ok(all_operation_ids)
+    }
+
+    /// Hash-based super batch processing with unique aggregate_id guarantee
+    /// Each aggregate_id can only appear in one super batch
+    pub async fn submit_operations_hash_super_batch(
+        self: Arc<Self>,
+        operations: Vec<WriteOperation>,
+        num_super_batches: usize,
+    ) -> Result<Vec<Uuid>> {
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        info!(
+            "🚀 Starting hash-based super batch processing for {} operations across {} partitions",
+            operations.len(),
+            num_super_batches
+        );
+
+        // Partition operations by hash
+        let mut super_batches: Vec<Vec<WriteOperation>> = vec![Vec::new(); num_super_batches];
+        for op in operations {
+            let partition =
+                Self::get_super_batch_partition(&op.get_aggregate_id(), num_super_batches);
+            super_batches[partition].push(op);
+        }
+
+        // Her partition'ı paralel işleyelim
+        let mut handles = Vec::new();
+        for batch in super_batches {
+            let batching_service = Arc::clone(&self);
+            handles.push(tokio::spawn(async move {
+                let mut ids = Vec::new();
+                for op in batch {
+                    let aggregate_id = op.get_aggregate_id();
+                    if let Ok(op_id) = batching_service.submit_operation(aggregate_id, op).await {
+                        ids.push(op_id);
+                    }
+                }
+                ids
+            }));
+        }
+        let mut all_ids = Vec::new();
+        for h in handles {
+            if let Ok(ids) = h.await {
+                all_ids.extend(ids);
+            }
+        }
+        Ok(all_ids)
+    }
+
+    /// Get super batch partition for an aggregate_id
+    fn get_super_batch_partition(aggregate_id: &Uuid, num_partitions: usize) -> usize {
+        let hash = fxhash::hash(&aggregate_id.to_bytes_le());
+        hash as usize % num_partitions
+    }
 }
 
 /// Configuration for write batching
@@ -711,14 +992,16 @@ pub struct WriteBatch {
     pub batch_id: Uuid,
     pub operations: Vec<(Uuid, WriteOperation)>, // (operation_id, operation)
     pub created_at: Instant,
+    pub partition_id: Option<usize>,
 }
 
 impl WriteBatch {
-    pub fn new() -> Self {
+    pub fn new(partition_id: Option<usize>) -> Self {
         Self {
             batch_id: Uuid::new_v4(),
             operations: Vec::new(),
             created_at: Instant::now(),
+            partition_id: partition_id,
         }
     }
 
@@ -792,7 +1075,7 @@ impl WriteBatchingService {
                 outbox_repo,
                 event_store.get_partitioned_pools().clone(),
             ),
-            current_batch: Arc::new(Mutex::new(WriteBatch::new())),
+            current_batch: Arc::new(Mutex::new(WriteBatch::new(None))),
             pending_results: Arc::new(Mutex::new(HashMap::new())),
             completed_results: Arc::new(Mutex::new(HashMap::new())), // FIXED: Add result storage
             batch_processor_handle: Arc::new(Mutex::new(None)),
@@ -816,6 +1099,8 @@ impl WriteBatchingService {
         let mut service = Self::new(config, event_store, projection_store, write_pool);
         service.partition_id = Some(partition_id);
         service.num_partitions = Some(num_partitions);
+        // FIXED: Update current_batch with correct partition_id
+        service.current_batch = Arc::new(Mutex::new(WriteBatch::new(Some(partition_id))));
         service
     }
 
@@ -1212,9 +1497,12 @@ impl WriteBatchingService {
     }
 
     /// Submit a write operation for batching
-    pub async fn submit_operation(&self, operation: WriteOperation) -> Result<Uuid> {
+    pub async fn submit_operation(
+        &self,
+        aggregate_id: Uuid,
+        operation: WriteOperation,
+    ) -> Result<Uuid> {
         let operation_id = Uuid::new_v4();
-        let aggregate_id = operation.get_aggregate_id();
 
         println!(
             "🔍 [WriteBatchingService] Submitting operation {} for aggregate {}",
@@ -1387,8 +1675,9 @@ impl WriteBatchingService {
                 batch_id: batch.batch_id,
                 operations: std::mem::take(&mut batch.operations),
                 created_at: batch.created_at,
+                partition_id: batch.partition_id,
             };
-            *batch = WriteBatch::new();
+            *batch = WriteBatch::new(batch.partition_id);
             batch_to_process
         };
 
@@ -1455,11 +1744,20 @@ impl WriteBatchingService {
                 }
             } else {
                 println!(
-                    "⚠️ Could not acquire lock for aggregate {}, skipping ops for now",
+                    "⚠️ Could not acquire lock for aggregate {}, will retry in next batch",
                     aggregate_id
                 );
                 if let Some(ops) = aggregate_to_ops.get(aggregate_id) {
-                    skipped_operations.extend(ops.clone());
+                    // Instead of skipping, add back to the current batch for retry
+                    let mut current_batch = current_batch.lock().await;
+                    for (op_id, op) in ops {
+                        current_batch.add_operation(*op_id, op.clone());
+                    }
+                    println!(
+                        "🔄 Re-queued {} operations for aggregate {} in next batch",
+                        ops.len(),
+                        aggregate_id
+                    );
                 }
             }
         }
@@ -1470,6 +1768,7 @@ impl WriteBatchingService {
                 batch_id: batch_to_process.batch_id,
                 operations: locked_operations,
                 created_at: batch_to_process.created_at,
+                partition_id: batch_to_process.partition_id,
             };
 
             println!(
@@ -1477,54 +1776,15 @@ impl WriteBatchingService {
                 batch_with_locked_ops.operations.len()
             );
 
-            // OPTIMIZED: Pre-fetch all versions in parallel
-            let aggregate_ids: Vec<Uuid> = batch_with_locked_ops
-                .operations
-                .iter()
-                .map(|(_, op)| op.get_aggregate_id())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-
-            let current_versions = if !aggregate_ids.is_empty() {
-                let futures: Vec<_> = aggregate_ids
-                    .into_iter()
-                    .map(|id| {
-                        let event_store = event_store.clone();
-                        async move {
-                            let version = event_store
-                                .get_current_version(id, false)
-                                .await
-                                .unwrap_or(0);
-                            (id, version)
-                        }
-                    })
-                    .collect();
-
-                let results = futures::future::join_all(futures).await;
-                let mut versions = HashMap::new();
-                for (id, version) in results {
-                    versions.insert(id, version);
-                }
-                versions
-            } else {
-                HashMap::new()
-            };
-
-            println!(
-                "✅ Pre-fetched versions for {} aggregates",
-                current_versions.len()
-            );
-
-            // Use optimized batch execution with pre-fetched versions
-            let batch_results = Self::execute_batch_with_versions(
+            // Execute the batch
+            let batch_results = Self::execute_batch(
                 &batch_with_locked_ops,
                 event_store,
                 projection_store,
                 write_pool,
                 outbox_batcher,
                 config,
-                &current_versions,
+                batch_with_locked_ops.partition_id,
             )
             .await;
 
@@ -1577,6 +1837,7 @@ impl WriteBatchingService {
         write_pool: &Arc<PgPool>,
         outbox_batcher: &crate::infrastructure::cdc_debezium::OutboxBatcher,
         config: &WriteBatchingConfig,
+        partition_id: Option<usize>,
     ) -> Vec<(Uuid, WriteOperationResult)> {
         println!(
             "[DEBUG] execute_batch: Starting batch with {} operations",
@@ -1704,11 +1965,17 @@ impl WriteBatchingService {
             );
 
             if let Err(e) = result {
+                let partition_info = partition_id
+                    .map(|p| format!("partition_{}", p))
+                    .unwrap_or_else(|| "unknown_partition".to_string());
                 println!(
-                    "[DEBUG] execute_batch: Failed to save events in multi-aggregate batch: {:?}",
-                    e
+                    "[DEBUG] execute_batch: Failed to save events in multi-aggregate batch ({}): {:?}",
+                    partition_info, e
                 );
-                error!("Failed to save events in multi-aggregate batch: {:?}", e);
+                error!(
+                    "Failed to save events in multi-aggregate batch ({}): {:?}",
+                    partition_info, e
+                );
 
                 // Check if this is a serialization conflict that we should retry
                 let is_serialization_conflict = e
@@ -1832,272 +2099,6 @@ impl WriteBatchingService {
         results
     }
 
-    /// Execute a batch of operations in a single database transaction with pre-fetched versions
-    /// This method prevents version race conditions by using pre-fetched current versions
-    pub async fn execute_batch_with_versions(
-        batch: &WriteBatch,
-        event_store: &Arc<dyn EventStoreTrait>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        write_pool: &Arc<PgPool>,
-        outbox_batcher: &crate::infrastructure::cdc_debezium::OutboxBatcher,
-        config: &WriteBatchingConfig,
-        current_versions: &HashMap<Uuid, i64>,
-    ) -> Vec<(Uuid, WriteOperationResult)> {
-        println!(
-            "[DEBUG] execute_batch_with_versions: Starting batch with {} operations and {} pre-fetched versions",
-            batch.operations.len(),
-            current_versions.len()
-        );
-        let mut results = Vec::new();
-        let max_retries = 3;
-        let mut retry_count = 0;
-
-        while retry_count < max_retries {
-            // Always start a new transaction for each retry attempt
-            let mut transaction = match write_pool.begin().await {
-                Ok(tx) => tx,
-                Err(e) => {
-                    retry_count += 1;
-                    if retry_count >= max_retries {
-                        for (operation_id, _) in &batch.operations {
-                            results.push((
-                                *operation_id,
-                                WriteOperationResult {
-                                    operation_id: *operation_id,
-                                    success: false,
-                                    result: None,
-                                    error: Some(format!(
-                                        "Failed to begin transaction after {} retries: {}",
-                                        max_retries, e
-                                    )),
-                                    duration: Duration::ZERO,
-                                },
-                            ));
-                        }
-                        return results;
-                    }
-                    continue;
-                }
-            };
-
-            let batch_start = Instant::now();
-
-            // Collect all events and outbox messages from all operations
-            let mut all_events = Vec::new();
-            let mut all_outbox_messages = Vec::new();
-            let mut operation_results = Vec::new();
-
-            for (operation_id, operation) in &batch.operations {
-                let op_start = Instant::now();
-                let (events, outbox_messages, result_id) = match operation {
-                    WriteOperation::CreateAccount {
-                        account_id,
-                        owner_name,
-                        initial_balance,
-                    } => Self::prepare_create_account_operation(
-                        *account_id,
-                        owner_name,
-                        *initial_balance,
-                    ),
-                    WriteOperation::DepositMoney { account_id, amount } => {
-                        Self::prepare_deposit_money_operation(*account_id, *amount)
-                    }
-                    WriteOperation::WithdrawMoney { account_id, amount } => {
-                        Self::prepare_withdraw_money_operation(*account_id, *amount)
-                    }
-                };
-
-                all_events.extend(events);
-                all_outbox_messages.extend(outbox_messages);
-
-                operation_results.push((*operation_id, result_id, op_start.elapsed()));
-            }
-
-            info!(
-                "[DEBUG] execute_batch_with_versions: Prepared {} events and {} outbox messages",
-                all_events.len(),
-                all_outbox_messages.len()
-            );
-
-            // Group events by aggregate_id using pre-fetched versions
-            let mut events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, i64)> = Vec::new();
-
-            for event in all_events {
-                let aggregate_id = match &event {
-                    AccountEvent::AccountCreated { account_id, .. } => *account_id,
-                    AccountEvent::MoneyDeposited { account_id, .. } => *account_id,
-                    AccountEvent::MoneyWithdrawn { account_id, .. } => *account_id,
-                    AccountEvent::AccountClosed { account_id, .. } => *account_id,
-                };
-
-                // Find or create entry for this aggregate
-                let entry = events_by_aggregate
-                    .iter_mut()
-                    .find(|(id, _, _)| *id == aggregate_id);
-
-                match entry {
-                    Some((_, events, expected_version)) => {
-                        // For subsequent events on the same aggregate, increment the expected version
-                        *expected_version += 1;
-                        events.push(event);
-                    }
-                    None => {
-                        // Use pre-fetched version instead of calling get_current_version
-                        // For new accounts, use version 0
-                        let is_new_aggregate = match &event {
-                            AccountEvent::AccountCreated { .. } => true,
-                            _ => false,
-                        };
-                        let current_version = if is_new_aggregate {
-                            0 // New accounts start at version 0
-                        } else {
-                            current_versions.get(&aggregate_id).copied().unwrap_or(0)
-                        };
-                        info!(
-                            "[DEBUG] Using pre-fetched version {} for aggregate {}",
-                            current_version, aggregate_id
-                        );
-                        // First event uses current_version, subsequent events will increment
-                        events_by_aggregate.push((aggregate_id, vec![event], current_version));
-                    }
-                }
-            }
-
-            println!("[DEBUG] execute_batch_with_versions: About to call save_events_multi_aggregate_in_transaction with {} aggregates", events_by_aggregate.len());
-            let result = event_store
-                .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
-                .await;
-            println!(
-                "[DEBUG] execute_batch_with_versions: Transaction complete, results: {:?}",
-                result
-            );
-
-            if let Err(e) = result {
-                println!("[DEBUG] execute_batch_with_versions: Failed to save events in multi-aggregate batch: {:?}", e);
-                error!("Failed to save events in multi-aggregate batch: {:?}", e);
-
-                // Check if this is a serialization conflict that we should retry
-                let is_serialization_conflict = e
-                    .to_string()
-                    .contains("could not serialize access due to read/write dependencies");
-
-                if is_serialization_conflict && retry_count < max_retries - 1 {
-                    // Rollback transaction and retry with exponential backoff
-                    let _ = transaction.rollback().await;
-                    retry_count += 1;
-                    let backoff = Duration::from_millis(50 * retry_count as u64); // Use fixed backoff
-                    info!(
-                        "[DEBUG] Serialization conflict detected, retrying in {:?} (attempt {}/{})",
-                        backoff, retry_count, max_retries
-                    );
-                    tokio::time::sleep(backoff).await;
-                    continue;
-                } else {
-                    // Rollback transaction on any error
-                    let _ = transaction.rollback().await;
-                    retry_count += 1;
-                    if retry_count >= max_retries {
-                        // Return failure results for all operations
-                        for (operation_id, _, _) in operation_results {
-                            results.push((
-                                operation_id,
-                                WriteOperationResult {
-                                    operation_id,
-                                    success: false,
-                                    result: None,
-                                    error: Some(format!(
-                                        "Failed to insert events after {} retries: {}",
-                                        max_retries, e
-                                    )),
-                                    duration: Duration::ZERO,
-                                },
-                            ));
-                        }
-                        return results;
-                    }
-                    continue;
-                }
-            }
-
-            // Commit transaction FIRST
-            if let Err(e) = transaction.commit().await {
-                retry_count += 1;
-                if retry_count >= max_retries {
-                    for (operation_id, _, _) in operation_results {
-                        results.push((
-                            operation_id,
-                            WriteOperationResult {
-                                operation_id,
-                                success: false,
-                                result: None,
-                                error: Some(format!(
-                                    "Failed to commit transaction after {} retries: {}",
-                                    max_retries, e
-                                )),
-                                duration: Duration::ZERO,
-                            },
-                        ));
-                    }
-                    return results;
-                }
-                continue;
-            }
-
-            // Transaction committed successfully, now process outbox messages
-            let outbox_start = Instant::now();
-            let mut outbox_success = true;
-
-            // Submit all outbox messages
-            for outbox_message in &all_outbox_messages {
-                if let Err(e) = outbox_batcher.submit(outbox_message.clone()).await {
-                    error!("Failed to submit outbox message: {}", e);
-                    outbox_success = false;
-                }
-            }
-
-            let outbox_duration = outbox_start.elapsed();
-
-            if !outbox_success {
-                error!("Failed to submit some outbox messages");
-                // Don't fail the entire batch for outbox errors, just log them
-            }
-
-            info!(
-                "[DEBUG] execute_batch_with_versions: Completed successfully - {} operations, {} outbox messages, outbox_success={}",
-                batch.operations.len(),
-                all_outbox_messages.len(),
-                outbox_success
-            );
-
-            // Create success results for all operations
-            for (operation_id, result_id, op_duration) in operation_results {
-                results.push((
-                    operation_id,
-                    WriteOperationResult {
-                        operation_id,
-                        success: true,
-                        result: Some(result_id),
-                        error: None,
-                        duration: op_duration,
-                    },
-                ));
-            }
-
-            println!(
-                "[DEBUG] execute_batch_with_versions: Finished batch with {} results",
-                results.len()
-            );
-            return results;
-        }
-
-        // If we get here, all retries failed
-        println!(
-            "[DEBUG] execute_batch_with_versions: All retries failed, returning {} failure results",
-            batch.operations.len()
-        );
-        results
-    }
-
     // Helper methods to prepare operations without executing them
     fn prepare_create_account_operation(
         account_id: Uuid,
@@ -2164,226 +2165,6 @@ impl WriteBatchingService {
         };
 
         (vec![event], vec![outbox_message], account_id)
-    }
-
-    /// Execute create account operation
-    async fn execute_create_account(
-        transaction: &mut Transaction<'_, sqlx::Postgres>,
-        event_store: &Arc<dyn EventStoreTrait>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        outbox_batcher: &crate::infrastructure::cdc_debezium::OutboxBatcher,
-        account_id: Uuid,
-        owner_name: &str,
-        initial_balance: Decimal,
-    ) -> Result<Uuid> {
-        let account = Account::new(account_id, owner_name.to_string(), initial_balance);
-
-        let event = AccountEvent::AccountCreated {
-            account_id,
-            owner_name: owner_name.to_string(),
-            initial_balance,
-        };
-
-        // Save event to event store
-        info!(
-            "🔧 [WriteBatching] Saving MoneyWithdrawn event to event store for account {}",
-            account_id
-        );
-        event_store
-            .save_events_in_transaction(transaction, account_id, vec![event.clone()], 0)
-            .await
-            .map_err(|e| {
-                error!("🔧 [WriteBatching] Event store error for withdraw: {:?}", e);
-                anyhow::anyhow!("Event store error: {:?}", e)
-            })?;
-        info!("🔧 [WriteBatching] Successfully saved MoneyWithdrawn event to event store for account {}", account_id);
-
-        // Create outbox message for CDC pipeline
-        let outbox_message = OutboxMessage {
-            aggregate_id: account_id,
-            event_id: Uuid::new_v4(),
-            event_type: "AccountCreated".to_string(),
-            payload: bincode::serialize(&event)
-                .map_err(|e| anyhow::anyhow!("Event serialization error: {:?}", e))?,
-            topic: "banking-es.public.kafka_outbox_cdc".to_string(), // FIXED: Use correct CDC topic format
-            metadata: None,
-        };
-
-        // Synchronous, robust outbox submission with retries
-        let mut retries = 0;
-        loop {
-            match outbox_batcher.submit(outbox_message.clone()).await {
-                Ok(_) => break,
-                Err(e) => {
-                    retries += 1;
-                    if retries > 5 {
-                        return Err(anyhow::anyhow!(
-                            "Failed to submit outbox message after retries: {}",
-                            e
-                        ));
-                    }
-                    error!(
-                        "Failed to submit outbox message, retrying (attempt {}/5): {}",
-                        retries, e
-                    );
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            }
-        }
-
-        Ok(account_id)
-    }
-
-    /// Execute deposit money operation
-    async fn execute_deposit_money(
-        transaction: &mut Transaction<'_, sqlx::Postgres>,
-        event_store: &Arc<dyn EventStoreTrait>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        outbox_batcher: &crate::infrastructure::cdc_debezium::OutboxBatcher,
-        account_id: Uuid,
-        amount: Decimal,
-    ) -> Result<Uuid> {
-        let event = AccountEvent::MoneyDeposited {
-            account_id,
-            amount,
-            transaction_id: Uuid::new_v4(),
-        };
-
-        // Get current version of the aggregate to avoid optimistic concurrency conflicts
-        // For existing accounts (deposit), use is_new_aggregate: false
-        let current_version = event_store
-            .get_current_version(account_id, false)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get current version: {:?}", e))?;
-
-        // Save event to event store with correct expected version
-        event_store
-            .save_events_in_transaction(
-                transaction,
-                account_id,
-                vec![event.clone()],
-                current_version,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Event store error: {:?}", e))?;
-
-        // Create outbox message for CDC pipeline
-        let outbox_message = OutboxMessage {
-            aggregate_id: account_id,
-            event_id: Uuid::new_v4(),
-            event_type: "MoneyDeposited".to_string(),
-            payload: bincode::serialize(&event)
-                .map_err(|e| anyhow::anyhow!("Event serialization error: {:?}", e))?,
-            topic: "banking-es.public.kafka_outbox_cdc".to_string(), // FIXED: Use correct CDC topic format
-            metadata: None,
-        };
-
-        // Synchronous, robust outbox submission with retries
-        let mut retries = 0;
-        loop {
-            match outbox_batcher.submit(outbox_message.clone()).await {
-                Ok(_) => break,
-                Err(e) => {
-                    retries += 1;
-                    if retries > 5 {
-                        return Err(anyhow::anyhow!(
-                            "Failed to submit outbox message after retries: {}",
-                            e
-                        ));
-                    }
-                    error!(
-                        "Failed to submit outbox message, retrying (attempt {}/5): {}",
-                        retries, e
-                    );
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            }
-        }
-
-        Ok(account_id)
-    }
-
-    /// Execute withdraw money operation
-    async fn execute_withdraw_money(
-        transaction: &mut Transaction<'_, sqlx::Postgres>,
-        event_store: &Arc<dyn EventStoreTrait>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        outbox_batcher: &crate::infrastructure::cdc_debezium::OutboxBatcher,
-        account_id: Uuid,
-        amount: Decimal,
-    ) -> Result<Uuid> {
-        info!(
-            "🔧 [WriteBatching] Starting withdraw_money for account {} with amount {}",
-            account_id, amount
-        );
-        let event = AccountEvent::MoneyWithdrawn {
-            account_id,
-            amount,
-            transaction_id: Uuid::new_v4(),
-        };
-
-        // Get current version of the aggregate to avoid optimistic concurrency conflicts
-        // For existing accounts (withdraw), use is_new_aggregate: false
-        let current_version = event_store
-            .get_current_version(account_id, false)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get current version: {:?}", e))?;
-
-        // Save event to event store with correct expected version
-        event_store
-            .save_events_in_transaction(
-                transaction,
-                account_id,
-                vec![event.clone()],
-                current_version,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Event store error: {:?}", e))?;
-
-        // Create outbox message for CDC pipeline
-        info!(
-            "🔧 [WriteBatching] Creating outbox message for MoneyWithdrawn event for account {}",
-            account_id
-        );
-        let outbox_message = OutboxMessage {
-            aggregate_id: account_id,
-            event_id: Uuid::new_v4(),
-            event_type: "MoneyWithdrawn".to_string(),
-            payload: bincode::serialize(&event).map_err(|e| {
-                error!(
-                    "🔧 [WriteBatching] Event serialization error for withdraw: {:?}",
-                    e
-                );
-                anyhow::anyhow!("Event serialization error: {:?}", e)
-            })?,
-            topic: "banking-es.public.kafka_outbox_cdc".to_string(), // FIXED: Use correct CDC topic format
-            metadata: None,
-        };
-        info!("🔧 [WriteBatching] Successfully created outbox message for MoneyWithdrawn event for account {}", account_id);
-
-        // Synchronous, robust outbox submission with retries
-        let mut retries = 0;
-        loop {
-            match outbox_batcher.submit(outbox_message.clone()).await {
-                Ok(_) => break,
-                Err(e) => {
-                    retries += 1;
-                    if retries > 5 {
-                        return Err(anyhow::anyhow!(
-                            "Failed to submit outbox message after retries: {}",
-                            e
-                        ));
-                    }
-                    error!(
-                        "Failed to submit outbox message, retrying (attempt {}/5): {}",
-                        retries, e
-                    );
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            }
-        }
-
-        Ok(account_id)
     }
 
     /// Get service statistics with channel lifecycle monitoring
@@ -2456,12 +2237,10 @@ pub async fn save_events_with_retry(
 }
 
 #[cfg(test)]
-#[ignore]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore]
     async fn test_write_batching_config() {
         let config = WriteBatchingConfig::default();
         assert_eq!(config.max_batch_size, 50);
@@ -2470,9 +2249,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_write_batch_creation() {
-        let mut batch = WriteBatch::new();
+        let mut batch = WriteBatch::new(Some(0));
         assert_eq!(batch.operations.len(), 0);
 
         batch.add_operation(
@@ -2488,9 +2266,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_write_batch_should_process() {
-        let mut batch = WriteBatch::new();
+        let mut batch = WriteBatch::new(Some(0));
 
         // Test size-based processing
         for _ in 0..50 {

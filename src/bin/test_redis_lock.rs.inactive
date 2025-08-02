@@ -1,0 +1,119 @@
+use banking_es::infrastructure::redis_abstraction::{RealRedisClient, RedisPoolConfig};
+use banking_es::infrastructure::redis_aggregate_lock::{
+    OperationType, RedisAggregateLock, RedisLockConfig,
+};
+use std::sync::Arc;
+use std::time::Duration;
+use uuid::Uuid;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🧪 Redis Lock Test Başlatılıyor...");
+
+    // Redis client oluştur
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let native_client = redis::Client::open(redis_url)?;
+
+    let pool_config = RedisPoolConfig {
+        min_connections: 2,
+        max_connections: 10,
+        connection_timeout: Duration::from_secs(3),
+        idle_timeout: Duration::from_secs(10),
+    };
+
+    let redis_client = RealRedisClient::new(native_client, Some(pool_config));
+
+    // Lock config oluştur
+    let config = RedisLockConfig {
+        connection_pool_size: 50,    // Optimize edilmiş pool boyutu
+        lock_timeout_secs: 30,       // 30 saniye timeout - hızlı release
+        batch_lock_timeout_secs: 60, // 60 saniye batch timeout
+        retry_attempts: 10,          // 10 retry attempt - daha fazla
+        retry_delay_ms: 50,          // 50ms retry delay - daha hızlı
+        enable_metrics: true,
+        enable_lock_free_reads: true,
+        max_batch_size: 25, // 25 batch boyutu - daha küçük
+        connection_timeout: Duration::from_secs(10),
+        idle_timeout: Duration::from_secs(60),
+    };
+
+    // Redis lock instance oluştur
+    let redis_lock = Arc::new(RedisAggregateLock::new(redis_client.clone(), config));
+
+    // Test aggregate ID'leri
+    let test_aggregate_1 = Uuid::new_v4();
+    let test_aggregate_2 = Uuid::new_v4();
+    let test_aggregate_3 = Uuid::new_v4();
+
+    println!("🔍 Test Aggregate ID'leri:");
+    println!("  - Aggregate 1: {}", test_aggregate_1);
+    println!("  - Aggregate 2: {}", test_aggregate_2);
+    println!("  - Aggregate 3: {}", test_aggregate_3);
+
+    // Test 1: Tekil kilit alma
+    println!("\n🧪 Test 1: Tekil Kilit Alma");
+    let lock_acquired = redis_lock
+        .try_lock(test_aggregate_1, OperationType::Write)
+        .await;
+    println!("  - Lock acquired: {}", lock_acquired);
+
+    if lock_acquired {
+        // Kilit başarıyla alındı, şimdi serbest bırak
+        println!("  - Lock serbest bırakılıyor...");
+        redis_lock.unlock(test_aggregate_1).await;
+        println!("  - Lock serbest bırakıldı");
+    }
+
+    // Test 2: Batch kilit alma
+    println!("\n🧪 Test 2: Batch Kilit Alma");
+    let aggregate_ids = vec![test_aggregate_2, test_aggregate_3];
+    let operation_types = vec![OperationType::Write, OperationType::Update];
+
+    let batch_results = redis_lock
+        .try_batch_lock(aggregate_ids.clone(), operation_types)
+        .await;
+    println!("  - Batch lock results: {:?}", batch_results);
+
+    // Başarılı kilitleri serbest bırak
+    for (i, &acquired) in batch_results.iter().enumerate() {
+        if acquired {
+            println!("  - Lock {} serbest bırakılıyor...", aggregate_ids[i]);
+            redis_lock.unlock(aggregate_ids[i]).await;
+        }
+    }
+
+    // Test 3: Aynı aggregate için tekrar kilit alma (başarısız olmalı)
+    println!("\n🧪 Test 3: Aynı Aggregate için Tekrar Kilit Alma");
+    let lock_acquired_1 = redis_lock
+        .try_lock(test_aggregate_1, OperationType::Write)
+        .await;
+    println!("  - İlk lock attempt: {}", lock_acquired_1);
+
+    if lock_acquired_1 {
+        let lock_acquired_2 = redis_lock
+            .try_lock(test_aggregate_1, OperationType::Write)
+            .await;
+        println!("  - İkinci lock attempt: {}", lock_acquired_2);
+
+        if lock_acquired_2 {
+            redis_lock.unlock(test_aggregate_1).await;
+        }
+        redis_lock.unlock(test_aggregate_1).await;
+    }
+
+    // Test 4: Health check
+    println!("\n🧪 Test 4: Health Check");
+    match redis_lock.health_check().await {
+        Ok(healthy) => println!("  - Health check result: {}", healthy),
+        Err(e) => println!("  - Health check error: {:?}", e),
+    }
+
+    // Test 5: Metrics
+    println!("\n🧪 Test 5: Metrics");
+    let metrics = redis_lock.get_metrics_json();
+    println!("  - Metrics: {}", serde_json::to_string_pretty(&metrics)?);
+
+    println!("\n✅ Redis Lock Test Tamamlandı!");
+    Ok(())
+}

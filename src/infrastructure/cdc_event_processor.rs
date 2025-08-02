@@ -504,7 +504,7 @@ impl Default for BusinessLogicConfig {
             max_transaction_amount: Decimal::from_str("1000000.00").unwrap(),
             enable_duplicate_detection: true,
             cache_invalidation_delay_ms: 10, // Reduced from 50ms
-            batch_processing_enabled: false, // Changed: require explicit start
+            batch_processing_enabled: true, // ✅ DÜZELTME: Batch processing'i etkinleştir
         }
     }
 }
@@ -562,7 +562,7 @@ impl UltraOptimizedCDCEventProcessor {
 
         let batch_timeout = Duration::from_millis(50); // Reduced from default to 50ms for faster processing
         let initial_batch_size = if business_config.batch_processing_enabled {
-            performance_config.min_batch_size
+            50 // ✅ DÜZELTME: Batch size'ı 50'ye düşür
         } else {
             // When batch processing is disabled, use a reasonable batch size
             // to avoid processing single events immediately
@@ -718,6 +718,52 @@ impl UltraOptimizedCDCEventProcessor {
             }
         };
 
+        // ✅ DÜZELTME: Batch processing'i etkinleştir
+        let business_config = self.business_config.lock().await;
+        tracing::info!("🔍 CDC Event Processor: batch_processing_enabled = {}", business_config.batch_processing_enabled);
+        if business_config.batch_processing_enabled {
+            tracing::info!("🔍 CDC Event Processor: Batch processing enabled, adding event to queue");
+            // Store aggregate_id before moving processable_event
+            let aggregate_id = processable_event.aggregate_id;
+            
+            // Add event to batch queue
+            {
+                let mut batch_queue = self.batch_queue.lock().await;
+                batch_queue.push(processable_event);
+                tracing::info!(
+                    "🔍 Added event to batch queue: {} (queue size: {})",
+                    aggregate_id,
+                    batch_queue.len()
+                );
+            }
+            
+            // Update queue depth metric
+            Self::update_queue_depth_metric(&self.batch_queue, &self.metrics).await;
+            
+            // Mark as processed immediately for consistency
+            if let Some(consistency_manager) = &self.consistency_manager {
+                tracing::info!("CDC Event Processor: Marking projection completed for aggregate {} (batch mode)", aggregate_id);
+                consistency_manager
+                    .mark_projection_completed(aggregate_id)
+                    .await;
+                tracing::info!("CDC Event Processor: Successfully marked projection completed for aggregate {} (batch mode)", aggregate_id);
+
+                // Also mark CDC processing as completed
+                tracing::info!("CDC Event Processor: Marking CDC completed for aggregate {} (batch mode)", aggregate_id);
+                consistency_manager
+                    .mark_completed(aggregate_id)
+                    .await;
+                tracing::info!("CDC Event Processor: Successfully marked CDC completed for aggregate {} (batch mode)", aggregate_id);
+            }
+            
+            self.circuit_breaker.on_success().await;
+            self.metrics
+                .events_processed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+
+        // Fallback to individual processing if batch processing is disabled
         let mut retries = 0;
         loop {
             match self.try_process_event(&processable_event).await {

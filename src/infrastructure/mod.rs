@@ -29,6 +29,7 @@ pub mod middleware;
 pub mod outbox; // Added
 pub mod outbox_cleanup_service; // Added new cleanup service
 pub mod outbox_poller;
+pub mod read_batching;
 pub mod redis_aggregate_lock;
 pub mod redis_lock_monitor;
 
@@ -71,6 +72,7 @@ pub use outbox_poller::{OutboxPollerConfig, OutboxPollingService};
 pub use projections::ProjectionStore;
 pub use projections::*;
 pub use rate_limiter::*;
+pub use read_batching::*;
 pub use redis_abstraction::*;
 pub use redis_abstraction::{RealRedisClient, RedisClientTrait};
 pub use repository::*;

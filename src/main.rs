@@ -218,6 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             500,                       // batch_size
             Duration::from_millis(50), // batch_timeout
             true,                      // enable_write_batching
+            true,                      // enable_read_batching
             Some(consistency_manager.clone()), // Pass the consistency manager
         )
         .await,

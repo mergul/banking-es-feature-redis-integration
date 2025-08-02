@@ -1109,10 +1109,12 @@ impl EventStore {
             return Ok(());
         }
 
-        // Note: Transaction isolation level is already set by the calling method
-        // No need to set it again here to avoid conflicts
+        let events_len = events.len();
+        info!(
+            "🚀 Starting optimized bulk insert for {} events",
+            events_len
+        );
 
-        // Since we're setting versions correctly in the batch processor, we can just insert directly
         // Group events by aggregate_id for better performance
         let mut events_by_aggregate: std::collections::HashMap<Uuid, Vec<Event>> =
             std::collections::HashMap::new();
@@ -1123,34 +1125,76 @@ impl EventStore {
                 .push(event);
         }
 
-        // Insert events for each aggregate using batch insert
+        // Use true bulk insert for each aggregate group
         for (aggregate_id, aggregate_events) in events_by_aggregate {
-            // Use simple batch insert for better performance
+            if aggregate_events.is_empty() {
+                continue;
+            }
+
+            // Build bulk INSERT query for this aggregate
+            let mut query = String::from(
+                "INSERT INTO events (id, aggregate_id, event_type, event_data, version, timestamp, metadata) VALUES "
+            );
+
+            let mut values = Vec::new();
+            let mut event_data_params = Vec::new();
+            let mut metadata_params = Vec::new();
+
+            for (i, event) in aggregate_events.iter().enumerate() {
+                values.push(format!(
+                    "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                    7 * i + 1,
+                    7 * i + 2,
+                    7 * i + 3,
+                    7 * i + 4,
+                    7 * i + 5,
+                    7 * i + 6,
+                    7 * i + 7
+                ));
+
+                event_data_params.push(&event.event_data);
+                metadata_params
+                    .push(bincode::serialize(&event.metadata).unwrap_or_else(|_| vec![]));
+            }
+
+            query.push_str(&values.join(", "));
+
+            // Execute bulk INSERT for this aggregate
+            let mut query_builder = sqlx::query(&query);
+
+            // Bind all parameters
             for event in &aggregate_events {
-                sqlx::query!(
-                r#"
-                INSERT INTO events (id, aggregate_id, event_type, event_data, version, timestamp, metadata)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    "#,
-                    event.id,
-                    event.aggregate_id,
-                    event.event_type,
-                    event.event_data,
-                    event.version,
-                    event.timestamp,
-                    bincode::serialize(&event.metadata).unwrap_or_else(|_| vec![])
-                )
+                query_builder = query_builder
+                    .bind(event.id)
+                    .bind(event.aggregate_id)
+                    .bind(&event.event_type)
+                    .bind(&event.event_data)
+                    .bind(event.version)
+                    .bind(event.timestamp)
+                    .bind(bincode::serialize(&event.metadata).unwrap_or_else(|_| vec![]));
+            }
+
+            query_builder
                 .execute(&mut **tx)
                 .await
                 .map_err(EventStoreError::DatabaseError)?;
-            }
 
             // Update version cache with the latest version
             if let Some(last_event) = aggregate_events.last() {
                 version_cache.insert(aggregate_id, last_event.version);
             }
+
+            info!(
+                "✅ Bulk inserted {} events for aggregate {}",
+                aggregate_events.len(),
+                aggregate_id
+            );
         }
 
+        info!(
+            "✅ Optimized bulk insert completed for {} events",
+            events_len
+        );
         Ok(())
     }
 
@@ -2114,7 +2158,13 @@ impl EventStore {
             // Sort events by version for this aggregate
             let mut sorted_events = aggregate_events.clone();
             sorted_events.sort_by_key(|e| e.version);
-
+            println!(
+                "🔍 [bulk_insert_events_multi_aggregate] sorted_events: {:?}",
+                sorted_events
+                    .iter()
+                    .map(|e| e.version.to_string())
+                    .collect::<Vec<_>>()
+            );
             let expected_version = sorted_events.first().unwrap().version - 1;
 
             // Check if the expected version matches the current version in the database
