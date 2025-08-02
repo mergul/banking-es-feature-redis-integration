@@ -358,7 +358,7 @@ impl PartitionedBatching {
 
         // Process each partition separately using the correct processor
         let mut all_successful_aggregate_ids = Vec::new();
-        let mut partition_results = Vec::new();
+        let partitions_count = operations_by_partition.len();
 
         for (partition_id, partition_operations) in operations_by_partition {
             info!(
@@ -396,138 +396,80 @@ impl PartitionedBatching {
             let mut transaction = processor.write_pool.begin().await?;
 
             // Group events by aggregate_id for proper bulk insertion
-            let mut events_by_aggregate = Vec::new();
-            let mut outbox_messages = Vec::new(); // Track outbox messages for CDC
+            let mut events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)> = Vec::new();
 
-            for &aggregate_id in &aggregate_ids {
-                let events_for_aggregate: Vec<_> = all_events
-                    .iter()
-                    .filter(|event| match event {
-                        AccountEvent::MoneyDeposited { account_id, .. } => {
-                            *account_id == aggregate_id
-                        }
-                        AccountEvent::MoneyWithdrawn { account_id, .. } => {
-                            *account_id == aggregate_id
-                        }
-                        AccountEvent::AccountCreated { account_id, .. } => {
-                            *account_id == aggregate_id
-                        }
-                        AccountEvent::AccountClosed { account_id, .. } => {
-                            *account_id == aggregate_id
-                        }
-                    })
-                    .cloned()
-                    .collect();
+            // Group events by aggregate_id
+            for event in all_events {
+                let aggregate_id = match &event {
+                    AccountEvent::AccountCreated { account_id, .. } => *account_id,
+                    AccountEvent::MoneyDeposited { account_id, .. } => *account_id,
+                    AccountEvent::MoneyWithdrawn { account_id, .. } => *account_id,
+                    AccountEvent::AccountClosed { account_id, .. } => *account_id,
+                };
 
-                if !events_for_aggregate.is_empty() {
-                    let expected_version =
-                        current_versions.get(&aggregate_id).copied().unwrap_or(0);
-                    events_by_aggregate.push((
-                        aggregate_id,
-                        events_for_aggregate.clone(),
-                        expected_version,
-                    ));
+                // Find or create entry for this aggregate
+                let entry = events_by_aggregate
+                    .iter_mut()
+                    .find(|(id, _, _)| *id == aggregate_id);
 
-                    // Create outbox messages for CDC processing
-                    for event in events_for_aggregate {
-                        let outbox_message = crate::infrastructure::outbox::OutboxMessage {
-                            aggregate_id,
-                            event_id: Uuid::new_v4(),
-                            event_type: match event {
-                                AccountEvent::MoneyDeposited { .. } => "MoneyDeposited".to_string(),
-                                AccountEvent::MoneyWithdrawn { .. } => "MoneyWithdrawn".to_string(),
-                                AccountEvent::AccountCreated { .. } => "AccountCreated".to_string(),
-                                AccountEvent::AccountClosed { .. } => "AccountClosed".to_string(),
-                            },
-                            payload: bincode::serialize(&event).unwrap_or_default(),
-                            topic: "banking-es.public.kafka_outbox_cdc".to_string(),
-                            metadata: None,
-                        };
-                        outbox_messages.push(outbox_message);
+                match entry {
+                    Some((_, events, _)) => {
+                        // For subsequent events on the same aggregate, just add the event
+                        // Version will be determined by event_store
+                        events.push(event);
+                    }
+                    None => {
+                        // For new aggregates, version will be determined by event_store
+                        events_by_aggregate.push((aggregate_id, vec![event], Some(partition_id)));
                     }
                 }
             }
 
+            println!("[DEBUG] submit_write_operations_batch: About to call save_events_multi_aggregate_in_transaction with {} aggregates", events_by_aggregate.len());
             let result = processor
                 .event_store
                 .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
                 .await;
+            println!(
+                "[DEBUG] submit_write_operations_batch: Transaction complete, results: {:?}",
+                result
+            );
 
-            // If events were saved successfully, create outbox messages for CDC
-            if result.is_ok() && !outbox_messages.is_empty() {
-                info!(
-                    "🔧 [Bulk] Creating {} outbox messages for CDC processing",
-                    outbox_messages.len()
+            if let Err(e) = result {
+                let partition_info = format!("partition_{}", partition_id);
+                println!(
+                    "[DEBUG] submit_write_operations_batch: Failed to save events in multi-aggregate batch ({}): {:?}",
+                    partition_info, e
+                );
+                error!(
+                    "Failed to save events in multi-aggregate batch ({}): {:?}",
+                    partition_info, e
                 );
 
-                // Submit outbox messages individually since OutboxBatcher doesn't have bulk add method
-                let mut outbox_success_count = 0;
-                for outbox_message in outbox_messages {
-                    if let Err(e) = processor.outbox_batcher.submit(outbox_message).await {
-                        error!("🔧 [Bulk] Failed to create outbox message: {}", e);
-                        // Don't fail the entire batch, just log the error
-                    } else {
-                        outbox_success_count += 1;
-                    }
-                }
-
-                if outbox_success_count > 0 {
-                    info!(
-                        "🔧 [Bulk] Successfully created {} outbox messages for CDC",
-                        outbox_success_count
-                    );
-                }
+                // Rollback transaction on error
+                let _ = transaction.rollback().await;
+                return Err(anyhow::anyhow!("Failed to save events: {}", e));
             }
 
-            // Commit the transaction if successful
-            if result.is_ok() {
-                transaction.commit().await?;
-            } else {
-                transaction.rollback().await?;
+            // Commit transaction
+            if let Err(e) = transaction.commit().await {
+                return Err(anyhow::anyhow!("Failed to commit transaction: {}", e));
             }
 
-            let batch_duration = batch_start.elapsed();
-            let aggregate_count = aggregate_ids.len();
-
-            match result {
-                Ok(_) => {
-                    info!(
-                        "✅ Partition {} processing completed in {:?} for {} aggregates",
-                        partition_id, batch_duration, aggregate_count
-                    );
-                    all_successful_aggregate_ids.extend(aggregate_ids);
-                    partition_results.push((partition_id, aggregate_count, aggregate_count));
-                }
-                Err(e) => {
-                    error!("❌ Partition {} processing failed: {}", partition_id, e);
-                    partition_results.push((partition_id, 0, aggregate_count));
-                }
-            }
-        }
-
-        // Log partition summary
-        info!(
-            "📊 Partition processing summary: {} partitions processed",
-            partition_results.len()
-        );
-        for (partition_id, successful, total) in partition_results {
             info!(
-                "   Partition {}: {}/{} successful ({:.1}%)",
-                partition_id,
-                successful,
-                total,
-                if total > 0 {
-                    (successful as f64 / total as f64) * 100.0
-                } else {
-                    0.0
-                }
+                "[DEBUG] submit_write_operations_batch: Completed successfully - {} aggregates in partition {}",
+                aggregate_ids.len(),
+                partition_id
             );
+
+            // Add successful aggregate IDs to results
+            all_successful_aggregate_ids.extend(aggregate_ids);
         }
 
         info!(
-            "✅ True batch write operation completed: {} successful, {} failed",
+            "✅ Completed batch write operation for {} aggregates across {} partitions",
             all_successful_aggregate_ids.len(),
-            operations_count - all_successful_aggregate_ids.len()
+            partitions_count
         );
 
         Ok(all_successful_aggregate_ids)
@@ -1914,8 +1856,9 @@ impl WriteBatchingService {
             );
 
             // Group events by aggregate_id for efficient batch insertion
-            let mut events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, i64)> = Vec::new();
+            let mut events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)> = Vec::new();
 
+            // Group events by aggregate_id
             for event in all_events {
                 let aggregate_id = match &event {
                     AccountEvent::AccountCreated { account_id, .. } => *account_id,
@@ -1930,27 +1873,14 @@ impl WriteBatchingService {
                     .find(|(id, _, _)| *id == aggregate_id);
 
                 match entry {
-                    Some((_, events, expected_version)) => {
-                        // For subsequent events on the same aggregate, increment the expected version
-                        *expected_version += 1;
+                    Some((_, events, _)) => {
+                        // For subsequent events on the same aggregate, just add the event
+                        // Version will be determined by event_store
                         events.push(event);
                     }
                     None => {
-                        // Get current version for this aggregate (first event)
-                        // For new accounts, use is_new_aggregate: true
-                        let is_new_aggregate = match &event {
-                            AccountEvent::AccountCreated { .. } => true,
-                            _ => false,
-                        };
-                        let current_version = match event_store
-                            .get_current_version(aggregate_id, is_new_aggregate)
-                            .await
-                        {
-                            Ok(version) => version,
-                            Err(_) => 0, // Default to 0 if aggregate doesn't exist
-                        };
-                        // First event uses current_version, subsequent events will increment
-                        events_by_aggregate.push((aggregate_id, vec![event], current_version));
+                        // For new aggregates, version will be determined by event_store
+                        events_by_aggregate.push((aggregate_id, vec![event], partition_id));
                     }
                 }
             }

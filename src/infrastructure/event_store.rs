@@ -2025,7 +2025,7 @@ impl EventStore {
     async fn save_events_multi_aggregate_in_transaction_impl(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, i64)>, // (aggregate_id, events, expected_version)
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>, // (aggregate_id, events, partition_id)
     ) -> Result<(), EventStoreError> {
         if events_by_aggregate.is_empty() {
             return Ok(());
@@ -2039,29 +2039,44 @@ impl EventStore {
 
         // Collect all events from all aggregates into a single batch
         let mut all_events = Vec::new();
+        let mut events_partition_id = None;
 
-        for (aggregate_id, events, expected_version) in events_by_aggregate {
+        // First, get all aggregate IDs to fetch their current versions
+        let aggregate_ids: Vec<Uuid> = events_by_aggregate
+            .iter()
+            .map(|(aggregate_id, _, _)| *aggregate_id)
+            .collect();
+
+        // Get current versions for all aggregates in a single query
+        let versions_map = self.get_current_versions_batch(aggregate_ids).await?;
+
+        for (aggregate_id, events, partition_id) in events_by_aggregate {
             if events.is_empty() {
                 continue;
             }
+            events_partition_id = partition_id;
 
-            // Prepare events for this aggregate
-            let mut current_event_version = expected_version;
+            // Get current version for this aggregate
+            let current_version = *versions_map.get(&aggregate_id).unwrap_or(&0);
+
+            // Prepare events for this aggregate with correct versioning
+            let mut next_version = current_version + 1;
             let prepared_events: Vec<Event> = events
                 .into_iter()
                 .map(|domain_event| {
-                    current_event_version += 1;
                     let event_data = bincode::serialize(&domain_event)
                         .map_err(EventStoreError::SerializationErrorBincode)?;
-                    Ok(Event {
+                    let event = Event {
                         id: Uuid::new_v4(),
                         aggregate_id,
                         event_type: domain_event.event_type().to_string(),
                         event_data,
-                        version: current_event_version,
+                        version: next_version,
                         timestamp: Utc::now(),
                         metadata: EventMetadata::default(),
-                    })
+                    };
+                    next_version += 1;
+                    Ok(event)
                 })
                 .collect::<Result<Vec<Event>, EventStoreError>>()?;
 
@@ -2089,11 +2104,12 @@ impl EventStore {
         );
 
         // Bulk insert all events in a single multi-aggregate operation
-        Self::bulk_insert_events_multi_aggregate(
+        self.bulk_insert_events_multi_aggregate(
             tx,
             all_events.clone(),
             &self.metrics,
             &self.version_cache,
+            events_partition_id,
         )
         .await?;
 
@@ -2109,10 +2125,12 @@ impl EventStore {
     /// Bulk insert events for multiple aggregates in a single database operation
     /// This is the true multi-aggregate version that can insert events from different aggregates
     async fn bulk_insert_events_multi_aggregate(
+        &self,
         tx: &mut Transaction<'_, Postgres>,
         events: Vec<Event>,
         metrics: &EventStoreMetrics,
         version_cache: &DashMap<Uuid, i64>,
+        partition_id: Option<usize>,
     ) -> Result<(), EventStoreError> {
         println!(
             "🚀 [DEBUG] bulk_insert_events_multi_aggregate called with {} events",
@@ -2121,71 +2139,6 @@ impl EventStore {
 
         if events.is_empty() {
             return Ok(());
-        }
-
-        // Note: Transaction isolation level is already set by the calling method
-        // No need to set it again here to avoid conflicts
-
-        // Group events by aggregate_id for version checking
-        let mut events_by_aggregate: HashMap<Uuid, Vec<Event>> = HashMap::new();
-        for event in &events {
-            events_by_aggregate
-                .entry(event.aggregate_id)
-                .or_insert_with(Vec::new)
-                .push(event.clone());
-        }
-
-        // Check versions for existing aggregates only (skip new aggregates to prevent serialization conflicts)
-        for (aggregate_id, aggregate_events) in &events_by_aggregate {
-            if aggregate_events.is_empty() {
-                continue;
-            }
-
-            // Check if this is a new aggregate (AccountCreated event)
-            let is_new_aggregate = aggregate_events
-                .iter()
-                .any(|e| e.event_type == "AccountCreated");
-
-            if is_new_aggregate {
-                // Skip version checking for new aggregates to prevent serialization conflicts
-                println!(
-                    "🔍 [DEBUG] Skipping version check for new aggregate {} (AccountCreated event)",
-                    aggregate_id
-                );
-                continue;
-            }
-
-            // Sort events by version for this aggregate
-            let mut sorted_events = aggregate_events.clone();
-            sorted_events.sort_by_key(|e| e.version);
-            println!(
-                "🔍 [bulk_insert_events_multi_aggregate] sorted_events: {:?}",
-                sorted_events
-                    .iter()
-                    .map(|e| e.version.to_string())
-                    .collect::<Vec<_>>()
-            );
-            let expected_version = sorted_events.first().unwrap().version - 1;
-
-            // Check if the expected version matches the current version in the database
-            let current_version = sqlx::query_as!(
-                EventRow,
-                "SELECT id, aggregate_id, event_type, event_data, version, timestamp, metadata FROM events WHERE aggregate_id = $1 ORDER BY version DESC LIMIT 1",
-                aggregate_id
-            )
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(EventStoreError::DatabaseError)?
-            .map(|row| row.version)
-            .unwrap_or(0);
-
-            if current_version != expected_version {
-                return Err(EventStoreError::OptimisticConcurrencyConflict {
-                    aggregate_id: *aggregate_id,
-                    expected: expected_version,
-                    actual: Some(current_version),
-                });
-            }
         }
 
         // Use PostgreSQL COPY for maximum insert performance
@@ -2212,6 +2165,14 @@ impl EventStore {
             .map_err(EventStoreError::DatabaseError)?;
 
         // Update version cache for all aggregates
+        let mut events_by_aggregate: HashMap<Uuid, Vec<Event>> = HashMap::new();
+        for event in &events {
+            events_by_aggregate
+                .entry(event.aggregate_id)
+                .or_insert_with(Vec::new)
+                .push(event.clone());
+        }
+
         for (aggregate_id, aggregate_events) in events_by_aggregate {
             if let Some(max_event) = aggregate_events.iter().max_by_key(|e| e.version) {
                 version_cache.insert(aggregate_id, max_event.version);
@@ -2220,6 +2181,68 @@ impl EventStore {
 
         println!("✅ [DEBUG] bulk_insert_events_multi_aggregate completed successfully");
         Ok(())
+    }
+
+    /// Get current versions for multiple aggregates in a single query
+    /// This is much more efficient than querying each aggregate separately
+    pub async fn get_current_versions_batch(
+        &self,
+        aggregate_ids: Vec<Uuid>,
+    ) -> Result<HashMap<Uuid, i64>, EventStoreError> {
+        if aggregate_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut result = HashMap::new();
+        let mut uncached_aggregates = Vec::new();
+
+        // First check cache for all aggregates
+        for aggregate_id in aggregate_ids {
+            if let Some(cached_version) = self.version_cache.get(&aggregate_id) {
+                result.insert(aggregate_id, *cached_version);
+            } else {
+                uncached_aggregates.push(aggregate_id);
+            }
+        }
+
+        // If all were cached, return immediately
+        if uncached_aggregates.is_empty() {
+            return Ok(result);
+        }
+
+        // Single query for all uncached aggregates
+        let read_pool = self.pools.select_pool(OperationType::Read);
+        let query = sqlx::query!(
+            r#"
+            SELECT aggregate_id, MAX(version) as version
+            FROM events
+            WHERE aggregate_id = ANY($1)
+            GROUP BY aggregate_id
+            "#,
+            &uncached_aggregates
+        );
+
+        let rows = query
+            .fetch_all(read_pool)
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
+
+        // Process results and update cache
+        for row in rows {
+            let version = row.version.unwrap_or(0);
+            result.insert(row.aggregate_id, version);
+            self.version_cache.insert(row.aggregate_id, version);
+        }
+
+        // Set version 0 for aggregates not found in database
+        for aggregate_id in uncached_aggregates {
+            if !result.contains_key(&aggregate_id) {
+                result.insert(aggregate_id, 0);
+                self.version_cache.insert(aggregate_id, 0);
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -2476,6 +2499,13 @@ pub trait EventStoreTrait: Send + Sync + 'static {
         aggregate_id: Uuid,
         is_new_aggregate: bool,
     ) -> Result<i64, EventStoreError>;
+
+    /// Get current versions for multiple aggregates in a single query
+    async fn get_current_versions_batch(
+        &self,
+        aggregate_ids: Vec<Uuid>,
+    ) -> Result<HashMap<Uuid, i64>, EventStoreError>;
+
     async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>, EventStoreError>;
     async fn get_all_accounts(&self) -> Result<Vec<Account>, EventStoreError>;
     fn get_pool(&self) -> PgPool;
@@ -2495,7 +2525,7 @@ pub trait EventStoreTrait: Send + Sync + 'static {
     async fn save_events_multi_aggregate_in_transaction(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, i64)>, // (aggregate_id, events, expected_version)
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>, // (aggregate_id, events, partition_id)
     ) -> Result<(), EventStoreError>;
 }
 
@@ -2566,6 +2596,13 @@ impl EventStoreTrait for EventStore {
         Ok(version)
     }
 
+    async fn get_current_versions_batch(
+        &self,
+        aggregate_ids: Vec<Uuid>,
+    ) -> Result<HashMap<Uuid, i64>, EventStoreError> {
+        self.get_current_versions_batch(aggregate_ids).await
+    }
+
     async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>, EventStoreError> {
         self.get_account(account_id).await
     }
@@ -2614,7 +2651,7 @@ impl EventStoreTrait for EventStore {
     async fn save_events_multi_aggregate_in_transaction(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, i64)>, // (aggregate_id, events, expected_version)
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>, // (aggregate_id, events, partition_id)
     ) -> Result<(), EventStoreError> {
         // Call the main implementation directly
         self.save_events_multi_aggregate_in_transaction_impl(tx, events_by_aggregate)
