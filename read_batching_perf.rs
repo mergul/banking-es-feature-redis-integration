@@ -59,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_batch_size: 20000, // 10000'den 20000'e artırıldı
         max_batch_wait_time_ms: 1,
         num_read_partitions: 32,
+        num_read_pools: 16,
         enable_parallel_reads: true,
         cache_ttl_secs: 300,
         max_retries: 0,

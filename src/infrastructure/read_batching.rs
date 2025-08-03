@@ -16,6 +16,7 @@ use uuid::Uuid;
 const NUM_READ_PARTITIONS: usize = 32; // 16'dan 32'ye artırıldı
 const DEFAULT_READ_BATCH_SIZE: usize = 5000; // 1000'den 5000'e artırıldı
 const READ_CACHE_TTL_SECS: u64 = 300;
+const NUM_READ_POOLS: usize = 16; // Yeni: Read pools sayısı
 
 fn partition_for_read_operation(account_id: &Uuid, num_partitions: usize) -> usize {
     let mut hasher = fxhash::FxHasher::default();
@@ -29,6 +30,7 @@ pub struct ReadBatchingConfig {
     pub max_batch_size: usize,
     pub max_batch_wait_time_ms: u64,
     pub num_read_partitions: usize,
+    pub num_read_pools: usize, // Yeni: Read pools sayısı
     pub enable_parallel_reads: bool,
     pub cache_ttl_secs: u64,
     pub max_retries: u32,
@@ -41,6 +43,7 @@ impl Default for ReadBatchingConfig {
             max_batch_size: 10000,     // 2000'den 10000'e artırıldı
             max_batch_wait_time_ms: 1, // 5'ten 1'e düşürüldü
             num_read_partitions: NUM_READ_PARTITIONS,
+            num_read_pools: NUM_READ_POOLS, // Yeni: Default pool sayısı
             enable_parallel_reads: true,
             cache_ttl_secs: READ_CACHE_TTL_SECS,
             max_retries: 0,      // Retry'ı tamamen kaldırdık
@@ -164,11 +167,13 @@ impl PartitionedReadBatching {
         let mut partitions = Vec::new();
 
         for partition_id in 0..config.num_read_partitions {
+            // Optimized pool distribution: Use dedicated pool per partition group
+            let pool_index = partition_id % config.num_read_pools;
             let partition = Arc::new(ReadBatchingPartition::new(
                 partition_id,
                 config.clone(),
                 projection_store.clone(),
-                read_pools[partition_id % read_pools.len()].clone(),
+                read_pools[pool_index].clone(), // Dedicated pool per partition group
             ));
             partitions.push(partition);
         }

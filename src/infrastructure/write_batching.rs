@@ -23,9 +23,10 @@ use crate::infrastructure::redis_aggregate_lock::{
 use rand::Rng;
 
 const NUM_PARTITIONS: usize = 8; // Increased from 4 to 8 to reduce partition conflicts
-const DEFAULT_BATCH_SIZE: usize = 50;
-const CREATE_BATCH_SIZE: usize = 100; // Optimized batch size for create operations
+const DEFAULT_BATCH_SIZE: usize = 1000;
+const CREATE_BATCH_SIZE: usize = 1000; // Optimized batch size for create operations
 const CREATE_PARTITION_ID: usize = 0; // Dedicated partition for create operations
+const WRITE_POOL_SIZE: usize = 200; // Optimized write pool size for single pool usage
 
 fn partition_for_aggregate(aggregate_id: &Uuid, num_partitions: usize) -> usize {
     let mut hasher = DefaultHasher::new();
@@ -882,7 +883,7 @@ pub struct WriteBatchingConfig {
 impl Default for WriteBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 50,          // Reduced from 100 to 50 for faster processing
+            max_batch_size: 1000,        // Increased from 100 to 1000 for faster processing
             max_batch_wait_time_ms: 100, // Increased from 10ms to 100ms for better batching
             max_retries: 2,              // Reduced from 3 to 2 for faster processing
             retry_backoff_ms: 5,         // Reduced from 10ms to 5ms for faster retries
