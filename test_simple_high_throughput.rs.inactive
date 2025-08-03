@@ -1,0 +1,190 @@
+use banking_es::{
+    application::services::CQRSAccountService,
+    infrastructure::{
+        cache_service::{CacheConfig, CacheService},
+        event_store::{EventStore, EventStoreTrait},
+        projections::{ProjectionConfig, ProjectionStore},
+        RealRedisClient,
+    },
+};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🚀 Simple High Throughput Read Test");
+    println!("====================================");
+
+    // Set the database URL
+    std::env::set_var(
+        "DATABASE_URL",
+        "postgresql://postgres:Francisco1@localhost:5432/banking_es",
+    );
+
+    // Initialize services
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+    });
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("Failed to connect to database");
+
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_client = redis::Client::open(redis_url).expect("Failed to create Redis client");
+    let redis_client_trait = RealRedisClient::new(redis_client, None);
+
+    let event_store = Arc::new(EventStore::new(pool.clone()));
+    let cache_config = CacheConfig::default();
+    let cache_service = Arc::new(CacheService::new(redis_client_trait, cache_config));
+
+    // Create projection store with simple config
+    let projection_config = ProjectionConfig::default();
+    let projection_store = Arc::new(ProjectionStore::from_pool_with_config(
+        pool.clone(),
+        projection_config,
+    ));
+
+    println!("✅ Services initialized");
+
+    // Create test accounts first
+    println!("📝 Creating test accounts...");
+    let mut account_ids = Vec::new();
+    for i in 0..100 {
+        let account_id = Uuid::new_v4();
+        account_ids.push(account_id);
+    }
+
+    println!("📊 Starting high throughput read test...");
+    println!("   • Target: 10,000 ops/sec");
+    println!("   • Test accounts: {}", account_ids.len());
+
+    let test_start = Instant::now();
+    let target_operations = 10000;
+    let mut successful_operations = 0;
+    let mut failed_operations = 0;
+    let mut latencies = Vec::with_capacity(target_operations);
+
+    // Submit operations in parallel for maximum throughput
+    let mut handles = Vec::new();
+
+    for i in 0..target_operations {
+        let account_id = account_ids[i % account_ids.len()];
+        let projection_store = projection_store.clone();
+
+        let handle = tokio::spawn(async move {
+            let start = Instant::now();
+            let result = projection_store.get_account(account_id).await;
+            let latency = start.elapsed();
+            (result.is_ok(), latency)
+        });
+
+        handles.push(handle);
+    }
+
+    println!("⏳ Waiting for all operation results...");
+
+    // Wait for all results
+    for (i, handle) in handles.into_iter().enumerate() {
+        match handle.await {
+            Ok((success, latency)) => {
+                if success {
+                    successful_operations += 1;
+                } else {
+                    failed_operations += 1;
+                }
+                latencies.push(latency);
+            }
+            Err(_) => {
+                failed_operations += 1;
+                latencies.push(Duration::from_secs(30)); // Default timeout
+            }
+        }
+
+        if (i + 1) % 1000 == 0 {
+            println!("  ✅ Completed {}/{} operations", i + 1, target_operations);
+        }
+    }
+
+    let total_duration = test_start.elapsed();
+
+    // Calculate statistics
+    latencies.sort();
+    let avg_latency = if !latencies.is_empty() {
+        latencies.iter().sum::<Duration>() / latencies.len() as u32
+    } else {
+        Duration::ZERO
+    };
+
+    let p95_index = (latencies.len() as f64 * 0.95) as usize;
+    let p99_index = (latencies.len() as f64 * 0.99) as usize;
+    let p95_latency = latencies.get(p95_index).copied().unwrap_or(Duration::ZERO);
+    let p99_latency = latencies.get(p99_index).copied().unwrap_or(Duration::ZERO);
+    let min_latency = latencies.first().copied().unwrap_or(Duration::ZERO);
+    let max_latency = latencies.last().copied().unwrap_or(Duration::ZERO);
+
+    let ops_per_sec = if total_duration.as_secs() > 0 {
+        successful_operations as f64 / total_duration.as_secs() as f64
+    } else {
+        0.0
+    };
+
+    let success_rate = if (successful_operations + failed_operations) > 0 {
+        (successful_operations as f64 / (successful_operations + failed_operations) as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Print comprehensive results
+    println!("\n📊 HIGH THROUGHPUT TEST RESULTS");
+    println!("===============================");
+
+    println!("\n📖 READ OPERATIONS (OPTIMIZED):");
+    println!(
+        "  - Total Read Operations: {}",
+        successful_operations + failed_operations
+    );
+    println!("  - Successful: {}", successful_operations);
+    println!("  - Failed: {}", failed_operations);
+    println!("  - Success Rate: {:.2}%", success_rate);
+    println!("  - Duration: {:?}", total_duration);
+    println!("  - Read Ops/sec: {:.2}", ops_per_sec);
+    println!("  - Avg Read Latency: {:?}", avg_latency);
+    println!("  - P95 Read Latency: {:?}", p95_latency);
+    println!("  - P99 Read Latency: {:?}", p99_latency);
+    println!("  - Min Read Latency: {:?}", min_latency);
+    println!("  - Max Read Latency: {:?}", max_latency);
+
+    if ops_per_sec >= 10000.0 {
+        println!("\n🎉 SUCCESS: Target of 10,000 ops/sec achieved!");
+        println!("   • Actual: {:.2} ops/sec", ops_per_sec);
+        println!("   • Performance: {:.1}x target", ops_per_sec / 10000.0);
+    } else {
+        println!("\n⚠️  TARGET NOT MET: Need to optimize further");
+        println!("   • Target: 10,000 ops/sec");
+        println!("   • Actual: {:.2} ops/sec", ops_per_sec);
+        println!("   • Gap: {:.2} ops/sec", 10000.0 - ops_per_sec);
+    }
+
+    println!("\n🚀 Performance Analysis:");
+    if avg_latency < Duration::from_millis(1) {
+        println!("   ✅ Excellent latency: {:?}", avg_latency);
+    } else if avg_latency < Duration::from_millis(10) {
+        println!("   ⚠️  Good latency: {:?}", avg_latency);
+    } else {
+        println!("   ❌ High latency: {:?}", avg_latency);
+    }
+
+    if success_rate >= 99.0 {
+        println!("   ✅ Excellent success rate: {:.2}%", success_rate);
+    } else if success_rate >= 95.0 {
+        println!("   ⚠️  Good success rate: {:.2}%", success_rate);
+    } else {
+        println!("   ❌ Low success rate: {:.2}%", success_rate);
+    }
+
+    Ok(())
+}

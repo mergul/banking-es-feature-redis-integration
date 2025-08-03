@@ -147,48 +147,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
         }),
         write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "500".to_string())
+            .unwrap_or_else(|_| "200".to_string())
             .parse()
-            .unwrap_or(500)
-            / 3, // Smaller write pool
+            .unwrap_or(200)
+            / 5, // Smaller write pool
         write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
             .unwrap_or_else(|_| "100".to_string())
             .parse()
             .unwrap_or(100)
-            / 3,
+            / 5,
         read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "500".to_string())
+            .unwrap_or_else(|_| "200".to_string())
             .parse()
-            .unwrap_or(500)
-            * 2
-            / 3,
+            .unwrap_or(200)
+            * 4
+            / 5,
         read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
             .unwrap_or_else(|_| "100".to_string())
             .parse()
             .unwrap_or(100)
-            * 2
-            / 3,
+            * 4
+            / 5,
         acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "15".to_string())
             .parse()
-            .unwrap_or(30),
+            .unwrap_or(15),
         read_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "900".to_string())
             .parse()
-            .unwrap_or(30)
+            .unwrap_or(900)
             * 2, // Longer lifetime for reads
         write_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "300".to_string())
             .parse()
-            .unwrap_or(30),
+            .unwrap_or(300),
         read_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "300".to_string())
             .parse()
-            .unwrap_or(30),
+            .unwrap_or(300),
         write_max_lifetime_secs: std::env::var("DB_WRITE_MAX_LIFETIME")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| "900".to_string())
             .parse()
-            .unwrap_or(30),
+            .unwrap_or(900),
     };
 
     let pools = Arc::new(PartitionedPools::new(pool_config).await?);
@@ -227,6 +227,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start write batching service
     cqrs_service.start_write_batching().await?;
     info!("Write batching service started");
+
+    // Start read batching service
+    cqrs_service.start_read_batching().await?;
+    info!("Read batching service started");
 
     let mut cdc_service_manager: Option<CDCServiceManager> = None;
 

@@ -100,3 +100,11 @@ toml = "0.8"
 [lints.rust]
 warnings = "allow"
 
+[[bin]]
+name = "read_batching_perf"
+path = "read_batching_perf.rs"
+
+[[bin]]
+name = "banking-es"
+path = "src/main.rs"
+

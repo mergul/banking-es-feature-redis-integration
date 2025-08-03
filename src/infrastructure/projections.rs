@@ -114,35 +114,14 @@ pub struct ProjectionConfig {
 impl Default for ProjectionConfig {
     fn default() -> Self {
         Self {
-            cache_ttl_secs: std::env::var("CACHE_DEFAULT_TTL")
-                .unwrap_or_else(|_| "300".to_string())
-                .parse()
-                .unwrap_or(300),
-            batch_size: std::env::var("DB_BATCH_SIZE")
-                .unwrap_or_else(|_| "1000".to_string())
-                .parse()
-                .unwrap_or(1000),
-            batch_timeout_ms: 50, // Increased from 25ms to 50ms
-            max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "80".to_string())
-                .parse()
-                .unwrap_or(80),
-            min_connections: std::env::var("PROJECTION_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "20".to_string())
-                .parse()
-                .unwrap_or(20),
-            acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
-                .unwrap_or_else(|_| "30".to_string())
-                .parse()
-                .unwrap_or(30),
-            idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-                .unwrap_or_else(|_| "600".to_string())
-                .parse()
-                .unwrap_or(600),
-            max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
-                .unwrap_or_else(|_| "1800".to_string())
-                .parse()
-                .unwrap_or(1800),
+            cache_ttl_secs: 600,     // Increased from default
+            batch_size: 1000,        // Increased from default
+            batch_timeout_ms: 10,    // Reduced from default
+            max_connections: 100,    // Increased from default
+            min_connections: 20,     // Increased from default
+            acquire_timeout_secs: 5, // Reduced from default
+            idle_timeout_secs: 300,  // Reduced from default
+            max_lifetime_secs: 1800, // Reduced from default
         }
     }
 }
@@ -160,6 +139,7 @@ enum ProjectionUpdate {
 pub trait ProjectionStoreTrait: Send + Sync {
     async fn get_account(&self, account_id: Uuid) -> Result<Option<AccountProjection>>;
     async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>>;
+    async fn get_accounts_batch(&self, account_ids: &[Uuid]) -> Result<Vec<AccountProjection>>;
     async fn get_account_transactions(
         &self,
         account_id: Uuid,
@@ -179,6 +159,11 @@ impl ProjectionStoreTrait for ProjectionStore {
     async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>> {
         self.get_all_accounts().await
     }
+
+    async fn get_accounts_batch(&self, account_ids: &[Uuid]) -> Result<Vec<AccountProjection>> {
+        self.get_accounts_batch(account_ids).await
+    }
+
     async fn get_account_transactions(
         &self,
         account_id: Uuid,
@@ -587,7 +572,7 @@ impl ProjectionStore {
             "#,
             account_id
         )
-        .fetch_optional(&self.pools.write_pool)
+        .fetch_optional(&self.pools.read_pool) // Use read pool instead of write pool
         .await?;
 
         // Add debug print after DB query
@@ -764,6 +749,90 @@ impl ProjectionStore {
         );
 
         Ok(accounts)
+    }
+
+    /// True batch query: Get multiple accounts in a single SQL query
+    pub async fn get_accounts_batch(&self, account_ids: &[Uuid]) -> Result<Vec<AccountProjection>> {
+        if account_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let start_time = Instant::now();
+
+        // Try cache first for all accounts
+        let mut cached_accounts = Vec::new();
+        let mut uncached_ids = Vec::new();
+
+        {
+            let cache = self.account_cache.read().await;
+            for &account_id in account_ids {
+                if let Some(entry) = cache.get(&account_id) {
+                    if entry.last_accessed.elapsed() < entry.ttl {
+                        cached_accounts.push(entry.data.clone());
+                    } else {
+                        uncached_ids.push(account_id);
+                    }
+                } else {
+                    uncached_ids.push(account_id);
+                }
+            }
+        }
+
+        // If all accounts were cached, return immediately
+        if uncached_ids.is_empty() {
+            self.metrics.cache_hits.fetch_add(
+                account_ids.len() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            return Ok(cached_accounts);
+        }
+
+        self.metrics.cache_misses.fetch_add(
+            uncached_ids.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        // Fetch uncached accounts in a single batch query
+        let db_accounts = sqlx::query_as!(
+            AccountProjection,
+            r#"
+            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            FROM account_projections
+            WHERE id = ANY($1)
+            ORDER BY updated_at DESC
+            "#,
+            &uncached_ids
+        )
+        .fetch_all(self.pools.select_pool(OperationType::Read))
+        .await?;
+
+        // Update cache for fetched accounts
+        {
+            let mut cache = self.account_cache.write().await;
+            for account in &db_accounts {
+                cache.insert(
+                    account.id,
+                    CacheEntry {
+                        data: account.clone(),
+                        last_accessed: Instant::now(),
+                        version: self
+                            .cache_version
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        ttl: Duration::from_secs(self.config.cache_ttl_secs),
+                    },
+                );
+            }
+        }
+
+        // Combine cached and database results
+        cached_accounts.extend(db_accounts);
+
+        self.metrics.query_duration.fetch_add(
+            start_time.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(cached_accounts)
     }
 
     // async fn update_processor(
