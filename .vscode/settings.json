@@ -5,5 +5,5 @@
   "rust-analyzer.cargo.loadOutDirsFromCheck": true,
   "rust-analyzer.procMacro.enable": true,
   "cmake.ignoreCMakeListsMissing": true,
-  "editor.fontSize": 22
+  "editor.fontSize": 16
 }

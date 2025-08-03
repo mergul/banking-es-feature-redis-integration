@@ -1392,8 +1392,8 @@ async fn test_write_batching_multi_row_inserts() {
     };
 
     println!("🔍 Test environment setup successful, proceeding to Phase 1");
-    let total_transactions = 0;
-    let total_balance = Decimal::from(0);
+    let mut total_transactions = 0;
+    let mut total_balance = Decimal::from(0);
 
     // Phase 1: Create new test accounts with batching demonstration
     println!("\n📝 PHASE 1: Create New Test Accounts with Multi-Aggregate Batching");
@@ -1640,6 +1640,7 @@ async fn test_write_batching_multi_row_inserts() {
             Ok((success, latency)) => {
                 if success {
                     write_success_count += 1;
+                    total_transactions += 1;
                 } else {
                     write_failed_count += 1;
                 }
