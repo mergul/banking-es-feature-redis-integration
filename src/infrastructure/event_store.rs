@@ -2021,8 +2021,8 @@ impl EventStore {
         self
     }
 
-    /// Ultra-high performance bulk insert using PostgreSQL COPY protocol
-    async fn bulk_insert_events_ultra_fast(
+    /// High-performance bulk insert using PostgreSQL COPY binary protocol
+    async fn bulk_insert_events_binary(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         events: Vec<Event>,
@@ -2036,68 +2036,90 @@ impl EventStore {
             return Ok(());
         }
 
-        // Use PostgreSQL COPY for maximum throughput (50K+ ops/sec)
+        // Use PostgreSQL COPY binary for maximum throughput
         let copy_statement = r#"
             COPY events (id, aggregate_id, event_type, event_data, version, timestamp, metadata) 
-            FROM STDIN WITH (FORMAT CSV, DELIMITER E'\t', QUOTE E'\b', ESCAPE E'\b')
+            FROM STDIN WITH (FORMAT BINARY)
         "#;
 
-        // Pre-allocate buffer for better performance
-        let mut copy_data = Vec::with_capacity(events_len * 200); // Estimate 200 bytes per event
+        let mut copy_data = Vec::with_capacity(events_len * 250); // Estimate 250 bytes per event
 
-        // Batch serialize all metadata first to avoid repeated allocations
-        let mut serialized_metadata: Vec<Vec<u8>> = Vec::with_capacity(events_len);
+        // PGCOPY header
+        copy_data.extend_from_slice(b"PGCOPY\n\xff\r\n\0");
+        copy_data.extend_from_slice(&[0, 0, 0, 0]); // flags
+        copy_data.extend_from_slice(&[0, 0, 0, 0]); // header extension length
+
+        let postgres_epoch =
+            chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+
         for event in &events {
-            serialized_metadata.push(bincode::serialize(&event.metadata).unwrap_or_default());
+            // Number of columns
+            copy_data.extend_from_slice(&(7i16).to_be_bytes());
+
+            // id (uuid)
+            copy_data.extend_from_slice(&(16i32).to_be_bytes());
+            copy_data.extend_from_slice(event.id.as_bytes());
+
+            // aggregate_id (uuid)
+            copy_data.extend_from_slice(&(16i32).to_be_bytes());
+            copy_data.extend_from_slice(event.aggregate_id.as_bytes());
+
+            // event_type (text)
+            copy_data.extend_from_slice(&(event.event_type.len() as i32).to_be_bytes());
+            copy_data.extend_from_slice(event.event_type.as_bytes());
+
+            // event_data (bytea)
+            copy_data.extend_from_slice(&(event.event_data.len() as i32).to_be_bytes());
+            copy_data.extend_from_slice(&event.event_data);
+
+            // version (bigint)
+            copy_data.extend_from_slice(&(8i32).to_be_bytes());
+            copy_data.extend_from_slice(&event.version.to_be_bytes());
+
+            // timestamp (timestamptz)
+            let micros_since_postgres_epoch = event
+                .timestamp
+                .signed_duration_since(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                    postgres_epoch,
+                    chrono::Utc,
+                ))
+                .num_microseconds()
+                .unwrap_or(0);
+            copy_data.extend_from_slice(&(8i32).to_be_bytes());
+            copy_data.extend_from_slice(&micros_since_postgres_epoch.to_be_bytes());
+
+            // metadata (bytea)
+            let metadata_bytes = bincode::serialize(&event.metadata).unwrap_or_default();
+            copy_data.extend_from_slice(&(metadata_bytes.len() as i32).to_be_bytes());
+            copy_data.extend_from_slice(&metadata_bytes);
         }
 
-        // Build COPY data in TSV format for ultra-fast parsing
-        for (i, event) in events.iter().enumerate() {
-            // Sanitize event_type to remove problematic characters
-            let sanitized_event_type = event
-                .event_type
-                .replace('\t', " ")
-                .replace('\n', " ")
-                .replace('\r', " ");
+        // PGCOPY trailer
+        copy_data.extend_from_slice(&(-1i16).to_be_bytes());
 
-            // Use tab-separated values for better performance than CSV
-            let line = format!(
-                "{}\t{}\t{}\t\\\\x{}\t{}\t{}\t\\\\x{}\n",
-                event.id,
-                event.aggregate_id,
-                sanitized_event_type,
-                hex::encode(&event.event_data),
-                event.version,
-                event.timestamp.format("%Y-%m-%d %H:%M:%S%.6f UTC"),
-                hex::encode(&serialized_metadata[i])
-            );
-            copy_data.extend_from_slice(line.as_bytes());
-        }
-
-        // Execute COPY command with prepared data
-        let mut copy = tx
+        // Execute COPY command
+        let mut copy_in = tx
             .copy_in_raw(copy_statement)
             .await
             .map_err(EventStoreError::DatabaseError)?;
-
-        copy.send(copy_data)
+        copy_in
+            .send(copy_data.as_slice())
             .await
             .map_err(EventStoreError::DatabaseError)?;
-
-        copy.finish()
+        copy_in
+            .finish()
             .await
             .map_err(EventStoreError::DatabaseError)?;
 
         // Batch update version cache
         let mut events_by_aggregate: HashMap<Uuid, i64> = HashMap::new();
         for event in &events {
-            let current_max = events_by_aggregate.get(&event.aggregate_id).unwrap_or(&0);
-            if event.version > *current_max {
+            let current_max = events_by_aggregate.get(&event.aggregate_id).cloned().unwrap_or(0);
+            if event.version > current_max {
                 events_by_aggregate.insert(event.aggregate_id, event.version);
             }
         }
 
-        // Single batch update to version cache
         for (aggregate_id, max_version) in events_by_aggregate {
             version_cache.insert(aggregate_id, max_version);
         }
@@ -2106,18 +2128,20 @@ impl EventStore {
         let throughput = events_len as f64 / duration.as_secs_f64();
 
         println!(
-            "🚀 Ultra-fast bulk insert: {} events in {:?} ({:.0} events/sec)",
+            "🚀 Binary COPY bulk insert: {} events in {:?} ({:.0} events/sec)",
             events_len, duration, throughput
         );
 
         Ok(())
     }
 
-    /// Optimized multi-aggregate transaction with reduced isolation level
-    async fn save_events_multi_aggregate_optimized(
+
+    /// Save events for multiple aggregates in a single transaction
+    /// This allows true multi-row inserts across different aggregates
+    async fn save_events_multi_aggregate_in_transaction_impl(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>,
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>, // (aggregate_id, events, partition_id)
     ) -> Result<(), EventStoreError> {
         if events_by_aggregate.is_empty() {
             return Ok(());
@@ -2149,7 +2173,7 @@ impl EventStore {
 
         // Single batch query for all versions
         let versions_map = self
-            .get_current_versions_batch_optimized(&aggregate_ids, tx)
+            .get_current_versions_batch(aggregate_ids.clone())
             .await?;
 
         // Pre-serialize all events in parallel batches
@@ -2186,176 +2210,14 @@ impl EventStore {
             return Ok(());
         }
 
-        // Use the ultra-fast bulk insert
-        self.bulk_insert_events_ultra_fast(tx, all_events, &self.metrics, &self.version_cache)
+        // Use the binary bulk insert
+        self.bulk_insert_events_binary(tx, all_events, &self.metrics, &self.version_cache)
             .await?;
 
         // Update metrics
         self.metrics
             .events_processed
             .fetch_add(total_events as u64, std::sync::atomic::Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    /// Optimized version batch query using the transaction
-    async fn get_current_versions_batch_optimized(
-        &self,
-        aggregate_ids: &[Uuid],
-        tx: &mut Transaction<'_, Postgres>,
-    ) -> Result<HashMap<Uuid, i64>, EventStoreError> {
-        if aggregate_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut result = HashMap::with_capacity(aggregate_ids.len());
-        let mut uncached_aggregates = Vec::new();
-
-        // Check cache first
-        for &aggregate_id in aggregate_ids {
-            if let Some(cached_version) = self.version_cache.get(&aggregate_id) {
-                result.insert(aggregate_id, *cached_version);
-            } else {
-                uncached_aggregates.push(aggregate_id);
-            }
-        }
-
-        if uncached_aggregates.is_empty() {
-            return Ok(result);
-        }
-
-        // Use optimized query with transaction for consistency
-        let query = sqlx::query!(
-            r#"
-            SELECT aggregate_id, MAX(version) as version
-            FROM events
-            WHERE aggregate_id = ANY($1)
-            GROUP BY aggregate_id
-            "#,
-            &uncached_aggregates
-        );
-
-        let rows = query
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(EventStoreError::DatabaseError)?;
-
-        // Process results and update cache
-        for row in rows {
-            let version = row.version.unwrap_or(0);
-            result.insert(row.aggregate_id, version);
-            self.version_cache.insert(row.aggregate_id, version);
-        }
-
-        // Set version 0 for new aggregates
-        for aggregate_id in uncached_aggregates {
-            if !result.contains_key(&aggregate_id) {
-                result.insert(aggregate_id, 0);
-                self.version_cache.insert(aggregate_id, 0);
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Save events for multiple aggregates in a single transaction
-    /// This allows true multi-row inserts across different aggregates
-    async fn save_events_multi_aggregate_in_transaction_impl(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>, // (aggregate_id, events, partition_id)
-    ) -> Result<(), EventStoreError> {
-        if events_by_aggregate.is_empty() {
-            return Ok(());
-        }
-
-        // Set transaction isolation level to SERIALIZABLE for strongest consistency
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-            .execute(&mut **tx)
-            .await
-            .map_err(EventStoreError::DatabaseError)?;
-
-        // Collect all events from all aggregates into a single batch
-        let mut all_events = Vec::new();
-        let mut events_partition_id = None;
-
-        // First, get all aggregate IDs to fetch their current versions
-        let aggregate_ids: Vec<Uuid> = events_by_aggregate
-            .iter()
-            .map(|(aggregate_id, _, _)| *aggregate_id)
-            .collect();
-
-        // Get current versions for all aggregates in a single query
-        let versions_map = self.get_current_versions_batch(aggregate_ids).await?;
-
-        for (aggregate_id, events, partition_id) in events_by_aggregate {
-            if events.is_empty() {
-                continue;
-            }
-            events_partition_id = partition_id;
-
-            // Get current version for this aggregate
-            let current_version = *versions_map.get(&aggregate_id).unwrap_or(&0);
-
-            // Prepare events for this aggregate with correct versioning
-            let mut next_version = current_version + 1;
-            let prepared_events: Vec<Event> = events
-                .into_iter()
-                .map(|domain_event| {
-                    let event_data = bincode::serialize(&domain_event)
-                        .map_err(EventStoreError::SerializationErrorBincode)?;
-                    let event = Event {
-                        id: Uuid::new_v4(),
-                        aggregate_id,
-                        event_type: domain_event.event_type().to_string(),
-                        event_data,
-                        version: next_version,
-                        timestamp: Utc::now(),
-                        metadata: EventMetadata::default(),
-                    };
-                    next_version += 1;
-                    Ok(event)
-                })
-                .collect::<Result<Vec<Event>, EventStoreError>>()?;
-
-            all_events.extend(prepared_events);
-        }
-
-        if all_events.is_empty() {
-            return Ok(());
-        }
-
-        // Validate all events
-        for event_to_validate in &all_events {
-            let validation = Self::validate_event(event_to_validate).await;
-            if !validation.is_valid {
-                self.metrics
-                    .events_failed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Err(EventStoreError::ValidationError(validation.errors));
-            }
-        }
-
-        println!(
-            "🔍 [DEBUG] About to call bulk_insert_events_multi_aggregate with {} events",
-            all_events.len()
-        );
-
-        // Bulk insert all events in a single multi-aggregate operation
-        self.bulk_insert_events_multi_aggregate(
-            tx,
-            all_events.clone(),
-            &self.metrics,
-            &self.version_cache,
-            events_partition_id,
-        )
-        .await?;
-
-        // Update metrics
-        self.metrics.events_processed.fetch_add(
-            all_events.len() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
 
         Ok(())
     }
@@ -3027,7 +2889,7 @@ impl EventStoreTrait for EventStore {
         events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>, // (aggregate_id, events, partition_id)
     ) -> Result<(), EventStoreError> {
         // Call the main implementation directly
-        self.save_events_multi_aggregate_optimized(tx, events_by_aggregate)
+        self.save_events_multi_aggregate_in_transaction_impl(tx, events_by_aggregate)
             .await
     }
 }
