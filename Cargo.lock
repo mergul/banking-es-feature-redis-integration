@@ -267,6 +267,7 @@ dependencies = [
  "dashmap",
  "dotenv",
  "futures",
+ "hex",
  "hostname",
  "jemalloc",
  "jsonwebtoken",

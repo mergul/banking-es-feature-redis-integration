@@ -222,15 +222,15 @@ impl Default for RedisPoolConfig {
     fn default() -> Self {
         Self {
             min_connections: std::env::var("REDIS_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "20".to_string())
+                .unwrap_or_else(|_| "50".to_string()) // 20'den 50'ye artırıldı
                 .parse()
-                .unwrap_or(20),
+                .unwrap_or(50),
             max_connections: std::env::var("REDIS_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "200".to_string())
+                .unwrap_or_else(|_| "500".to_string()) // 200'den 500'e artırıldı
                 .parse()
-                .unwrap_or(200),
-            connection_timeout: Duration::from_secs(5),
-            idle_timeout: Duration::from_secs(300),
+                .unwrap_or(500),
+            connection_timeout: Duration::from_secs(30), // 5'ten 30'a artırıldı
+            idle_timeout: Duration::from_secs(600),      // 300'den 600'e artırıldı
         }
     }
 }
