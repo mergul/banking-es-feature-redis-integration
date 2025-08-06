@@ -109,19 +109,23 @@ pub struct ProjectionConfig {
     pub acquire_timeout_secs: u64,
     pub idle_timeout_secs: u64,
     pub max_lifetime_secs: u64,
+    pub synchronous_commit: bool,
+    pub full_page_writes: bool,
 }
 
 impl Default for ProjectionConfig {
     fn default() -> Self {
         Self {
             cache_ttl_secs: 600,     // Increased from default
-            batch_size: 1000,        // Increased from default
-            batch_timeout_ms: 10,    // Reduced from default
+            batch_size: 2000,        // Increased to match CDC batch sizes (336, 542, etc.)
+            batch_timeout_ms: 25,    // Fast timeout since messages come as batches
             max_connections: 100,    // Increased from default
             min_connections: 20,     // Increased from default
             acquire_timeout_secs: 5, // Reduced from default
             idle_timeout_secs: 300,  // Reduced from default
             max_lifetime_secs: 1800, // Reduced from default
+            synchronous_commit: true,
+            full_page_writes: true,
         }
     }
 }
@@ -149,6 +153,7 @@ pub trait ProjectionStoreTrait: Send + Sync {
         &self,
         transactions: Vec<TransactionProjection>,
     ) -> Result<()>;
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[async_trait]
@@ -212,6 +217,10 @@ impl ProjectionStoreTrait for ProjectionStore {
                 )
             })?;
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -923,9 +932,31 @@ impl ProjectionStore {
                     match update {
                         ProjectionUpdate::AccountBatch(accounts) => {
                             account_batch.extend(accounts);
+                            // CRITICAL OPTIMIZATION: Process immediately if batch is large enough
+                            if account_batch.len() >= config.batch_size { // Use config.batch_size instead of hardcoded 500
+                                tracing::info!("ProjectionStore: update_processor flushing account batch of size {}. IDs: {:?}", account_batch.len(), account_batch.iter().map(|a| a.id).collect::<Vec<_>>());
+                                let batch_to_process = std::mem::take(&mut account_batch);
+                                let pools = pools.clone();
+                                let metrics = metrics.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = Self::upsert_accounts_batch_parallel(&pools, &metrics, batch_to_process).await {
+                                        error!("[ProjectionStore] Error upserting account batch: {}", e);
+                                    }
+                                });
+                            }
                         }
                         ProjectionUpdate::TransactionBatch(transactions) => {
                             transaction_batch.extend(transactions);
+                            // CRITICAL OPTIMIZATION: Process immediately if batch is large enough
+                            if transaction_batch.len() >= config.batch_size { // Use config.batch_size instead of hardcoded 500
+                                let batch_to_process = std::mem::take(&mut transaction_batch);
+                                let pools = pools.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = Self::insert_transactions_batch_parallel(&pools, batch_to_process).await {
+                                        error!("[ProjectionStore] Error inserting transaction batch: {}", e);
+                                    }
+                                });
+                            }
                         }
                     }
                 }
@@ -972,11 +1003,8 @@ impl ProjectionStore {
         let pool = pools.select_pool(OperationType::Write).clone();
         let mut tx = pool.begin().await?;
 
-        // Process accounts in chunks for better memory management
-        let chunk_size = 100; // Process 100 accounts at a time
-        for chunk in accounts.chunks(chunk_size) {
-            Self::bulk_upsert_accounts(&mut tx, chunk).await?;
-        }
+        // Process all accounts in a single bulk operation
+        Self::bulk_upsert_accounts(&mut tx, &accounts).await?;
 
         tx.commit().await?;
 
@@ -1000,11 +1028,8 @@ impl ProjectionStore {
         let pool = pools.select_pool(OperationType::Write).clone();
         let mut tx = pool.begin().await?;
 
-        // Process transactions in chunks for better memory management
-        let chunk_size = 100; // Process 100 transactions at a time
-        for chunk in transactions.chunks(chunk_size) {
-            Self::bulk_insert_transactions(&mut tx, chunk).await?;
-        }
+        // Process all transactions in a single bulk operation
+        Self::bulk_insert_transactions(&mut tx, &transactions).await?;
 
         tx.commit().await?;
         Ok(())
@@ -1195,6 +1220,106 @@ impl ProjectionStore {
                 hit_rate, batches, errors, avg_query_time
             );
         }
+    }
+
+    /// Get the current configuration
+    pub fn get_config(&self) -> ProjectionConfig {
+        self.config.clone()
+    }
+
+    /// Update the configuration (for bulk operations)
+    pub fn update_config(&mut self, new_config: ProjectionConfig) {
+        self.config = new_config;
+    }
+
+    /// Temporarily apply bulk configuration and return original config
+    pub fn apply_bulk_config(&mut self) -> ProjectionConfig {
+        let original_config = self.config.clone();
+
+        // Apply bulk optimizations
+        self.config.cache_ttl_secs = 0; // Disable cache for bulk operations
+        self.config.batch_size = 2000; // Normal: 500
+        self.config.batch_timeout_ms = 50; // Normal: 100
+
+        // Connection pool optimizations
+        self.config.max_connections = 150; // Normal: 50
+        self.config.min_connections = 30; // Normal: 5
+        self.config.acquire_timeout_secs = 30; // Normal: 10
+        self.config.idle_timeout_secs = 300; // Normal: 60
+        self.config.max_lifetime_secs = 1800; // Normal: 600
+
+        // Set PostgreSQL synchronous_commit = off for bulk operations
+        self.config.synchronous_commit = false;
+        // Set PostgreSQL full_page_writes = off for bulk operations
+        self.config.full_page_writes = false;
+
+        original_config
+    }
+
+    /// Restore original configuration
+    pub fn restore_config(&mut self, original_config: ProjectionConfig) {
+        self.config = original_config;
+    }
+
+    /// Apply PostgreSQL settings for bulk operations
+    pub async fn apply_postgres_bulk_settings(
+        &self,
+        synchronous_commit: bool,
+        _full_page_writes: bool, // Ignored - cannot be changed at runtime
+    ) -> Result<()> {
+        let pool = self.pools.select_pool(OperationType::Write);
+
+        // Set synchronous_commit (only runtime-changeable parameter)
+        let sync_setting = if synchronous_commit { "on" } else { "off" };
+        sqlx::query(&format!("SET synchronous_commit = {}", sync_setting))
+            .execute(pool)
+            .await
+            .map_err(|e| ProjectionError::DatabaseError(e))?;
+
+        info!(
+            "🔧 ProjectionStore PostgreSQL setting: synchronous_commit={} (full_page_writes requires server restart)",
+            sync_setting
+        );
+        Ok(())
+    }
+
+    /// Apply bulk config with PostgreSQL settings
+    pub async fn apply_bulk_config_with_postgres(&mut self) -> ProjectionConfig {
+        let original_config = self.apply_bulk_config();
+
+        // Apply PostgreSQL settings for bulk operations
+        if let Err(e) = self.apply_postgres_bulk_settings(false, false).await {
+            warn!(
+                "Failed to set ProjectionStore PostgreSQL bulk settings: {}",
+                e
+            );
+        }
+
+        original_config
+    }
+
+    /// Restore config with PostgreSQL settings
+    pub async fn restore_config_with_postgres(
+        &mut self,
+        original_config: ProjectionConfig,
+    ) -> Result<()> {
+        self.restore_config(original_config.clone());
+
+        // Restore PostgreSQL settings
+        if let Err(e) = self
+            .apply_postgres_bulk_settings(
+                original_config.synchronous_commit,
+                original_config.full_page_writes,
+            )
+            .await
+        {
+            warn!(
+                "Failed to restore ProjectionStore PostgreSQL settings: {}",
+                e
+            );
+        }
+
+        Ok(())
     }
 }
 

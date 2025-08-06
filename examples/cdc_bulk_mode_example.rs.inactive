@@ -1,0 +1,120 @@
+use banking_es::infrastructure::{
+    cdc_batching_service::{CDCBatchingConfig, PartitionedCDCBatching},
+    projections::{AccountProjection, ProjectionConfig, ProjectionStore},
+};
+use chrono::Utc;
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use uuid::Uuid;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🚀 CDC Batching Service Bulk Mode Örnekleri");
+
+    // 1. CDC Batching Service ile Bulk Mode
+    println!("\n📝 1. CDC Batching Service ile Bulk Mode");
+
+    // Projection store oluştur
+    let config = ProjectionConfig::default();
+    let projection_store = Arc::new(ProjectionStore::new(config).await?);
+
+    // Write pool oluştur (sqlx import gerekli)
+    let write_pool =
+        Arc::new(sqlx::PgPool::connect("postgresql://user:pass@localhost/banking_es").await?);
+
+    // CDC Batching Service oluştur
+    let cdc_batching = PartitionedCDCBatching::new(projection_store, write_pool).await;
+
+    // 1000 projection oluştur
+    let mut projections = Vec::new();
+    for i in 0..1000 {
+        projections.push((
+            Uuid::new_v4(), // aggregate_id
+            AccountProjection {
+                id: Uuid::new_v4(),
+                owner_name: format!("Kullanıcı {}", i),
+                balance: Decimal::new(1000 + i as i64, 0),
+                is_active: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ));
+    }
+
+    let start_time = std::time::Instant::now();
+
+    // Bulk mode ile projection'ları gönder
+    let operation_ids = cdc_batching.submit_projections_bulk(projections).await?;
+
+    let duration = start_time.elapsed();
+    println!("✅ 1000 projection bulk mode ile işlendi: {:?}", duration);
+    println!("📊 Operation ID'leri: {:?}", operation_ids.len());
+
+    // 2. Manuel Bulk Mode Kontrolü
+    println!("\n📝 2. Manuel Bulk Mode Kontrolü");
+
+    // 500 projection daha oluştur
+    let mut more_projections = Vec::new();
+    for i in 1000..1500 {
+        more_projections.push((
+            Uuid::new_v4(),
+            AccountProjection {
+                id: Uuid::new_v4(),
+                owner_name: format!("Kullanıcı {}", i),
+                balance: Decimal::new(2000 + i as i64, 0),
+                is_active: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ));
+    }
+
+    let start_time = std::time::Instant::now();
+
+    // Manuel bulk mode ile gönder
+    let operation_ids = cdc_batching
+        .submit_projections_bulk(more_projections)
+        .await?;
+
+    let duration = start_time.elapsed();
+    println!(
+        "✅ 500 projection manuel bulk mode ile işlendi: {:?}",
+        duration
+    );
+
+    // 3. Performance Karşılaştırması
+    println!("\n📝 3. Performance Karşılaştırması");
+
+    // Normal mode ile test
+    let mut normal_projections = Vec::new();
+    for i in 1500..1600 {
+        normal_projections.push((
+            Uuid::new_v4(),
+            AccountProjection {
+                id: Uuid::new_v4(),
+                owner_name: format!("Kullanıcı {}", i),
+                balance: Decimal::new(3000 + i as i64, 0),
+                is_active: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ));
+    }
+
+    let start_time = std::time::Instant::now();
+    let operation_ids = cdc_batching
+        .submit_projections_bulk(normal_projections)
+        .await?;
+    let normal_duration = start_time.elapsed();
+
+    println!("📊 Performance Karşılaştırması:");
+    println!("   - Bulk Mode (1000 projection): {:?}", duration);
+    println!("   - Normal Mode (100 projection): {:?}", normal_duration);
+    println!(
+        "   - Bulk Mode avantajı: {}x daha hızlı",
+        normal_duration.as_millis() as f64 / (duration.as_millis() as f64 / 10.0)
+    );
+
+    println!("\n🎉 CDC Batching Service Bulk Mode testi tamamlandı!");
+    Ok(())
+}

@@ -42,7 +42,7 @@ base64 = "0.21"
 # Concurrency and performance
 rayon = "1.7"    # Data parallelism
 crossbeam = "0.8" # Lock-free data structures
-fxhash = "0.2"   # Fast hashing for partitioning
+# fxhash = "0.2"   # Fast hashing for partitioning
 
 # Utilities
 
@@ -68,6 +68,7 @@ simd-json = { version = "0.15.1", features = ["serde"] }
 value-trait = "0.8"
 sysinfo = "0.36.1"
 tokio-util = "0.7.15"
+hex = "0.4.3"
 
 [features]
 default = []
@@ -101,10 +102,5 @@ toml = "0.8"
 warnings = "allow"
 
 [[bin]]
-name = "read_batching_perf"
-path = "read_batching_perf.rs"
-
-[[bin]]
 name = "banking-es"
 path = "src/main.rs"
-

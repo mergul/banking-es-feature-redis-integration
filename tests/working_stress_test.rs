@@ -1399,7 +1399,7 @@ async fn test_write_batching_multi_row_inserts() {
     println!("\n📝 PHASE 1: Create New Test Accounts with Multi-Aggregate Batching");
     println!("===================================================================");
 
-    let account_count = 200; // Use a smaller number for testing
+    let account_count = 1000; // Use a smaller number for testing
     println!(
         "🔧 Creating {} new test accounts with batching...",
         account_count
@@ -1453,7 +1453,7 @@ async fn test_write_batching_multi_row_inserts() {
     println!("🚀 Using hash-based super batch processing...");
     let operation_ids = match batching_service
         .clone()
-        .submit_operations_hash_super_batch(operations, 8) // 8 super batches
+        .submit_operations_hash_super_batch(operations, 8) // 8 super batches with locking
         .await
     {
         Ok(ids) => {
@@ -1581,7 +1581,7 @@ async fn test_write_batching_multi_row_inserts() {
     let write_start = Instant::now();
     let write_operation_ids = match batching_service
         .clone()
-        .submit_operations_hash_super_batch(write_operations, 8) // 8 super batches
+        .submit_operations_hash_super_batch(write_operations, 8) // 8 super batches with locking
         .await
     {
         Ok(ids) => {
@@ -1684,7 +1684,10 @@ async fn test_write_batching_multi_row_inserts() {
         account_ids.len() * 10,
         account_ids.len()
     );
-
+    // Wait for CDC/projection sync after account creation
+    println!("⏳ Waiting for CDC/projection sync after write operations...");
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    println!("✅ Proceeding to read operations.");
     // Phase 3: Wait for CDC processing to complete
     println!("\n📝 PHASE 3: Wait for CDC Processing");
     println!("===================================");
@@ -1756,7 +1759,7 @@ async fn test_write_batching_multi_row_inserts() {
     let read_start = Instant::now();
 
     // Create batch read operations for all accounts
-    let target_operations = 100000;
+    let target_operations = 640000;
     let mut successful_verifications = 0;
     let mut failed_verifications = 0;
     let mut latencies = Vec::with_capacity(target_operations);

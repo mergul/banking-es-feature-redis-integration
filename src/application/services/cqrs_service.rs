@@ -104,7 +104,6 @@ impl CQRSAccountService {
             let partitioned_batching = Arc::new(
                 PartitionedBatching::new(
                     event_store.clone(),
-                    projection_store.clone(),
                     event_store.get_partitioned_pools().write_pool_arc(),
                     outbox_batcher,
                 )

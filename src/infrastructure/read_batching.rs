@@ -1,11 +1,10 @@
 use crate::domain::{Account, AccountEvent};
 use crate::infrastructure::projections::{AccountProjection, ProjectionStoreTrait};
 use anyhow::{Context, Result};
-use fxhash::FxHashMap;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -14,12 +13,12 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 const NUM_READ_PARTITIONS: usize = 32; // 16'dan 32'ye artırıldı
-const DEFAULT_READ_BATCH_SIZE: usize = 5000; // 1000'den 5000'e artırıldı
+const DEFAULT_READ_BATCH_SIZE: usize = 20000; // 1000'den 20000'e artırıldı
 const READ_CACHE_TTL_SECS: u64 = 300;
 const NUM_READ_POOLS: usize = 16; // Yeni: Read pools sayısı
 
 fn partition_for_read_operation(account_id: &Uuid, num_partitions: usize) -> usize {
-    let mut hasher = fxhash::FxHasher::default();
+    let mut hasher = DefaultHasher::new();
     account_id.hash(&mut hasher);
     (hasher.finish() as usize) % num_partitions
 }
@@ -40,7 +39,7 @@ pub struct ReadBatchingConfig {
 impl Default for ReadBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 10000,     // 2000'den 10000'e artırıldı
+            max_batch_size: 20000,     // 2000'den 20000'e artırıldı
             max_batch_wait_time_ms: 1, // 5'ten 1'e düşürüldü
             num_read_partitions: NUM_READ_PARTITIONS,
             num_read_pools: NUM_READ_POOLS, // Yeni: Default pool sayısı

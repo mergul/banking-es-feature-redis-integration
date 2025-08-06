@@ -33,6 +33,7 @@ pub mod read_batching;
 pub mod redis_aggregate_lock;
 pub mod redis_lock_monitor;
 
+pub mod cdc_batching_service;
 pub mod projections;
 pub mod rate_limiter;
 pub mod redis_abstraction;
@@ -44,7 +45,7 @@ pub mod stuck_operation_diagnostic;
 pub mod timeout_manager;
 pub mod troubleshooting;
 pub mod user_repository; // Added for OutboxPollingService
-pub mod write_batching; // Added write batching
+pub mod write_batching; // Added write batching // Added CDC batching service
 
 pub use auth::*;
 pub use cache_service::*;
@@ -69,6 +70,7 @@ pub use outbox_cleanup_service::{
 }; // Added new cleanup service exports
 pub use outbox_poller::{OutboxPollerConfig, OutboxPollingService};
 
+pub use cdc_batching_service::*;
 pub use projections::ProjectionStore;
 pub use projections::*;
 pub use rate_limiter::*;
@@ -81,4 +83,4 @@ pub use scaling::*;
 pub use sharding::*;
 pub use user_repository::*;
 pub use user_repository::{NewUser, User, UserRepository, UserRepositoryError}; // Added re-export // Added for OutboxPollingService
-pub use write_batching::*; // Added write batching exports
+pub use write_batching::*; // Added write batching exports // Added CDC batching service exports

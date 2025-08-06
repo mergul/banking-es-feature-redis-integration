@@ -232,7 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n🔧 READ BATCHING CONFIGURATION:");
     println!("  - Read Partitions: 32");
-    println!("  - Batch Size: 50,000");
+    println!("  - Batch Size: 20,000");
     println!("  - Batch Wait Time: 1ms");
     println!("  - Max Retries: 0");
     println!("  - Read Pool Connections: 1,600");

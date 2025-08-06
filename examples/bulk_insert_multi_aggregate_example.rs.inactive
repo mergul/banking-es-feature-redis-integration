@@ -1,0 +1,240 @@
+use banking_es::domain::{Account, AccountEvent};
+use banking_es::infrastructure::{
+    event_store::{EventStore, EventStoreTrait},
+    projections::ProjectionStore,
+    write_batching::{PartitionedBatching, WriteOperation},
+};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use uuid::Uuid;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize event store and projection store
+    let event_store = Arc::new(EventStore::new(
+        sqlx::PgPool::connect("postgresql://user:pass@localhost/banking_es").await?,
+    ));
+    let projection_store = Arc::new(
+        ProjectionStore::new(banking_es::infrastructure::projections::ProjectionConfig::default())
+            .await?,
+    );
+
+    // Create write pool (simplified for example)
+    let write_pool =
+        Arc::new(sqlx::PgPool::connect("postgresql://user:pass@localhost/banking_es").await?);
+
+    // Create outbox batcher
+    let outbox_batcher = banking_es::infrastructure::cdc_debezium::OutboxBatcher::new_default(
+        Arc::new(
+            banking_es::infrastructure::cdc_debezium::CDCOutboxRepository::new(
+                event_store.get_partitioned_pools().clone(),
+            ),
+        ),
+        event_store.get_partitioned_pools().clone(),
+    );
+
+    // Initialize partitioned batching
+    let batching = PartitionedBatching::new(
+        event_store.clone(),
+        projection_store.clone(),
+        write_pool.clone(),
+        outbox_batcher,
+    )
+    .await;
+
+    println!("🚀 Bulk insert multi-aggregate sistemi başlatıldı");
+
+    // Örnek 1: Direkt bulk_insert_events_multi_aggregate kullanımı
+    println!("\n📝 Örnek 1: Direkt bulk_insert_events_multi_aggregate kullanımı");
+
+    // Birden fazla aggregate için event'ler hazırla
+    let mut events_by_aggregate = Vec::new();
+
+    // Aggregate 1: Hesap oluşturma
+    let account_id_1 = Uuid::new_v4();
+    let events_1 = vec![
+        AccountEvent::AccountCreated {
+            account_id: account_id_1,
+            owner_name: "Ahmet Yılmaz".to_string(),
+            initial_balance: Decimal::new(1000, 0),
+        },
+        AccountEvent::MoneyDeposited {
+            account_id: account_id_1,
+            amount: Decimal::new(500, 0),
+            transaction_id: Uuid::new_v4(),
+        },
+    ];
+    events_by_aggregate.push((account_id_1, events_1, Some(0))); // partition 0
+
+    // Aggregate 2: Hesap oluşturma
+    let account_id_2 = Uuid::new_v4();
+    let events_2 = vec![
+        AccountEvent::AccountCreated {
+            account_id: account_id_2,
+            owner_name: "Fatma Demir".to_string(),
+            initial_balance: Decimal::new(2000, 0),
+        },
+        AccountEvent::MoneyDeposited {
+            account_id: account_id_2,
+            amount: Decimal::new(300, 0),
+            transaction_id: Uuid::new_v4(),
+        },
+        AccountEvent::MoneyWithdrawn {
+            account_id: account_id_2,
+            amount: Decimal::new(100, 0),
+            transaction_id: Uuid::new_v4(),
+        },
+    ];
+    events_by_aggregate.push((account_id_2, events_2, Some(1))); // partition 1
+
+    // Aggregate 3: Sadece para yatırma
+    let account_id_3 = Uuid::new_v4();
+    let events_3 = vec![AccountEvent::MoneyDeposited {
+        account_id: account_id_3,
+        amount: Decimal::new(750, 0),
+        transaction_id: Uuid::new_v4(),
+    }];
+    events_by_aggregate.push((account_id_3, events_3, Some(2))); // partition 2
+
+    println!(
+        "🔄 {} aggregate için {} event bulk insert ediliyor...",
+        events_by_aggregate.len(),
+        events_by_aggregate
+            .iter()
+            .map(|(_, events, _)| events.len())
+            .sum::<usize>()
+    );
+
+    let start_time = std::time::Instant::now();
+
+    // Bulk insert işlemini başlat
+    let mut transaction = write_pool.begin().await?;
+
+    let result = event_store
+        .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
+        .await;
+
+    match result {
+        Ok(_) => {
+            transaction.commit().await?;
+            let duration = start_time.elapsed();
+            println!("✅ Bulk insert başarıyla tamamlandı! Süre: {:?}", duration);
+        }
+        Err(e) => {
+            transaction.rollback().await?;
+            println!("❌ Bulk insert başarısız: {}", e);
+            return Err(e.into());
+        }
+    }
+
+    // Örnek 2: Büyük ölçekli bulk insert
+    println!("\n📊 Örnek 2: Büyük ölçekli bulk insert (1000 aggregate)");
+
+    let mut large_events_by_aggregate = Vec::new();
+
+    for i in 0..1000 {
+        let account_id = Uuid::new_v4();
+        let partition = i % 8; // 8 partition'a dağıt
+
+        let events = vec![
+            AccountEvent::AccountCreated {
+                account_id,
+                owner_name: format!("Kullanıcı_{}", i),
+                initial_balance: Decimal::new(1000 + (i as i64 * 10), 0),
+            },
+            AccountEvent::MoneyDeposited {
+                account_id,
+                amount: Decimal::new(100 + (i as i64), 0),
+                transaction_id: Uuid::new_v4(),
+            },
+        ];
+
+        large_events_by_aggregate.push((account_id, events, Some(partition)));
+    }
+
+    println!(
+        "🔄 1000 aggregate için {} event bulk insert ediliyor...",
+        large_events_by_aggregate.len() * 2
+    );
+
+    let start_time_large = std::time::Instant::now();
+
+    let mut transaction_large = write_pool.begin().await?;
+
+    let result_large = event_store
+        .save_events_multi_aggregate_in_transaction(
+            &mut transaction_large,
+            large_events_by_aggregate,
+        )
+        .await;
+
+    match result_large {
+        Ok(_) => {
+            transaction_large.commit().await?;
+            let duration = start_time_large.elapsed();
+            println!("✅ Büyük ölçekli bulk insert başarıyla tamamlandı!");
+            println!(
+                "📈 Performans: {} aggregate/saniye",
+                1000.0 / duration.as_secs_f64()
+            );
+        }
+        Err(e) => {
+            transaction_large.rollback().await?;
+            println!("❌ Büyük ölçekli bulk insert başarısız: {}", e);
+            return Err(e.into());
+        }
+    }
+
+    // Örnek 3: Bulk config ile birlikte kullanım
+    println!("\n⚙️ Örnek 3: Bulk config ile birlikte kullanım");
+
+    // Bulk modu başlat
+    batching.start_bulk_mode_all_partitions().await?;
+    println!("🔄 Bulk mod aktif");
+
+    // Bulk insert işlemi
+    let mut mixed_events = Vec::new();
+
+    for i in 0..100 {
+        let account_id = Uuid::new_v4();
+        let partition = i % 4;
+
+        let events = vec![AccountEvent::AccountCreated {
+            account_id,
+            owner_name: format!("Bulk_Kullanıcı_{}", i),
+            initial_balance: Decimal::new(500 + (i as i64 * 5), 0),
+        }];
+
+        mixed_events.push((account_id, events, Some(partition)));
+    }
+
+    let mut transaction_mixed = write_pool.begin().await?;
+
+    let result_mixed = event_store
+        .save_events_multi_aggregate_in_transaction(&mut transaction_mixed, mixed_events)
+        .await;
+
+    match result_mixed {
+        Ok(_) => {
+            transaction_mixed.commit().await?;
+            println!("✅ Bulk config ile bulk insert başarılı!");
+        }
+        Err(e) => {
+            transaction_mixed.rollback().await?;
+            println!("❌ Bulk config ile bulk insert başarısız: {}", e);
+        }
+    }
+
+    // Bulk modu sonlandır
+    batching.end_bulk_mode_all_partitions().await?;
+    println!("🔄 Bulk mod sonlandırıldı");
+
+    println!("\n🎉 Tüm bulk insert işlemleri başarıyla tamamlandı!");
+    println!("📈 Sistem özellikleri:");
+    println!("   - Multi-aggregate event insert");
+    println!("   - Partition bazlı dağıtım");
+    println!("   - Transaction güvenliği");
+    println!("   - Bulk config optimizasyonu");
+
+    Ok(())
+}
