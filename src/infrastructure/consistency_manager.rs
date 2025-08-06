@@ -304,8 +304,8 @@ impl ConsistencyManager {
         }
 
         // OPTIMIZED: Use exponential backoff for polling
-        let mut poll_interval = Duration::from_millis(10); // Start with 10ms
-        let max_poll_interval = Duration::from_millis(100); // Max 100ms between polls
+        let mut poll_interval = Duration::from_millis(5); // Start with 10ms
+        let max_poll_interval = Duration::from_millis(50); // Max 100ms between polls
 
         loop {
             // Check if we've exceeded the timeout
@@ -686,8 +686,8 @@ mod tests {
     #[ignore]
     async fn test_consistency_timeout() {
         let manager = ConsistencyManager::new(
-            Duration::from_millis(50), // Short timeout
-            Duration::from_millis(100),
+            Duration::from_millis(5), // Short timeout
+            Duration::from_millis(50),
         );
 
         let aggregate_id = Uuid::new_v4();

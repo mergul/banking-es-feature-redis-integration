@@ -26,7 +26,8 @@ const NUM_PARTITIONS: usize = 8; // Increased from 4 to 8 to reduce partition co
 const DEFAULT_BATCH_SIZE: usize = 1000;
 const CREATE_BATCH_SIZE: usize = 1000; // Optimized batch size for create operations
 const CREATE_PARTITION_ID: usize = 0; // Dedicated partition for create operations
-const WRITE_POOL_SIZE: usize = 200; // Optimized write pool size for single pool usage
+const WRITE_POOL_SIZE: usize = 400; // Optimized write pool size for single pool usage
+const DEFAULT_BATCH_TIMEOUT_MS: u64 = 25;
 
 fn partition_for_aggregate(aggregate_id: &Uuid, num_partitions: usize) -> usize {
     let mut hasher = DefaultHasher::new();
@@ -1439,10 +1440,10 @@ pub struct WriteBatchingConfig {
 impl Default for WriteBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 500,         // Optimized batch size for better performance
-            max_batch_wait_time_ms: 100, // Increased from 10ms to 100ms for better batching
-            max_retries: 2,              // Reduced from 3 to 2 for faster processing
-            retry_backoff_ms: 5,         // Reduced from 10ms to 5ms for faster retries
+            max_batch_size: CREATE_BATCH_SIZE, // Optimized batch size for better performance
+            max_batch_wait_time_ms: DEFAULT_BATCH_TIMEOUT_MS, // Increased from 10ms to 100ms for better batching
+            max_retries: 2,      // Reduced from 3 to 2 for faster processing
+            retry_backoff_ms: 5, // Reduced from 10ms to 5ms for faster retries
         }
     }
 }
@@ -2337,8 +2338,8 @@ impl WriteBatchingService {
         let mut results = Vec::new();
         let mut retry_count = 0;
 
-        // BULK MODE: Batch boyutu büyükse bulk mode başlat
-        let should_use_bulk_mode = batch.operations.len() >= 100; // 100+ operation için bulk mode
+        // BULK MODE: Batch boyutu büyükse bulk mode başlat (threshold'u düşürdük)
+        let should_use_bulk_mode = batch.operations.len() >= 3; // 3+ operation için bulk mode (5'ten 3'e düşürdük)
         let mut bulk_config_manager = if should_use_bulk_mode {
             Some(BulkInsertConfigManager::new())
         } else {
@@ -3091,7 +3092,7 @@ mod tests {
     async fn test_write_batching_config() {
         let config = WriteBatchingConfig::default();
         assert_eq!(config.max_batch_size, 1000);
-        assert_eq!(config.max_batch_wait_time_ms, 10);
+        assert_eq!(config.max_batch_wait_time_ms, 50);
         assert_eq!(config.max_retries, 2);
     }
 

@@ -2021,6 +2021,209 @@ impl EventStore {
         self
     }
 
+    async fn bulk_insert_events_copy(
+        tx: &mut Transaction<'_, Postgres>,
+        events: Vec<Event>,
+        metrics: &EventStoreMetrics,
+        version_cache: &DashMap<Uuid, i64>,
+    ) -> Result<(), EventStoreError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let mut copy_in = tx.copy_in_raw("COPY events (id, aggregate_id, event_type, event_data, version, timestamp, metadata) FROM STDIN WITH (FORMAT BINARY)").await?;
+
+        let mut write_buf = Vec::new();
+        for event in &events {
+            // Write the number of columns
+            write_buf.clear();
+            std::io::Write::write_all(&mut write_buf, &7i16.to_be_bytes()).unwrap();
+
+            // id
+            std::io::Write::write_all(&mut write_buf, &(16i32).to_be_bytes()).unwrap();
+            std::io::Write::write_all(&mut write_buf, event.id.as_bytes()).unwrap();
+
+            // aggregate_id
+            std::io::Write::write_all(&mut write_buf, &(16i32).to_be_bytes()).unwrap();
+            std::io::Write::write_all(&mut write_buf, event.aggregate_id.as_bytes()).unwrap();
+
+            // event_type
+            let event_type_bytes = event.event_type.as_bytes();
+            std::io::Write::write_all(
+                &mut write_buf,
+                &(event_type_bytes.len() as i32).to_be_bytes(),
+            )
+            .unwrap();
+            std::io::Write::write_all(&mut write_buf, event_type_bytes).unwrap();
+
+            // event_data
+            std::io::Write::write_all(
+                &mut write_buf,
+                &(event.event_data.len() as i32).to_be_bytes(),
+            )
+            .unwrap();
+            std::io::Write::write_all(&mut write_buf, &event.event_data).unwrap();
+
+            // version
+            std::io::Write::write_all(&mut write_buf, &(8i32).to_be_bytes()).unwrap();
+            std::io::Write::write_all(&mut write_buf, &event.version.to_be_bytes()).unwrap();
+
+            // timestamp
+            std::io::Write::write_all(&mut write_buf, &(8i32).to_be_bytes()).unwrap();
+            let t = event.timestamp.timestamp_micros();
+            let pg_epoch = chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00+00:00")
+                .unwrap()
+                .timestamp_micros();
+            std::io::Write::write_all(&mut write_buf, &(t - pg_epoch).to_be_bytes()).unwrap();
+
+            // metadata
+            let metadata_bytes = bincode::serialize(&event.metadata).unwrap_or_default();
+            std::io::Write::write_all(&mut write_buf, &(metadata_bytes.len() as i32).to_be_bytes())
+                .unwrap();
+            std::io::Write::write_all(&mut write_buf, &metadata_bytes).unwrap();
+
+            copy_in.send(&write_buf[..]).await?;
+        }
+
+        copy_in.finish().await?;
+
+        // Update version cache for all aggregates
+        let mut events_by_aggregate: HashMap<Uuid, Vec<Event>> = HashMap::new();
+        for event in events {
+            events_by_aggregate
+                .entry(event.aggregate_id)
+                .or_default()
+                .push(event);
+        }
+
+        for (aggregate_id, aggregate_events) in events_by_aggregate {
+            if let Some(max_event) = aggregate_events.iter().max_by_key(|e| e.version) {
+                version_cache.insert(aggregate_id, max_event.version);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// High-performance bulk insert using PostgreSQL COPY binary protocol
+    async fn bulk_insert_events_binary(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        events: Vec<Event>,
+        metrics: &EventStoreMetrics,
+        version_cache: &DashMap<Uuid, i64>,
+    ) -> Result<(), EventStoreError> {
+        let start_time = std::time::Instant::now();
+        let events_len = events.len();
+
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        // Use PostgreSQL COPY binary for maximum throughput
+        let copy_statement = r#"
+            COPY events (id, aggregate_id, event_type, event_data, version, timestamp, metadata) 
+            FROM STDIN WITH (FORMAT BINARY)
+        "#;
+
+        let mut copy_data = Vec::with_capacity(events_len * 250); // Estimate 250 bytes per event
+
+        // PGCOPY header
+        copy_data.extend_from_slice(b"PGCOPY\n\xff\r\n\0");
+        copy_data.extend_from_slice(&[0, 0, 0, 0]); // flags
+        copy_data.extend_from_slice(&[0, 0, 0, 0]); // header extension length
+
+        let postgres_epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+
+        for event in &events {
+            // Number of columns
+            copy_data.extend_from_slice(&(7i16).to_be_bytes());
+
+            // id (uuid)
+            copy_data.extend_from_slice(&(16i32).to_be_bytes());
+            copy_data.extend_from_slice(event.id.as_bytes());
+
+            // aggregate_id (uuid)
+            copy_data.extend_from_slice(&(16i32).to_be_bytes());
+            copy_data.extend_from_slice(event.aggregate_id.as_bytes());
+
+            // event_type (text)
+            copy_data.extend_from_slice(&(event.event_type.len() as i32).to_be_bytes());
+            copy_data.extend_from_slice(event.event_type.as_bytes());
+
+            // event_data (bytea)
+            copy_data.extend_from_slice(&(event.event_data.len() as i32).to_be_bytes());
+            copy_data.extend_from_slice(&event.event_data);
+
+            // version (bigint)
+            copy_data.extend_from_slice(&(8i32).to_be_bytes());
+            copy_data.extend_from_slice(&event.version.to_be_bytes());
+
+            // timestamp (timestamptz)
+            let micros_since_postgres_epoch = event
+                .timestamp
+                .signed_duration_since(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                    postgres_epoch,
+                    chrono::Utc,
+                ))
+                .num_microseconds()
+                .unwrap_or(0);
+            copy_data.extend_from_slice(&(8i32).to_be_bytes());
+            copy_data.extend_from_slice(&micros_since_postgres_epoch.to_be_bytes());
+
+            // metadata (bytea)
+            let metadata_bytes = bincode::serialize(&event.metadata).unwrap_or_default();
+            copy_data.extend_from_slice(&(metadata_bytes.len() as i32).to_be_bytes());
+            copy_data.extend_from_slice(&metadata_bytes);
+        }
+
+        // PGCOPY trailer
+        copy_data.extend_from_slice(&(-1i16).to_be_bytes());
+
+        // Execute COPY command
+        let mut copy_in = tx
+            .copy_in_raw(copy_statement)
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
+        copy_in
+            .send(copy_data.as_slice())
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
+        copy_in
+            .finish()
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
+
+        // Batch update version cache
+        let mut events_by_aggregate: HashMap<Uuid, i64> = HashMap::new();
+        for event in &events {
+            let current_max = events_by_aggregate
+                .get(&event.aggregate_id)
+                .cloned()
+                .unwrap_or(0);
+            if event.version > current_max {
+                events_by_aggregate.insert(event.aggregate_id, event.version);
+            }
+        }
+
+        for (aggregate_id, max_version) in events_by_aggregate {
+            version_cache.insert(aggregate_id, max_version);
+        }
+
+        let duration = start_time.elapsed();
+        let throughput = events_len as f64 / duration.as_secs_f64();
+
+        println!(
+            "🚀 Binary COPY bulk insert: {} events in {:?} ({:.0} events/sec)",
+            events_len, duration, throughput
+        );
+
+        Ok(())
+    }
+
     /// Ultra-high performance bulk insert using PostgreSQL COPY protocol
     async fn bulk_insert_events_ultra_fast(
         &self,
@@ -2187,7 +2390,7 @@ impl EventStore {
         }
 
         // Use the ultra-fast bulk insert
-        self.bulk_insert_events_ultra_fast(tx, all_events, &self.metrics, &self.version_cache)
+        self.bulk_insert_events_binary(tx, all_events, &self.metrics, &self.version_cache)
             .await?;
 
         // Update metrics

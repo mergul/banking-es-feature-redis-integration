@@ -350,9 +350,9 @@ pub async fn init_all_services(
             .parse()
             .unwrap_or(5000),
         batch_timeout_ms: std::env::var("PROJECTION_BATCH_TIMEOUT_MS")
-            .unwrap_or_else(|_| "500".to_string())
+            .unwrap_or_else(|_| "25".to_string())
             .parse()
-            .unwrap_or(500),
+            .unwrap_or(25),
         max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "500".to_string())
             .parse()

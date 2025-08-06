@@ -119,8 +119,8 @@ impl Default for ProjectionConfig {
             cache_ttl_secs: 600,     // Increased from default
             batch_size: 2000,        // Increased to match CDC batch sizes (336, 542, etc.)
             batch_timeout_ms: 25,    // Fast timeout since messages come as batches
-            max_connections: 100,    // Increased from default
-            min_connections: 20,     // Increased from default
+            max_connections: 400,    // Increased from default
+            min_connections: 250,    // Increased from default
             acquire_timeout_secs: 5, // Reduced from default
             idle_timeout_secs: 300,  // Reduced from default
             max_lifetime_secs: 1800, // Reduced from default
@@ -1239,7 +1239,7 @@ impl ProjectionStore {
         // Apply bulk optimizations
         self.config.cache_ttl_secs = 0; // Disable cache for bulk operations
         self.config.batch_size = 2000; // Normal: 500
-        self.config.batch_timeout_ms = 50; // Normal: 100
+        self.config.batch_timeout_ms = 25; // Normal: 100
 
         // Connection pool optimizations
         self.config.max_connections = 150; // Normal: 50

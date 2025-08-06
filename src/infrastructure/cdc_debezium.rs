@@ -807,7 +807,7 @@ impl CDCConsumer {
 
                     // Wait a moment for the consumer to join the group
                     tracing::info!("CDCConsumer: Waiting for consumer to join group...");
-                    tokio::time::sleep(Duration::from_secs(5)).await; // Increased wait time
+                    tokio::time::sleep(Duration::from_secs(30)).await; // 5'ten 30'a çıkarıldı
 
                     // Log consumer group status
                     tracing::info!("CDCConsumer: Consumer group join completed");
@@ -837,7 +837,7 @@ impl CDCConsumer {
                     }
 
                     // Wait before retry
-                    tokio::time::sleep(Duration::from_secs(5)).await; // Increased wait time
+                    tokio::time::sleep(Duration::from_secs(30)).await; // 5'ten 30'a çıkarıldı
                 }
             }
         }
@@ -955,7 +955,7 @@ impl CDCConsumer {
         let mut adaptive_poll_interval = poll_interval_ms;
         let mut consecutive_empty_polls = 0;
         let min_poll_interval = 1; // 1ms minimum
-        let max_poll_interval = 50; // 50ms maximum
+        let max_poll_interval = 25; // 25ms maximum
         let adaptive_threshold = 10; // After 10 empty polls, increase interval
 
         // CRITICAL OPTIMIZATION: Batch processing buffer

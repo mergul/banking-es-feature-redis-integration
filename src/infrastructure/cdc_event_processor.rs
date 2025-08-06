@@ -590,7 +590,7 @@ impl UltraOptimizedCDCEventProcessor {
             Duration::from_secs(1800), // 30 minute TTL
         )));
 
-        let batch_timeout = Duration::from_millis(5); // Reduced from 50ms to 5ms for ultra-fast processing
+        let batch_timeout = Duration::from_millis(25); // Reduced from 50ms to 5ms for ultra-fast processing
         let initial_batch_size = if business_config.batch_processing_enabled {
             2000 // ✅ DÜZELTME: Batch size'ı 2000'e çıkar
         } else {
@@ -678,7 +678,7 @@ impl UltraOptimizedCDCEventProcessor {
         let batch_timeout = self.batch_timeout;
         let consistency_manager = self.consistency_manager.clone();
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(batch_timeout);
+            let mut interval = tokio::time::interval(batch_timeout/2);
             let mut last_flush = tokio::time::Instant::now();
 
             loop {
@@ -1297,7 +1297,7 @@ impl UltraOptimizedCDCEventProcessor {
             
             // Wait for result with timeout
             match tokio::time::timeout(
-                Duration::from_secs(5),
+                Duration::from_secs(30),  // 5'ten 30'a çıkarıldı
                 batching_service.wait_for_result(operation_id)
             ).await {
                 Ok(Ok(result)) => {
@@ -1404,7 +1404,7 @@ impl UltraOptimizedCDCEventProcessor {
         aggregate_futures.reserve(events_by_aggregate.len());
 
         // CRITICAL FIX: Define connection timeout for cache operations
-        let connection_timeout = Duration::from_millis(500);
+        let connection_timeout = Duration::from_secs(30);  // 500ms'den 30s'ye çıkarıldı
 
         for (aggregate_id, aggregate_events) in events_by_aggregate {
             let projection_cache = projection_cache.clone();
@@ -3188,7 +3188,7 @@ impl UltraOptimizedCDCEventProcessor {
         let batch_timeout = processor.batch_timeout;
 
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(batch_timeout);
+            let mut interval = tokio::time::interval(batch_timeout/2);
             loop {
                 tokio::select! {
                     _ = interval.tick() => {

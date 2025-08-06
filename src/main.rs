@@ -215,8 +215,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             service_context.cache_service.clone(),
             kafka_config.clone(),      // Clone KafkaConfig for CQRS service
             max_concurrent_operations, // max_concurrent_operations from environment
-            500,                       // batch_size
-            Duration::from_millis(50), // batch_timeout
+            1000,                      // batch_size
+            Duration::from_millis(25), // batch_timeout
             true,                      // enable_write_batching
             true,                      // enable_read_batching
             Some(consistency_manager.clone()), // Pass the consistency manager

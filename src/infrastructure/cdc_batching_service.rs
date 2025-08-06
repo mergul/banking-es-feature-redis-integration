@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 const CDC_NUM_PARTITIONS: usize = 4; // Reduced from 16 to 4 for larger batches per partition
 const CDC_DEFAULT_BATCH_SIZE: usize = 2000; // Increased to 2000 to match ProjectionConfig batch_size
-const CDC_BATCH_TIMEOUT_MS: u64 = 50; // 5x poll interval (5ms * 10 = 50ms) - consistent with other components
+const CDC_BATCH_TIMEOUT_MS: u64 = 25; // 5x poll interval (5ms * 5 = 25ms) - consistent with other components
 
 #[derive(Clone)]
 pub struct CDCBatchingConfig {
@@ -299,7 +299,7 @@ impl CDCBatchingService {
         let mut retry_count = 0;
 
         // BULK MODE: Batch boyutu büyükse bulk mode başlat
-        let should_use_bulk_mode = batch.projections.len() >= 500; // 500+ projection için bulk mode
+        let should_use_bulk_mode = batch.projections.len() >= 3; // 3+ projection için bulk mode
         let mut bulk_config_manager = if should_use_bulk_mode {
             Some(BulkInsertConfigManager::new())
         } else {
