@@ -14,9 +14,6 @@ use crate::infrastructure::lock_free_operations::{
 use crate::infrastructure::projections::{
     AccountProjection, ProjectionStoreTrait, TransactionProjection,
 };
-use crate::infrastructure::read_batching::{
-    PartitionedReadBatching, ReadBatchingConfig, ReadOperation, ReadOperationResult,
-};
 use crate::infrastructure::write_batching::save_events_with_retry;
 use crate::infrastructure::write_batching::{
     PartitionedBatching, WriteBatchingConfig, WriteBatchingService, WriteOperation,
@@ -39,12 +36,9 @@ pub struct CQRSAccountService {
     cqrs_handler: Arc<CQRSHandler>,
     batch_handler: Arc<BatchTransactionHandler>,
     write_batching_service: Option<Arc<PartitionedBatching>>,
-    read_batching_service: Option<Arc<PartitionedReadBatching>>,
-    projection_store: Arc<dyn ProjectionStoreTrait>,
     consistency_manager: Arc<ConsistencyManager>,
     metrics: Arc<CQRSMetrics>,
     enable_write_batching: bool,
-    enable_read_batching: bool,
     // NEW: Lock-free operations for fast reads
     lock_free_ops: Arc<LockFreeOperations>,
 }
@@ -59,7 +53,6 @@ impl CQRSAccountService {
         batch_size: usize,
         batch_timeout: Duration,
         enable_write_batching: bool,
-        enable_read_batching: bool,
         consistency_manager: Option<Arc<ConsistencyManager>>,
     ) -> Self {
         // Create KafkaProducer instance here
@@ -104,36 +97,13 @@ impl CQRSAccountService {
             let partitioned_batching = Arc::new(
                 PartitionedBatching::new(
                     event_store.clone(),
+                    projection_store.clone(),
                     event_store.get_partitioned_pools().write_pool_arc(),
                     outbox_batcher,
                 )
                 .await,
             );
             Some(partitioned_batching)
-        } else {
-            None
-        };
-
-        // Initialize read batching service if enabled
-        let read_batching_service = if enable_read_batching {
-            // Create 32 read pools for partitioning
-            let read_pools = std::iter::repeat(event_store.get_partitioned_pools().read_pool_arc())
-                .take(32)
-                .collect::<Vec<_>>();
-
-            // Create read batching service
-            let read_batching = match PartitionedReadBatching::new(
-                ReadBatchingConfig::default(),
-                projection_store.clone(),
-                read_pools,
-            )
-            .await
-            {
-                Ok(service) => Some(Arc::new(service)),
-                Err(_) => None,
-            };
-
-            read_batching
         } else {
             None
         };
@@ -153,12 +123,9 @@ impl CQRSAccountService {
             cqrs_handler,
             batch_handler,
             write_batching_service,
-            read_batching_service,
-            projection_store,
             consistency_manager,
             metrics,
             enable_write_batching,
-            enable_read_batching,
             lock_free_ops,
         }
     }
@@ -187,39 +154,9 @@ impl CQRSAccountService {
         Ok(())
     }
 
-    /// Start the read batching service if enabled
-    pub async fn start_read_batching(&self) -> Result<(), AccountError> {
-        if let Some(ref batching_service) = &self.read_batching_service {
-            // Use a simpler approach - just log that it's enabled
-            // The actual start/stop logic will be handled internally by the service
-            info!("Read batching service is enabled and ready");
-            info!("Read batching configuration: 32 partitions, 20K batch size");
-        } else {
-            info!("Read batching service is not enabled");
-        }
-        Ok(())
-    }
-
-    /// Stop the read batching service if enabled
-    pub async fn stop_read_batching(&self) -> Result<(), AccountError> {
-        if let Some(ref batching_service) = &self.read_batching_service {
-            // Use a simpler approach - just log that it's enabled
-            // The actual start/stop logic will be handled internally by the service
-            info!("Read batching service shutdown requested");
-        } else {
-            info!("Read batching service is not enabled");
-        }
-        Ok(())
-    }
-
     /// Get the write batching service for direct access
     pub fn get_write_batching_service(&self) -> Option<&Arc<PartitionedBatching>> {
         self.write_batching_service.as_ref()
-    }
-
-    /// Get the read batching service for direct access
-    pub fn get_read_batching_service(&self) -> Option<&Arc<PartitionedReadBatching>> {
-        self.read_batching_service.as_ref()
     }
 
     /// Create a new account
@@ -1498,465 +1435,68 @@ impl CQRSAccountService {
         }
     }
 
-    /// Get account with read batching if enabled
+    /// Get account by ID with optimized consistency
     pub async fn get_account(
         &self,
         account_id: Uuid,
     ) -> Result<Option<AccountProjection>, AccountError> {
-        // Try read batching first if enabled
-        if let Some(read_batching) = &self.read_batching_service {
-            let operation = ReadOperation::GetAccount { account_id };
+        println!(
+            "[DEBUG] CQRSAccountService::get_account: start for {}",
+            account_id
+        );
 
-            // ✅ Capture batch size BEFORE submitting operation
-            let batch_size_before_submit = read_batching.get_current_batch_size().await;
-
-            match read_batching.submit_read_operation(operation).await {
-                Ok(operation_id) => {
-                    match read_batching.wait_for_result(operation_id).await {
-                        Ok(ReadOperationResult::Account { account, .. }) => {
-                            // SMART: Use batch size captured BEFORE submit
-                            // This gives us the actual batch size when operation was submitted
-                            if batch_size_before_submit > 0 {
-                                // Multiple operations in batch - use batch consistency
-                                info!("📦 Read operation was part of batch with {} operations, using batch consistency", batch_size_before_submit + 1);
-                                match self.wait_for_batch_consistency(vec![account_id]).await {
-                                    Ok(_) => {
-                                        info!("✅ Batch consistency completed for read operation on account {}", account_id);
-                                        return Ok(account);
-                                    }
-                                    Err(e) => {
-                                        warn!("⚠️ Batch consistency failed for read operation on account {}: {}, but returning result anyway", account_id, e);
-                                        return Ok(account);
-                                    }
-                                }
-                            } else {
-                                // Single operation in batch - use individual consistency
-                                info!("🔍 Read operation was single in batch, using individual consistency");
-                                match self.wait_for_account_consistency(account_id).await {
-                                    Ok(_) => {
-                                        info!("✅ Individual consistency completed for read operation on account {}", account_id);
-                                        return Ok(account);
-                                    }
-                                    Err(e) => {
-                                        warn!("⚠️ Individual consistency failed for read operation on account {}: {}, but returning result anyway", account_id, e);
-                                        return Ok(account);
-                                    }
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            return Err(AccountError::InfrastructureError(
-                                "Unexpected result type from read batching".to_string(),
-                            ));
-                        }
-                        Err(e) => {
-                            warn!("Read batching failed, falling back to direct access: {}", e);
-                            // Fall back to direct access
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to submit read operation to batching: {}", e);
-                    // Fall back to direct access
-                }
-            }
-        }
-
-        // Fallback to direct projection store access with consistency check
-        match self.wait_for_account_consistency(account_id).await {
-            Ok(_) => {
-                info!(
-                    "Consistency check passed for account {} (fallback)",
-                    account_id
-                );
-            }
-            Err(e) => {
-                warn!("Consistency wait failed for account {}: {}", account_id, e);
-                // Continue anyway for read operations
-            }
-        }
-
-        self.projection_store
-            .get_account(account_id)
+        // OPTIMIZED: Try lock-free read first (fast path)
+        let fast_result = self
+            .lock_free_ops
+            .get_account_projection(account_id)
             .await
-            .map_err(|e| AccountError::InfrastructureError(format!("Failed to get account: {}", e)))
-    }
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
 
-    /// Get account balance with read batching if enabled
-    pub async fn get_account_balance(&self, account_id: Uuid) -> Result<Decimal, AccountError> {
-        // Try read batching first if enabled
-        if let Some(read_batching) = &self.read_batching_service {
-            let operation = ReadOperation::GetAccountBalance { account_id };
+        // If we got data, check if we need consistency
+        if let Some(projection) = &fast_result {
+            // Check if this account has pending writes (needs consistency)
+            let has_pending_writes = self
+                .consistency_manager
+                .has_pending_writes(account_id)
+                .await;
 
-            // ✅ Capture batch size BEFORE submitting operation
-            let batch_size_before_submit = read_batching.get_current_batch_size().await;
-
-            match read_batching.submit_read_operation(operation).await {
-                Ok(operation_id) => {
-                    match read_batching.wait_for_result(operation_id).await {
-                        Ok(ReadOperationResult::AccountBalance { balance, .. }) => {
-                            if let Some(balance) = balance {
-                                // SMART: Use batch size captured BEFORE submit
-                                if batch_size_before_submit > 0 {
-                                    // Multiple operations in batch - use batch consistency
-                                    info!("📦 Balance read operation was part of batch with {} operations, using batch consistency", batch_size_before_submit + 1);
-                                    match self.wait_for_batch_consistency(vec![account_id]).await {
-                                        Ok(_) => {
-                                            info!("✅ Batch consistency completed for balance read on account {}", account_id);
-                                            return Ok(balance);
-                                        }
-                                        Err(e) => {
-                                            warn!("⚠️ Batch consistency failed for balance read on account {}: {}, but returning result anyway", account_id, e);
-                                            return Ok(balance);
-                                        }
-                                    }
-                                } else {
-                                    // Single operation in batch - use individual consistency
-                                    info!("🔍 Balance read operation was single in batch, using individual consistency");
-                                    match self.wait_for_account_consistency(account_id).await {
-                                        Ok(_) => {
-                                            info!("✅ Individual consistency completed for balance read on account {}", account_id);
-                                            return Ok(balance);
-                                        }
-                                        Err(e) => {
-                                            warn!("⚠️ Individual consistency failed for balance read on account {}: {}, but returning result anyway", account_id, e);
-                                            return Ok(balance);
-                                        }
-                                    }
-                                }
-                            } else {
-                                return Err(AccountError::InfrastructureError(format!(
-                                    "Account not found: {}",
-                                    account_id
-                                )));
-                            }
-                        }
-                        Ok(_) => {
-                            return Err(AccountError::InfrastructureError(
-                                "Unexpected result type from read batching".to_string(),
-                            ));
-                        }
-                        Err(e) => {
-                            warn!("Read batching failed, falling back to direct access: {}", e);
-                            // Fall back to direct access
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to submit read operation to batching: {}", e);
-                    // Fall back to direct access
-                }
-            }
-        }
-
-        // Fallback to direct projection store access with consistency check
-        match self.wait_for_account_consistency(account_id).await {
-            Ok(_) => {
-                info!(
-                    "Consistency check passed for account {} balance (fallback)",
+            if !has_pending_writes {
+                // No pending writes, fast path is safe
+                println!(
+                    "[DEBUG] CQRSAccountService::get_account: fast path for {}",
                     account_id
                 );
-            }
-            Err(e) => {
-                warn!("Consistency wait failed for account {}: {}", account_id, e);
-                // Continue anyway for read operations
-            }
-        }
-
-        match self.projection_store.get_account(account_id).await {
-            Ok(Some(account)) => Ok(account.balance),
-            Ok(None) => Err(AccountError::InfrastructureError(format!(
-                "Account not found: {}",
-                account_id
-            ))),
-            Err(e) => Err(AccountError::InfrastructureError(format!(
-                "Failed to get account: {}",
-                e
-            ))),
-        }
-    }
-
-    /// Check if account is active
-    pub async fn is_account_active(&self, account_id: Uuid) -> Result<bool, AccountError> {
-        match self.get_account(account_id).await {
-            Ok(Some(account)) => Ok(account.is_active),
-            Ok(None) => Err(AccountError::InfrastructureError(format!(
-                "Account not found: {}",
-                account_id
-            ))),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Get account transactions with read batching if enabled
-    pub async fn get_account_transactions(
-        &self,
-        account_id: Uuid,
-    ) -> Result<Vec<TransactionProjection>, AccountError> {
-        // Try read batching first if enabled
-        if let Some(read_batching) = &self.read_batching_service {
-            let operation = ReadOperation::GetAccountTransactions { account_id };
-
-            // ✅ Capture batch size BEFORE submitting operation
-            let batch_size_before_submit = read_batching.get_current_batch_size().await;
-
-            match read_batching.submit_read_operation(operation).await {
-                Ok(operation_id) => {
-                    match read_batching.wait_for_result(operation_id).await {
-                        Ok(ReadOperationResult::AccountTransactions { transactions, .. }) => {
-                            // Convert AccountEvent back to TransactionProjection
-                            // This is a simplified conversion - you might need to adjust based on your data model
-                            let transaction_projections: Vec<TransactionProjection> = transactions
-                                .into_iter()
-                                .filter_map(|event| match event {
-                                    AccountEvent::MoneyDeposited {
-                                        account_id,
-                                        amount,
-                                        transaction_id,
-                                    } => Some(TransactionProjection {
-                                        id: transaction_id,
-                                        account_id,
-                                        amount,
-                                        transaction_type: "deposit".to_string(),
-                                        timestamp: chrono::Utc::now(),
-                                    }),
-                                    AccountEvent::MoneyWithdrawn {
-                                        account_id,
-                                        amount,
-                                        transaction_id,
-                                    } => Some(TransactionProjection {
-                                        id: transaction_id,
-                                        account_id,
-                                        amount,
-                                        transaction_type: "withdrawal".to_string(),
-                                        timestamp: chrono::Utc::now(),
-                                    }),
-                                    _ => None,
-                                })
-                                .collect();
-
-                            // SMART: Use batch size captured BEFORE submit
-                            if batch_size_before_submit > 0 {
-                                // Multiple operations in batch - use batch consistency
-                                info!("📦 Transactions read operation was part of batch with {} operations, using batch consistency", batch_size_before_submit + 1);
-                                match self.wait_for_batch_consistency(vec![account_id]).await {
-                                    Ok(_) => {
-                                        info!("✅ Batch consistency completed for transactions read on account {}", account_id);
-                                        return Ok(transaction_projections);
-                                    }
-                                    Err(e) => {
-                                        warn!("⚠️ Batch consistency failed for transactions read on account {}: {}, but returning result anyway", account_id, e);
-                                        return Ok(transaction_projections);
-                                    }
-                                }
-                            } else {
-                                // Single operation in batch - use individual consistency
-                                info!("🔍 Transactions read operation was single in batch, using individual consistency");
-                                match self.wait_for_account_consistency(account_id).await {
-                                    Ok(_) => {
-                                        info!("✅ Individual consistency completed for transactions read on account {}", account_id);
-                                        return Ok(transaction_projections);
-                                    }
-                                    Err(e) => {
-                                        warn!("⚠️ Individual consistency failed for transactions read on account {}: {}, but returning result anyway", account_id, e);
-                                        return Ok(transaction_projections);
-                                    }
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            return Err(AccountError::InfrastructureError(
-                                "Unexpected result type from read batching".to_string(),
-                            ));
-                        }
-                        Err(e) => {
-                            warn!("Read batching failed, falling back to direct access: {}", e);
-                            // Fall back to direct access
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to submit read operation to batching: {}", e);
-                    // Fall back to direct access
-                }
-            }
-        }
-
-        // Fallback to direct projection store access with consistency check
-        match self.wait_for_account_consistency(account_id).await {
-            Ok(_) => {
-                info!(
-                    "Consistency check passed for account {} transactions (fallback)",
+                return Ok(fast_result);
+            } else {
+                // Has pending writes, need to wait for consistency
+                println!(
+                    "[DEBUG] CQRSAccountService::get_account: consistency path for {}",
                     account_id
                 );
-            }
-            Err(e) => {
-                warn!("Consistency wait failed for account {}: {}", account_id, e);
-                // Continue anyway for read operations
-            }
-        }
+                let cm_result = self
+                    .consistency_manager
+                    .wait_for_projection_sync(account_id)
+                    .await;
 
-        self.projection_store
-            .get_account_transactions(account_id)
-            .await
-            .map_err(|e| {
-                AccountError::InfrastructureError(format!(
-                    "Failed to get account transactions: {}",
-                    e
-                ))
-            })
-    }
-
-    /// Get multiple accounts with read batching if enabled
-    pub async fn get_multiple_accounts(
-        &self,
-        account_ids: Vec<Uuid>,
-    ) -> Result<Vec<AccountProjection>, AccountError> {
-        // Try read batching first if enabled
-        if let Some(read_batching) = &self.read_batching_service {
-            let operation = ReadOperation::GetMultipleAccounts {
-                account_ids: account_ids.clone(),
-            };
-
-            match read_batching.submit_read_operation(operation).await {
-                Ok(operation_id) => {
-                    match read_batching.wait_for_result(operation_id).await {
-                        Ok(ReadOperationResult::MultipleAccounts { accounts }) => {
-                            // Check batch consistency AFTER getting results (batch approach)
-                            match self.wait_for_batch_consistency(account_ids.clone()).await {
-                                Ok(_) => {
-                                    info!(
-                                        "Batch consistency check passed for {} accounts",
-                                        accounts.len()
-                                    );
-                                    return Ok(accounts);
-                                }
-                                Err(e) => {
-                                    warn!("Batch consistency check failed: {}", e);
-                                    // Return the results anyway, but log the consistency issue
-                                    return Ok(accounts);
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            return Err(AccountError::InfrastructureError(
-                                "Unexpected result type from read batching".to_string(),
-                            ));
-                        }
-                        Err(e) => {
-                            warn!("Read batching failed, falling back to direct access: {}", e);
-                            // Fall back to direct access
-                        }
-                    }
+                if let Err(e) = cm_result {
+                    warn!(
+                        "Projection sync wait failed for account {}: {}",
+                        account_id, e
+                    );
+                    // Return fast result anyway (eventual consistency)
                 }
-                Err(e) => {
-                    warn!("Failed to submit read operation to batching: {}", e);
-                    // Fall back to direct access
-                }
+
+                // Re-read after consistency wait
+                return self
+                    .lock_free_ops
+                    .get_account_projection(account_id)
+                    .await
+                    .map_err(|e| AccountError::InfrastructureError(e.to_string()));
             }
         }
 
-        // Fallback to direct projection store access with batch consistency check
-        match self.wait_for_batch_consistency(account_ids.clone()).await {
-            Ok(_) => {
-                info!("Batch consistency check passed (fallback)");
-            }
-            Err(e) => {
-                warn!("Consistency wait failed for batch accounts: {}", e);
-                // Continue anyway for read operations
-            }
-        }
-
-        let mut accounts = Vec::new();
-        for account_id in account_ids {
-            if let Ok(Some(account)) = self.projection_store.get_account(account_id).await {
-                accounts.push(account);
-            }
-        }
-        Ok(accounts)
-    }
-
-    /// NEW: Optimized batch read with consistency check
-    pub async fn get_accounts_batch_with_consistency(
-        &self,
-        account_ids: Vec<Uuid>,
-    ) -> Result<Vec<Option<AccountProjection>>, AccountError> {
-        if account_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // 1. Submit all operations to read batching
-        if let Some(read_batching) = &self.read_batching_service {
-            let mut operations = Vec::new();
-            for account_id in account_ids.clone() {
-                operations.push(ReadOperation::GetAccount { account_id });
-            }
-
-            // 2. Process batch
-            match read_batching.submit_read_operations_batch(operations).await {
-                Ok(operation_ids) => {
-                    // 3. Wait for batch consistency ONCE
-                    match self.wait_for_batch_consistency(account_ids.clone()).await {
-                        Ok(_) => {
-                            info!(
-                                "Batch consistency check passed for {} accounts",
-                                account_ids.len()
-                            );
-                        }
-                        Err(e) => {
-                            warn!("Batch consistency check failed: {}", e);
-                            // Continue anyway, but log the consistency issue
-                        }
-                    }
-
-                    // 4. Collect results
-                    let mut results = Vec::new();
-                    for operation_id in operation_ids {
-                        match read_batching.wait_for_result(operation_id).await {
-                            Ok(ReadOperationResult::Account { account, .. }) => {
-                                results.push(account);
-                            }
-                            Ok(_) => {
-                                results.push(None); // Unexpected result type
-                            }
-                            Err(e) => {
-                                warn!("Failed to get batch result: {}", e);
-                                results.push(None);
-                            }
-                        }
-                    }
-
-                    return Ok(results);
-                }
-                Err(e) => {
-                    warn!("Failed to submit batch read operations: {}", e);
-                    // Fall back to individual reads
-                }
-            }
-        }
-
-        // Fallback: individual reads with batch consistency
-        match self.wait_for_batch_consistency(account_ids.clone()).await {
-            Ok(_) => {
-                info!("Batch consistency check passed (fallback)");
-            }
-            Err(e) => {
-                warn!("Consistency wait failed for batch accounts: {}", e);
-            }
-        }
-
-        let mut results = Vec::new();
-        for account_id in account_ids {
-            match self.projection_store.get_account(account_id).await {
-                Ok(account) => results.push(account),
-                Err(e) => {
-                    warn!("Failed to get account {}: {}", account_id, e);
-                    results.push(None);
-                }
-            }
-        }
-
-        Ok(results)
+        // No data found, return None
+        Ok(fast_result)
     }
 
     /// Get all accounts
@@ -1991,6 +1531,260 @@ impl CQRSAccountService {
         }
 
         result
+    }
+
+    /// Get account transactions with read-after-write consistency
+    pub async fn get_account_transactions(
+        &self,
+        account_id: Uuid,
+    ) -> Result<Vec<TransactionProjection>, AccountError> {
+        let start_time = std::time::Instant::now();
+        info!("Querying transactions for account {}", account_id);
+
+        self.metrics
+            .queries_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Wait for CDC consistency before reading
+        if let Err(e) = self.wait_for_account_consistency(account_id).await {
+            warn!(
+                "CDC consistency wait failed for account {}: {}",
+                account_id, e
+            );
+            // Continue anyway - might be a timeout or the account was created before tracking
+        }
+
+        let result = self.cqrs_handler.get_account_transactions(account_id).await;
+
+        let duration = start_time.elapsed();
+        match &result {
+            Ok(transactions) => {
+                self.metrics
+                    .queries_successful
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully retrieved {} transactions for account {} in {:?}",
+                    transactions.len(),
+                    account_id,
+                    duration
+                );
+            }
+            Err(e) => {
+                self.metrics
+                    .queries_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to query transactions for account {}: {} (took {:?})",
+                    account_id, e, duration
+                );
+            }
+        }
+
+        result
+    }
+
+    /// Get account balance with optimized consistency
+    pub async fn get_account_balance(&self, account_id: Uuid) -> Result<Decimal, AccountError> {
+        let start_time = std::time::Instant::now();
+        info!("Querying balance for account {}", account_id);
+
+        self.metrics
+            .queries_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // OPTIMIZED: Try lock-free read first (fast path)
+        let fast_result = self
+            .lock_free_ops
+            .get_account_projection(account_id)
+            .await
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+
+        let duration = start_time.elapsed();
+
+        // If we got data, check if we need consistency
+        if let Some(projection) = &fast_result {
+            // Check if this account has pending writes (needs consistency)
+            let has_pending_writes = self
+                .consistency_manager
+                .has_pending_writes(account_id)
+                .await;
+
+            if !has_pending_writes {
+                // No pending writes, fast path is safe
+                self.metrics
+                    .queries_successful
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully retrieved balance {} for account {} in {:?} (fast path)",
+                    projection.balance, account_id, duration
+                );
+                return Ok(projection.balance);
+            } else {
+                // Has pending writes, need to wait for consistency
+                info!(
+                    "Account {} has pending writes, waiting for consistency",
+                    account_id
+                );
+                let cm_result = self
+                    .consistency_manager
+                    .wait_for_projection_sync(account_id)
+                    .await;
+
+                if let Err(e) = cm_result {
+                    warn!(
+                        "Projection sync wait failed for account {}: {}",
+                        account_id, e
+                    );
+                    // Return fast result anyway (eventual consistency)
+                }
+
+                // Re-read after consistency wait
+                let consistent_result = self
+                    .lock_free_ops
+                    .get_account_projection(account_id)
+                    .await
+                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+
+                match consistent_result {
+                    Some(projection) => {
+                        self.metrics
+                            .queries_successful
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        info!(
+                            "Successfully retrieved balance {} for account {} in {:?} (consistency path)",
+                            projection.balance, account_id, start_time.elapsed()
+                        );
+                        Ok(projection.balance)
+                    }
+                    None => {
+                        self.metrics
+                            .queries_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        error!(
+                            "Account not found: {} (took {:?})",
+                            account_id,
+                            start_time.elapsed()
+                        );
+                        Err(AccountError::NotFound)
+                    }
+                }
+            }
+        } else {
+            // No data found
+            self.metrics
+                .queries_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            error!("Account not found: {} (took {:?})", account_id, duration);
+            Err(AccountError::NotFound)
+        }
+    }
+
+    /// Check if account is active with optimized consistency
+    pub async fn is_account_active(&self, account_id: Uuid) -> Result<bool, AccountError> {
+        let start_time = std::time::Instant::now();
+        info!("Checking if account {} is active", account_id);
+
+        self.metrics
+            .queries_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // OPTIMIZED: Try lock-free read first (fast path)
+        let fast_result = self
+            .lock_free_ops
+            .get_account_projection(account_id)
+            .await
+            .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+
+        let duration = start_time.elapsed();
+
+        // If we got data, check if we need consistency
+        if let Some(projection) = &fast_result {
+            // Check if this account has pending writes (needs consistency)
+            let has_pending_writes = self
+                .consistency_manager
+                .has_pending_writes(account_id)
+                .await;
+
+            if !has_pending_writes {
+                // No pending writes, fast path is safe
+                self.metrics
+                    .queries_successful
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Account {} is {} in {:?} (fast path)",
+                    account_id,
+                    if projection.is_active {
+                        "active"
+                    } else {
+                        "inactive"
+                    },
+                    duration
+                );
+                return Ok(projection.is_active);
+            } else {
+                // Has pending writes, need to wait for consistency
+                info!(
+                    "Account {} has pending writes, waiting for consistency",
+                    account_id
+                );
+                let cm_result = self
+                    .consistency_manager
+                    .wait_for_projection_sync(account_id)
+                    .await;
+
+                if let Err(e) = cm_result {
+                    warn!(
+                        "Projection sync wait failed for account {}: {}",
+                        account_id, e
+                    );
+                    // Return fast result anyway (eventual consistency)
+                }
+
+                // Re-read after consistency wait
+                let consistent_result = self
+                    .lock_free_ops
+                    .get_account_projection(account_id)
+                    .await
+                    .map_err(|e| AccountError::InfrastructureError(e.to_string()))?;
+
+                match consistent_result {
+                    Some(projection) => {
+                        self.metrics
+                            .queries_successful
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        info!(
+                            "Account {} is {} in {:?} (consistency path)",
+                            account_id,
+                            if projection.is_active {
+                                "active"
+                            } else {
+                                "inactive"
+                            },
+                            start_time.elapsed()
+                        );
+                        Ok(projection.is_active)
+                    }
+                    None => {
+                        self.metrics
+                            .queries_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        error!(
+                            "Account not found: {} (took {:?})",
+                            account_id,
+                            start_time.elapsed()
+                        );
+                        Err(AccountError::NotFound)
+                    }
+                }
+            }
+        } else {
+            // No data found
+            self.metrics
+                .queries_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            error!("Account not found: {} (took {:?})", account_id, duration);
+            Err(AccountError::NotFound)
+        }
     }
 
     /// Process batch transactions

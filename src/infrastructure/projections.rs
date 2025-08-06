@@ -109,23 +109,40 @@ pub struct ProjectionConfig {
     pub acquire_timeout_secs: u64,
     pub idle_timeout_secs: u64,
     pub max_lifetime_secs: u64,
-    pub synchronous_commit: bool,
-    pub full_page_writes: bool,
 }
 
 impl Default for ProjectionConfig {
     fn default() -> Self {
         Self {
-            cache_ttl_secs: 600,     // Increased from default
-            batch_size: 2000,        // Increased to match CDC batch sizes (336, 542, etc.)
-            batch_timeout_ms: 25,    // Fast timeout since messages come as batches
-            max_connections: 100,    // Increased from default
-            min_connections: 20,     // Increased from default
-            acquire_timeout_secs: 5, // Reduced from default
-            idle_timeout_secs: 300,  // Reduced from default
-            max_lifetime_secs: 1800, // Reduced from default
-            synchronous_commit: true,
-            full_page_writes: true,
+            cache_ttl_secs: std::env::var("CACHE_DEFAULT_TTL")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .unwrap_or(300),
+            batch_size: std::env::var("DB_BATCH_SIZE")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .unwrap_or(1000),
+            batch_timeout_ms: 50, // Increased from 25ms to 50ms
+            max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "80".to_string())
+                .parse()
+                .unwrap_or(80),
+            min_connections: std::env::var("PROJECTION_MIN_CONNECTIONS")
+                .unwrap_or_else(|_| "20".to_string())
+                .parse()
+                .unwrap_or(20),
+            acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30),
+            idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()
+                .unwrap_or(600),
+            max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
+                .unwrap_or_else(|_| "1800".to_string())
+                .parse()
+                .unwrap_or(1800),
         }
     }
 }
@@ -143,7 +160,6 @@ enum ProjectionUpdate {
 pub trait ProjectionStoreTrait: Send + Sync {
     async fn get_account(&self, account_id: Uuid) -> Result<Option<AccountProjection>>;
     async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>>;
-    async fn get_accounts_batch(&self, account_ids: &[Uuid]) -> Result<Vec<AccountProjection>>;
     async fn get_account_transactions(
         &self,
         account_id: Uuid,
@@ -153,7 +169,6 @@ pub trait ProjectionStoreTrait: Send + Sync {
         &self,
         transactions: Vec<TransactionProjection>,
     ) -> Result<()>;
-    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[async_trait]
@@ -164,11 +179,6 @@ impl ProjectionStoreTrait for ProjectionStore {
     async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>> {
         self.get_all_accounts().await
     }
-
-    async fn get_accounts_batch(&self, account_ids: &[Uuid]) -> Result<Vec<AccountProjection>> {
-        self.get_accounts_batch(account_ids).await
-    }
-
     async fn get_account_transactions(
         &self,
         account_id: Uuid,
@@ -217,10 +227,6 @@ impl ProjectionStoreTrait for ProjectionStore {
                 )
             })?;
         Ok(())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
@@ -581,7 +587,7 @@ impl ProjectionStore {
             "#,
             account_id
         )
-        .fetch_optional(&self.pools.read_pool) // Use read pool instead of write pool
+        .fetch_optional(&self.pools.write_pool)
         .await?;
 
         // Add debug print after DB query
@@ -760,90 +766,6 @@ impl ProjectionStore {
         Ok(accounts)
     }
 
-    /// True batch query: Get multiple accounts in a single SQL query
-    pub async fn get_accounts_batch(&self, account_ids: &[Uuid]) -> Result<Vec<AccountProjection>> {
-        if account_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let start_time = Instant::now();
-
-        // Try cache first for all accounts
-        let mut cached_accounts = Vec::new();
-        let mut uncached_ids = Vec::new();
-
-        {
-            let cache = self.account_cache.read().await;
-            for &account_id in account_ids {
-                if let Some(entry) = cache.get(&account_id) {
-                    if entry.last_accessed.elapsed() < entry.ttl {
-                        cached_accounts.push(entry.data.clone());
-                    } else {
-                        uncached_ids.push(account_id);
-                    }
-                } else {
-                    uncached_ids.push(account_id);
-                }
-            }
-        }
-
-        // If all accounts were cached, return immediately
-        if uncached_ids.is_empty() {
-            self.metrics.cache_hits.fetch_add(
-                account_ids.len() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            return Ok(cached_accounts);
-        }
-
-        self.metrics.cache_misses.fetch_add(
-            uncached_ids.len() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-        // Fetch uncached accounts in a single batch query
-        let db_accounts = sqlx::query_as!(
-            AccountProjection,
-            r#"
-            SELECT id, owner_name, balance, is_active, created_at, updated_at
-            FROM account_projections
-            WHERE id = ANY($1)
-            ORDER BY updated_at DESC
-            "#,
-            &uncached_ids
-        )
-        .fetch_all(self.pools.select_pool(OperationType::Read))
-        .await?;
-
-        // Update cache for fetched accounts
-        {
-            let mut cache = self.account_cache.write().await;
-            for account in &db_accounts {
-                cache.insert(
-                    account.id,
-                    CacheEntry {
-                        data: account.clone(),
-                        last_accessed: Instant::now(),
-                        version: self
-                            .cache_version
-                            .load(std::sync::atomic::Ordering::Relaxed),
-                        ttl: Duration::from_secs(self.config.cache_ttl_secs),
-                    },
-                );
-            }
-        }
-
-        // Combine cached and database results
-        cached_accounts.extend(db_accounts);
-
-        self.metrics.query_duration.fetch_add(
-            start_time.elapsed().as_micros() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-        Ok(cached_accounts)
-    }
-
     // async fn update_processor(
     //     pool: PgPool,
     //     mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
@@ -932,31 +854,9 @@ impl ProjectionStore {
                     match update {
                         ProjectionUpdate::AccountBatch(accounts) => {
                             account_batch.extend(accounts);
-                            // CRITICAL OPTIMIZATION: Process immediately if batch is large enough
-                            if account_batch.len() >= config.batch_size { // Use config.batch_size instead of hardcoded 500
-                                tracing::info!("ProjectionStore: update_processor flushing account batch of size {}. IDs: {:?}", account_batch.len(), account_batch.iter().map(|a| a.id).collect::<Vec<_>>());
-                                let batch_to_process = std::mem::take(&mut account_batch);
-                                let pools = pools.clone();
-                                let metrics = metrics.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = Self::upsert_accounts_batch_parallel(&pools, &metrics, batch_to_process).await {
-                                        error!("[ProjectionStore] Error upserting account batch: {}", e);
-                                    }
-                                });
-                            }
                         }
                         ProjectionUpdate::TransactionBatch(transactions) => {
                             transaction_batch.extend(transactions);
-                            // CRITICAL OPTIMIZATION: Process immediately if batch is large enough
-                            if transaction_batch.len() >= config.batch_size { // Use config.batch_size instead of hardcoded 500
-                                let batch_to_process = std::mem::take(&mut transaction_batch);
-                                let pools = pools.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = Self::insert_transactions_batch_parallel(&pools, batch_to_process).await {
-                                        error!("[ProjectionStore] Error inserting transaction batch: {}", e);
-                                    }
-                                });
-                            }
                         }
                     }
                 }
@@ -1003,8 +903,11 @@ impl ProjectionStore {
         let pool = pools.select_pool(OperationType::Write).clone();
         let mut tx = pool.begin().await?;
 
-        // Process all accounts in a single bulk operation
-        Self::bulk_upsert_accounts(&mut tx, &accounts).await?;
+        // Process accounts in chunks for better memory management
+        let chunk_size = 100; // Process 100 accounts at a time
+        for chunk in accounts.chunks(chunk_size) {
+            Self::bulk_upsert_accounts(&mut tx, chunk).await?;
+        }
 
         tx.commit().await?;
 
@@ -1028,8 +931,11 @@ impl ProjectionStore {
         let pool = pools.select_pool(OperationType::Write).clone();
         let mut tx = pool.begin().await?;
 
-        // Process all transactions in a single bulk operation
-        Self::bulk_insert_transactions(&mut tx, &transactions).await?;
+        // Process transactions in chunks for better memory management
+        let chunk_size = 100; // Process 100 transactions at a time
+        for chunk in transactions.chunks(chunk_size) {
+            Self::bulk_insert_transactions(&mut tx, chunk).await?;
+        }
 
         tx.commit().await?;
         Ok(())
@@ -1220,106 +1126,6 @@ impl ProjectionStore {
                 hit_rate, batches, errors, avg_query_time
             );
         }
-    }
-
-    /// Get the current configuration
-    pub fn get_config(&self) -> ProjectionConfig {
-        self.config.clone()
-    }
-
-    /// Update the configuration (for bulk operations)
-    pub fn update_config(&mut self, new_config: ProjectionConfig) {
-        self.config = new_config;
-    }
-
-    /// Temporarily apply bulk configuration and return original config
-    pub fn apply_bulk_config(&mut self) -> ProjectionConfig {
-        let original_config = self.config.clone();
-
-        // Apply bulk optimizations
-        self.config.cache_ttl_secs = 0; // Disable cache for bulk operations
-        self.config.batch_size = 2000; // Normal: 500
-        self.config.batch_timeout_ms = 50; // Normal: 100
-
-        // Connection pool optimizations
-        self.config.max_connections = 150; // Normal: 50
-        self.config.min_connections = 30; // Normal: 5
-        self.config.acquire_timeout_secs = 30; // Normal: 10
-        self.config.idle_timeout_secs = 300; // Normal: 60
-        self.config.max_lifetime_secs = 1800; // Normal: 600
-
-        // Set PostgreSQL synchronous_commit = off for bulk operations
-        self.config.synchronous_commit = false;
-        // Set PostgreSQL full_page_writes = off for bulk operations
-        self.config.full_page_writes = false;
-
-        original_config
-    }
-
-    /// Restore original configuration
-    pub fn restore_config(&mut self, original_config: ProjectionConfig) {
-        self.config = original_config;
-    }
-
-    /// Apply PostgreSQL settings for bulk operations
-    pub async fn apply_postgres_bulk_settings(
-        &self,
-        synchronous_commit: bool,
-        _full_page_writes: bool, // Ignored - cannot be changed at runtime
-    ) -> Result<()> {
-        let pool = self.pools.select_pool(OperationType::Write);
-
-        // Set synchronous_commit (only runtime-changeable parameter)
-        let sync_setting = if synchronous_commit { "on" } else { "off" };
-        sqlx::query(&format!("SET synchronous_commit = {}", sync_setting))
-            .execute(pool)
-            .await
-            .map_err(|e| ProjectionError::DatabaseError(e))?;
-
-        info!(
-            "🔧 ProjectionStore PostgreSQL setting: synchronous_commit={} (full_page_writes requires server restart)",
-            sync_setting
-        );
-        Ok(())
-    }
-
-    /// Apply bulk config with PostgreSQL settings
-    pub async fn apply_bulk_config_with_postgres(&mut self) -> ProjectionConfig {
-        let original_config = self.apply_bulk_config();
-
-        // Apply PostgreSQL settings for bulk operations
-        if let Err(e) = self.apply_postgres_bulk_settings(false, false).await {
-            warn!(
-                "Failed to set ProjectionStore PostgreSQL bulk settings: {}",
-                e
-            );
-        }
-
-        original_config
-    }
-
-    /// Restore config with PostgreSQL settings
-    pub async fn restore_config_with_postgres(
-        &mut self,
-        original_config: ProjectionConfig,
-    ) -> Result<()> {
-        self.restore_config(original_config.clone());
-
-        // Restore PostgreSQL settings
-        if let Err(e) = self
-            .apply_postgres_bulk_settings(
-                original_config.synchronous_commit,
-                original_config.full_page_writes,
-            )
-            .await
-        {
-            warn!(
-                "Failed to restore ProjectionStore PostgreSQL settings: {}",
-                e
-            );
-        }
-
-        Ok(())
     }
 }
 

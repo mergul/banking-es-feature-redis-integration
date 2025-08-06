@@ -368,9 +368,6 @@ impl CDCServiceManager {
         // Validate Kafka connectivity
         self.validate_kafka_connectivity().await?;
 
-        // CDC Batching Service will be initialized automatically when needed
-        tracing::info!("CDC Service Manager: CDC Batching Service will be initialized on-demand");
-
         tracing::info!("CDC Service Manager: ✅ Infrastructure initialized");
         Ok(())
     }

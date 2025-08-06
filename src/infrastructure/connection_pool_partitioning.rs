@@ -24,48 +24,47 @@ impl Default for PoolPartitioningConfig {
                 "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
             }),
             write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "200".to_string())
+                .unwrap_or_else(|_| "500".to_string())
                 .parse()
-                .unwrap_or(200)
-                / 5, // Write pool gets 1/5 of total connections
+                .unwrap_or(500)
+                / 3, // Write pool gets 1/3 of total connections
             write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "100".to_string())
+                .unwrap_or_else(|_| "250".to_string())
                 .parse()
-                .unwrap_or(100)
-                / 5, // Write pool gets 1/5 of min connections
+                .unwrap_or(250)
+                / 3, // Write pool gets 1/3 of min connections
             read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "200".to_string())
+                .unwrap_or_else(|_| "500".to_string())
                 .parse()
-                .unwrap_or(200)
-                * 4
-                / 5, // Read pool gets 4/5 of total connections
+                .unwrap_or(500)
+                * 2
+                / 3, // Read pool gets 2/3 of total connections
             read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "100".to_string())
+                .unwrap_or_else(|_| "250".to_string())
                 .parse()
-                .unwrap_or(100)
-                * 4
-                / 5, // Read pool gets 4/5 of min connections
+                .unwrap_or(250)
+                * 2
+                / 3, // Read pool gets 2/3 of min connections
             acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
-                .unwrap_or_else(|_| "15".to_string())
+                .unwrap_or_else(|_| "30".to_string())
                 .parse()
-                .unwrap_or(15),
+                .unwrap_or(30),
             write_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-                .unwrap_or_else(|_| "300".to_string())
+                .unwrap_or_else(|_| "600".to_string())
                 .parse()
-                .unwrap_or(300),
+                .unwrap_or(600),
             read_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-                .unwrap_or_else(|_| "300".to_string())
-                .parse()
-                .unwrap_or(300),
-            write_max_lifetime_secs: std::env::var("DB_WRITE_MAX_LIFETIME")
                 .unwrap_or_else(|_| "900".to_string())
                 .parse()
                 .unwrap_or(900),
-            read_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
-                .unwrap_or_else(|_| "900".to_string())
+            write_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
+                .unwrap_or_else(|_| "1800".to_string())
                 .parse()
-                .unwrap_or(900)
-                * 2, // Longer lifetime for reads
+                .unwrap_or(1800),
+            read_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
+                .unwrap_or_else(|_| "3600".to_string())
+                .parse()
+                .unwrap_or(3600),
         }
     }
 }

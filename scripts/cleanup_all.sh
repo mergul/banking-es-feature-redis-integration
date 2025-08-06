@@ -285,10 +285,12 @@ cleanup_database() {
         "kafka_outbox_cdc"
         "kafka_outbox"
         "events"
-        "snapshots"
+        "accounts"
+        "transactions"
+        "users"
         "account_projections"
         "transaction_projections"
-        "users"
+        "schema_changes"
     )
     
     for table in "${tables[@]}"; do
@@ -312,6 +314,9 @@ cleanup_database() {
     log_info "Resetting sequences..."
     local sequences=(
         "events_id_seq"
+        "accounts_id_seq"
+        "transactions_id_seq"
+        "users_id_seq"
         "kafka_outbox_id_seq"
         "kafka_outbox_cdc_id_seq"
     )
@@ -384,10 +389,8 @@ show_final_status() {
         "kafka_outbox_cdc"
         "kafka_outbox"
         "events"
-        "snapshots"
+        "accounts"
         "account_projections"
-        "transaction_projections"
-        "users"
     )
     
     for table in "${tables[@]}"; do

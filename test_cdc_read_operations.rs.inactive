@@ -1,0 +1,263 @@
+use banking_es::{
+    application::services::CQRSAccountService,
+    infrastructure::{
+        cache_service::{CacheConfig, CacheService},
+        cdc_debezium::{CDCOutboxRepository, DebeziumConfig},
+        cdc_service_manager::CDCServiceManager,
+        event_store::{EventStore, EventStoreTrait},
+        projections::ProjectionStore,
+        RealRedisClient,
+    },
+};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::Duration;
+use uuid::Uuid;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🔍 CDC Read Operations Test with Full Pipeline");
+    println!("==============================================");
+
+    // Set the database URL
+    std::env::set_var(
+        "DATABASE_URL",
+        "postgresql://postgres:Francisco1@localhost:5432/banking_es",
+    );
+
+    // Initialize services
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+    });
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("Failed to connect to database");
+
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_client = redis::Client::open(redis_url).expect("Failed to create Redis client");
+    let redis_client_trait = RealRedisClient::new(redis_client, None);
+
+    let event_store = Arc::new(EventStore::new(pool.clone()));
+    let cache_config = CacheConfig::default();
+    let cache_service = Arc::new(CacheService::new(redis_client_trait, cache_config));
+    let projection_store = Arc::new(ProjectionStore::new(pool.clone()));
+
+    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let cqrs_service = Arc::new(CQRSAccountService::new(
+        event_store.clone(),
+        projection_store.clone(),
+        cache_service.clone(),
+        kafka_config.clone(),
+        50,                     // max_concurrent_operations
+        25,                     // batch_size
+        Duration::from_secs(2), // batch_timeout
+        true,                   // enable_write_batching
+    ));
+
+    // Start write batching service
+    cqrs_service
+        .start_write_batching()
+        .await
+        .expect("Failed to start write batching service");
+
+    println!("✅ CQRS Service initialized");
+
+    // Initialize CDC Service Manager with consistency manager
+    println!("🔧 Initializing CDC Service Manager...");
+    let cdc_outbox_repo = Arc::new(CDCOutboxRepository::new(
+        event_store.get_partitioned_pools().clone(),
+    ));
+
+    let kafka_producer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())
+            .expect("Failed to create Kafka producer");
+    let kafka_consumer_for_cdc =
+        banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())
+            .expect("Failed to create Kafka consumer");
+
+    let cdc_config = DebeziumConfig::default();
+    let mut cdc_service_manager = CDCServiceManager::new(
+        cdc_config,
+        cdc_outbox_repo,
+        kafka_producer_for_cdc,
+        kafka_consumer_for_cdc,
+        cache_service.clone(),
+        projection_store.clone(),
+        None,                                         // metrics
+        Some(cqrs_service.get_consistency_manager()), // Pass consistency manager
+    )?;
+
+    // Start CDC service
+    cdc_service_manager.start().await?;
+    println!("✅ CDC Service Manager started");
+
+    // Wait a bit for CDC to initialize
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Test 1: Direct database query to check projections table
+    println!("\n📊 Test 1: Direct Database Query");
+    println!("=================================");
+
+    let direct_accounts = sqlx::query!(
+        "SELECT id, owner_name, balance, is_active FROM account_projections WHERE is_active = true AND owner_name != '' LIMIT 3"
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    println!(
+        "✅ Found {} active accounts with names in projections table",
+        direct_accounts.len()
+    );
+
+    for (i, account) in direct_accounts.iter().enumerate() {
+        println!(
+            "  Account {}: ID={}, Owner={}, Balance={}, Active={}",
+            i + 1,
+            account.id,
+            account.owner_name,
+            account.balance,
+            account.is_active
+        );
+    }
+
+    if direct_accounts.is_empty() {
+        println!("⚠️  No valid accounts found in projections table");
+        return Ok(());
+    }
+
+    // Test 2: Create a new account to test the full pipeline
+    println!("\n🔧 Test 2: Create New Account to Test Full Pipeline");
+    println!("===================================================");
+
+    let new_account_id = match cqrs_service
+        .create_account("CDCTestUser".to_string(), Decimal::new(500, 0))
+        .await
+    {
+        Ok(id) => {
+            println!("✅ Created new test account: {}", id);
+            id
+        }
+        Err(e) => {
+            println!("❌ Failed to create test account: {:?}", e);
+            return Ok(());
+        }
+    };
+
+    // Wait for CDC processing
+    println!("⏳ Waiting for CDC processing (5 seconds)...");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Test 3: Read operations on the new account
+    println!("\n🔍 Test 3: Read Operations on New Account");
+    println!("==========================================");
+
+    println!("🔍 Testing read operations for account: {}", new_account_id);
+
+    // Test get_account with consistency waiting
+    println!("  📖 Testing get_account (5s timeout)...");
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        cqrs_service.get_account(new_account_id),
+    )
+    .await
+    {
+        Ok(Ok(Some(account_details))) => {
+            println!(
+                "    ✅ Success - Owner: {}, Balance: {}, Active: {}",
+                account_details.owner_name, account_details.balance, account_details.is_active
+            );
+        }
+        Ok(Ok(None)) => {
+            println!("    ⚠️  Account not found in CQRS service");
+        }
+        Ok(Err(e)) => {
+            println!("    ❌ Error: {:?}", e);
+        }
+        Err(_) => {
+            println!("    ❌ Timeout (5s) - consistency manager still waiting");
+        }
+    }
+
+    // Test get_account_balance with consistency waiting
+    println!("  💰 Testing get_account_balance (5s timeout)...");
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        cqrs_service.get_account_balance(new_account_id),
+    )
+    .await
+    {
+        Ok(Ok(balance)) => {
+            println!("    ✅ Success - Balance: {}", balance);
+        }
+        Ok(Err(e)) => {
+            println!("    ❌ Error: {:?}", e);
+        }
+        Err(_) => {
+            println!("    ❌ Timeout (5s) - consistency manager still waiting");
+        }
+    }
+
+    // Test is_account_active with consistency waiting
+    println!("  ✅ Testing is_account_active (5s timeout)...");
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        cqrs_service.is_account_active(new_account_id),
+    )
+    .await
+    {
+        Ok(Ok(is_active)) => {
+            println!("    ✅ Success - Active: {}", is_active);
+        }
+        Ok(Err(e)) => {
+            println!("    ❌ Error: {:?}", e);
+        }
+        Err(_) => {
+            println!("    ❌ Timeout (5s) - consistency manager still waiting");
+        }
+    }
+
+    // Test 4: Read operations on existing accounts
+    println!("\n🔍 Test 4: Read Operations on Existing Accounts");
+    println!("===============================================");
+
+    for (i, account) in direct_accounts.iter().enumerate() {
+        println!(
+            "\n--- Testing Existing Account {}: {} ---",
+            i + 1,
+            account.id
+        );
+
+        // Test get_account with consistency waiting
+        println!("  📖 Testing get_account (3s timeout)...");
+        match tokio::time::timeout(Duration::from_secs(3), cqrs_service.get_account(account.id))
+            .await
+        {
+            Ok(Ok(Some(account_details))) => {
+                println!(
+                    "    ✅ Success - Owner: {}, Balance: {}, Active: {}",
+                    account_details.owner_name, account_details.balance, account_details.is_active
+                );
+            }
+            Ok(Ok(None)) => {
+                println!("    ⚠️  Account not found in CQRS service");
+            }
+            Ok(Err(e)) => {
+                println!("    ❌ Error: {:?}", e);
+            }
+            Err(_) => {
+                println!("    ❌ Timeout (3s) - consistency manager still waiting");
+            }
+        }
+    }
+
+    println!("\n✅ CDC Read Operations Test completed!");
+    println!("\n📋 Summary:");
+    println!("  - CDC Service Manager started: ✅");
+    println!("  - Consistency Manager connected: ✅");
+    println!("  - Data exists in projections table: ✅");
+    println!("  - Read operations: May timeout if CDC pipeline not processing events");
+
+    Ok(())
+}

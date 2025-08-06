@@ -103,7 +103,7 @@ impl Default for DebeziumConfig {
             table_include_list: "public.kafka_outbox_cdc".to_string(), // Match actual Debezium config
             topic_prefix: "banking-es".to_string(), // Match actual Debezium config
             snapshot_mode: "initial".to_string(),
-            poll_interval_ms: 5, // CRITICAL FIX: Reduced from 100ms to 5ms for better performance
+            poll_interval_ms: 100, // Much faster than 5-second polling
         }
     }
 }
@@ -220,11 +220,15 @@ impl CDCOutboxRepository {
                 "transforms.outbox.table.field.event.timestamp": "deleted_at",
                 "transforms.outbox.route.tombstone.on.empty.payload": "true",
                 "tombstones.on.delete": "true",
-                "max.queue.size": "16384", // Increased from 8192
-                "max.batch.size": "4096",  // Increased from 2048
-                "poll.interval.ms": "5",   // CRITICAL: Reduced to 5ms for ultra-low latency
-                "heartbeat.interval.ms": "500", // Reduced from 1000ms
-                "database.history.kafka.recovery.poll.interval.ms": "50", // Reduced from 100ms
+                "max.queue.size": "8192",
+                "max.batch.size": "2048",
+                "snapshot.delay.ms": "0",
+                "snapshot.fetch.size": "1024",
+                "heartbeat.interval.ms": "1000",
+                "include.schema.changes": "false",
+                "provide.transaction.metadata": "false",
+                "database.history.kafka.recovery.attempts": "3",
+                "database.history.kafka.recovery.poll.interval.ms": "100",
                 "database.history.store.only.captured.tables.ddl": "true",
                 "database.history.skip.unparseable.ddl": "true"
             }
@@ -321,67 +325,6 @@ impl OutboxBatcher {
             .map_err(|e| anyhow::anyhow!("Failed to send message (non-blocking): {}", e))
     }
 
-    /// Bulk submit method for multiple messages - much more efficient than individual submits
-    pub async fn submit_bulk(
-        &self,
-        messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
-    ) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let messages_len = messages.len();
-        println!(
-            "[DEBUG] OutboxBatcher::submit_bulk: Submitting {} messages in bulk",
-            messages_len
-        );
-
-        // Send all messages in sequence to the channel
-        for msg in messages {
-            if let Err(e) = self.sender.send(msg).await {
-                return Err(anyhow::anyhow!("Failed to send message in bulk: {}", e));
-            }
-        }
-
-        println!(
-            "[DEBUG] OutboxBatcher::submit_bulk: Successfully submitted {} messages in bulk",
-            messages_len
-        );
-        Ok(())
-    }
-
-    /// Non-blocking bulk submit method for high-performance scenarios
-    pub fn try_submit_bulk(
-        &self,
-        messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
-    ) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let messages_len = messages.len();
-        println!(
-            "[DEBUG] OutboxBatcher::try_submit_bulk: Attempting non-blocking bulk submit of {} messages",
-            messages_len
-        );
-
-        // Send all messages in sequence to the channel
-        for msg in messages {
-            if let Err(e) = self.sender.try_send(msg) {
-                return Err(anyhow::anyhow!(
-                    "Failed to send message in bulk (non-blocking): {}",
-                    e
-                ));
-            }
-        }
-
-        println!(
-            "[DEBUG] OutboxBatcher::try_submit_bulk: Successfully submitted {} messages in bulk",
-            messages_len
-        );
-        Ok(())
-    }
-
     async fn flush(
         repo: &Arc<dyn crate::infrastructure::outbox::OutboxRepositoryTrait + Send + Sync>,
         pools: &Arc<PartitionedPools>,
@@ -456,37 +399,61 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         let message_count = messages.len();
 
         tracing::info!(
-            "CDCOutboxRepository: Starting optimized bulk insert of {} messages",
+            "CDCOutboxRepository: Starting bulk insert of {} messages",
             message_count
         );
 
-        // OPTIMIZED: Use VALUES clause for better performance than UNNEST
-        let mut query_builder = sqlx::QueryBuilder::new(
-            "INSERT INTO kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) "
-        );
+        // FIXED: Use proper bulk insert with UNNEST for better performance
+        let mut aggregate_ids = Vec::with_capacity(message_count);
+        let mut event_ids = Vec::with_capacity(message_count);
+        let mut event_types = Vec::with_capacity(message_count);
+        let mut payloads = Vec::with_capacity(message_count);
+        let mut topics = Vec::with_capacity(message_count);
+        let mut metadatas = Vec::with_capacity(message_count);
 
-        query_builder.push_values(messages.iter(), |mut b, msg| {
-            b.push_bind(msg.aggregate_id)
-                .push_bind(msg.event_id)
-                .push_bind(&msg.event_type)
-                .push_bind(&msg.payload)
-                .push_bind(&msg.topic)
-                .push_bind(msg.metadata.as_ref().unwrap_or(&serde_json::Value::Null))
-                .push_bind(chrono::Utc::now())
-                .push_bind(chrono::Utc::now());
-        });
+        // Prepare data for bulk insert
+        for msg in &messages {
+            aggregate_ids.push(msg.aggregate_id);
+            event_ids.push(msg.event_id);
+            event_types.push(msg.event_type.clone());
+            payloads.push(msg.payload.clone());
+            topics.push(msg.topic.clone());
+            // Handle None values for JSONB column
+            metadatas.push(msg.metadata.clone().unwrap_or(serde_json::Value::Null));
+        }
 
-        let result = query_builder.build().execute(&mut **tx).await;
+        // Execute bulk insert using UNNEST
+        let result = sqlx::query!(
+            r#"
+            INSERT INTO kafka_outbox_cdc
+                (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at)
+            SELECT
+                unnest($1::uuid[]) as aggregate_id,
+                unnest($2::uuid[]) as event_id,
+                unnest($3::text[]) as event_type,
+                unnest($4::bytea[]) as payload,
+                unnest($5::text[]) as topic,
+                unnest($6::jsonb[]) as metadata,
+                NOW() as created_at,
+                NOW() as updated_at
+            "#,
+            &aggregate_ids,
+            &event_ids,
+            &event_types,
+            &payloads,
+            &topics,
+            &metadatas
+        )
+        .execute(&mut **tx)
+        .await;
 
         match result {
             Ok(_) => {
                 let duration = start_time.elapsed();
-                let throughput = message_count as f64 / duration.as_secs_f64();
                 tracing::info!(
-                    "CDCOutboxRepository: Successfully bulk inserted {} messages in {:?} ({:.0} msg/sec)",
+                    "CDCOutboxRepository: Successfully bulk inserted {} messages in {:?}",
                     message_count,
-                    duration,
-                    throughput
+                    duration
                 );
                 Ok(())
             }
@@ -931,85 +898,37 @@ impl CDCConsumer {
         let poll_interval_ms = std::env::var("CDC_POLL_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(5); // CRITICAL FIX: Reduced from 100ms to 5ms for better latency
-
-        // CRITICAL OPTIMIZATION: Batch processing configuration
-        let batch_size = std::env::var("CDC_BATCH_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(2000); // Increased to 500 for better throughput with large incoming batches
-
-        let batch_timeout_ms = std::env::var("CDC_BATCH_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(50); // 5x poll interval (5ms * 10 = 50ms)
+            .unwrap_or(100); // Default to 100ms if not set
 
         tracing::info!(
-            "CDCConsumer: Using polling interval: {}ms, batch_size: {}, batch_timeout: {}ms",
-            poll_interval_ms,
-            batch_size,
-            batch_timeout_ms
+            "CDCConsumer: Using polling interval: {}ms (from CDC_POLL_INTERVAL_MS env var)",
+            poll_interval_ms
         );
-
-        // OPTIMIZATION: Add adaptive polling based on load
-        let mut adaptive_poll_interval = poll_interval_ms;
-        let mut consecutive_empty_polls = 0;
-        let min_poll_interval = 1; // 1ms minimum
-        let max_poll_interval = 50; // 50ms maximum
-        let adaptive_threshold = 10; // After 10 empty polls, increase interval
-
-        // CRITICAL OPTIMIZATION: Batch processing buffer
-        let mut message_batch = Vec::with_capacity(batch_size);
-        let mut last_batch_time = std::time::Instant::now();
 
         loop {
             tokio::select! {
                 _ = shutdown_token.cancelled() => {
                     info!("CDC consumer received shutdown signal");
                     tracing::info!("CDCConsumer: Received shutdown signal, breaking loop");
-
-                    // Process remaining messages in batch before shutdown
-                    if !message_batch.is_empty() {
-                        tracing::info!("CDCConsumer: Processing final batch of {} messages before shutdown", message_batch.len());
-                        if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
-                            tracing::error!("CDCConsumer: Failed to process final batch: {:?}", e);
-                        }
-                    }
                     break;
                 }
                 message_result = tokio::time::timeout(
-                    Duration::from_millis(adaptive_poll_interval),
+                    Duration::from_millis(poll_interval_ms),
                     message_stream.next()
                 ) => {
                     match message_result {
                         Ok(Some(Ok(message))) => {
-                            tracing::debug!("Message received: {:?}", message);
-                            // Reset adaptive polling when message is received
-                            consecutive_empty_polls = 0;
-                            adaptive_poll_interval = std::cmp::max(min_poll_interval, adaptive_poll_interval / 2);
-
-                            // Add message to batch - convert BorrowedMessage to KafkaMessage
-                            let kafka_message = crate::infrastructure::kafka_abstraction::KafkaMessage {
-                                topic: message.topic().to_string(),
-                                partition: message.partition(),
-                                offset: message.offset(),
-                                key: message.key().map(|k| k.to_vec()),
-                                payload: message.payload().unwrap().to_vec(),
-                                timestamp: message.timestamp().to_millis(),
-                            };
-                            message_batch.push(kafka_message);
-
-                            // Check if we should process the batch
-                            let should_process_batch = message_batch.len() >= batch_size ||
-                                                     last_batch_time.elapsed() > Duration::from_millis(batch_timeout_ms);
-
-                            if should_process_batch {
-                                tracing::info!("CDCConsumer: Processing batch of {} messages", message_batch.len());
-                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
-                                    tracing::error!("CDCConsumer: Failed to process message batch: {:?}", e);
+                            tracing::info!("Message received: {:?}", message);
+                            // Deserialize the message payload as CDC event
+                            match serde_json::from_slice::<serde_json::Value>(message.payload().unwrap()) {
+                                Ok(cdc_event) => {
+                                    if let Err(e) = processor.process_cdc_event_ultra_fast(cdc_event).await {
+                                        tracing::error!("CDCConsumer: Failed to process CDC event: {:?}", e);
+                                    }
                                 }
-                                message_batch.clear();
-                                last_batch_time = std::time::Instant::now();
+                                Err(e) => {
+                                    tracing::error!("CDCConsumer: Failed to deserialize CDC event: {:?}", e);
+                                }
                             }
                         }
                         Ok(Some(Err(e))) => {
@@ -1018,40 +937,13 @@ impl CDCConsumer {
                         Ok(None) => {
                             // Stream ended
                             tracing::info!("CDCConsumer: Message stream ended");
-
-                            // Process remaining messages in batch
-                            if !message_batch.is_empty() {
-                                tracing::info!("CDCConsumer: Processing final batch of {} messages", message_batch.len());
-                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
-                                    tracing::error!("CDCConsumer: Failed to process final batch: {:?}", e);
-                                }
-                            }
                             break;
                         }
                         Err(_) => {
                             // Timeout - this is expected and normal
                             poll_count += 1;
-                            consecutive_empty_polls += 1;
-
-                            // OPTIMIZATION: Adaptive polling based on empty polls
-                            if consecutive_empty_polls >= adaptive_threshold {
-                                adaptive_poll_interval = std::cmp::min(max_poll_interval, adaptive_poll_interval * 2);
-                                consecutive_empty_polls = 0; // Reset counter
-                                tracing::debug!("CDCConsumer: Adaptive polling - increased interval to {}ms", adaptive_poll_interval);
-                            }
-
-                            // Process any remaining messages in batch on timeout
-                            if !message_batch.is_empty() {
-                                tracing::debug!("CDCConsumer: Processing timeout batch of {} messages", message_batch.len());
-                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
-                                    tracing::error!("CDCConsumer: Failed to process timeout batch: {:?}", e);
-                                }
-                                message_batch.clear();
-                                last_batch_time = std::time::Instant::now();
-                            }
-
                             if poll_count % 1000 == 0 {
-                                tracing::debug!("CDCConsumer: Poll timeout (count: {}, interval: {}ms)", poll_count, adaptive_poll_interval);
+                                tracing::debug!("CDCConsumer: Poll timeout (count: {})", poll_count);
                             }
                         }
                     }
@@ -1082,76 +974,6 @@ impl CDCConsumer {
 
         // Process the CDC event
         processor.lock().await.process_cdc_event(cdc_event).await?;
-
-        Ok(())
-    }
-
-    /// CRITICAL OPTIMIZATION: Process multiple CDC messages in batch
-    async fn process_message_batch(
-        messages: &[crate::infrastructure::kafka_abstraction::KafkaMessage],
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-    ) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let start_time = std::time::Instant::now();
-        let batch_size = messages.len();
-        tracing::info!(
-            "CDCConsumer: Starting batch processing of {} messages",
-            batch_size
-        );
-
-        // CRITICAL OPTIMIZATION: Parallel processing of messages
-        let mut cdc_events = Vec::with_capacity(batch_size);
-
-        // First pass: Deserialize all messages
-        for message in messages {
-            match serde_json::from_slice::<serde_json::Value>(&message.payload) {
-                Ok(cdc_event) => {
-                    cdc_events.push(cdc_event);
-                }
-                Err(e) => {
-                    tracing::error!("CDCConsumer: Failed to deserialize CDC event: {:?}", e);
-                    // Continue processing other messages in batch
-                }
-            }
-        }
-
-        // CRITICAL OPTIMIZATION: Use batch processing instead of individual processing
-        let mut success_count = 0;
-        let mut error_count = 0;
-
-        if !cdc_events.is_empty() {
-            match processor.process_cdc_events_batch(cdc_events).await {
-                Ok(_) => {
-                    success_count = batch_size;
-                    error_count = 0;
-                }
-                Err(e) => {
-                    success_count = 0;
-                    error_count = batch_size;
-                    tracing::error!("CDCConsumer: Batch processing failed: {:?}", e);
-                }
-            }
-        }
-
-        let duration = start_time.elapsed();
-        tracing::info!(
-            "CDCConsumer: Batch processing completed - {} messages in {:?} ({} success, {} errors)",
-            batch_size,
-            duration,
-            success_count,
-            error_count
-        );
-
-        if error_count > 0 {
-            return Err(anyhow::anyhow!(
-                "Batch processing had {} errors out of {} messages",
-                error_count,
-                batch_size
-            ));
-        }
 
         Ok(())
     }

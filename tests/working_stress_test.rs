@@ -11,7 +11,7 @@ use banking_es::{
         init,
         projections::{ProjectionConfig, ProjectionStore, ProjectionStoreTrait},
         redis_abstraction::RealRedisClient,
-        PoolSelector, ReadOperation, ReadOperationResult, WriteOperation,
+        PoolSelector, WriteOperation,
     },
 };
 use rust_decimal::Decimal;
@@ -47,7 +47,7 @@ async fn setup_stress_test_environment(
 ) -> Result<StressTestContext, Box<dyn std::error::Error + Send + Sync>> {
     // Use the same initialization pattern as main.rs
     println!("🔧 Initializing services using main.rs pattern...");
-    // Load environment variables from .env file
+    // Load environment variables
     dotenv::dotenv().ok();
 
     let pool_config = PoolPartitioningConfig {
@@ -55,67 +55,52 @@ async fn setup_stress_test_environment(
             "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
         }),
         write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "100".to_string()) // 20'den 100'e artırıldı
-            .parse()
-            .unwrap_or(100),
-        write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "20".to_string()) // 5'ten 20'ye artırıldı
+            .unwrap_or_else(|_| "20".to_string()) // Conservative for tests
             .parse()
             .unwrap_or(20),
-        read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-            .unwrap_or_else(|_| "200".to_string()) // 40'tan 200'e artırıldı
+        write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
+            .unwrap_or_else(|_| "5".to_string()) // Conservative for tests
             .parse()
-            .unwrap_or(200),
-        read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-            .unwrap_or_else(|_| "40".to_string()) // 10'dan 40'a artırıldı
+            .unwrap_or(5),
+        read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
+            .unwrap_or_else(|_| "40".to_string()) // Conservative for tests
             .parse()
             .unwrap_or(40),
+        read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
+            .unwrap_or_else(|_| "10".to_string()) // Conservative for tests
+            .parse()
+            .unwrap_or(10),
         acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
-            .unwrap_or_else(|_| "60".to_string()) // 30'dan 60'a artırıldı
+            .unwrap_or_else(|_| "30".to_string()) // Reasonable timeout for tests
             .parse()
-            .unwrap_or(60),
+            .unwrap_or(30),
         write_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-            .unwrap_or_else(|_| "600".to_string()) // 300'den 600'e artırıldı
+            .unwrap_or_else(|_| "300".to_string()) // 5 minutes for tests
             .parse()
-            .unwrap_or(600),
+            .unwrap_or(300),
         read_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-            .unwrap_or_else(|_| "600".to_string()) // 300'den 600'e artırıldı
+            .unwrap_or_else(|_| "300".to_string()) // 5 minutes for tests
+            .parse()
+            .unwrap_or(300),
+        write_max_lifetime_secs: std::env::var("DB_WRITE_MAX_LIFETIME")
+            .unwrap_or_else(|_| "600".to_string()) // 10 minutes for tests
             .parse()
             .unwrap_or(600),
-        write_max_lifetime_secs: std::env::var("DB_WRITE_MAX_LIFETIME")
-            .unwrap_or_else(|_| "1200".to_string()) // 600'den 1200'e artırıldı
-            .parse()
-            .unwrap_or(1200),
         read_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
-            .unwrap_or_else(|_| "1200".to_string()) // 600'den 1200'e artırıldı
+            .unwrap_or_else(|_| "600".to_string()) // 10 minutes for tests
             .parse()
-            .unwrap_or(1200)
+            .unwrap_or(600)
             * 2, // Longer lifetime for reads
     };
 
     let pools = Arc::new(PartitionedPools::new(pool_config).await?);
     let write_pool = pools.select_pool(OperationType::Write).clone();
 
-    // Create consistency manager first with environment variable support
-    let consistency_timeout_secs = std::env::var("CONSISTENCY_TIMEOUT_SECS")
-        .unwrap_or_else(|_| "5".to_string()) // Default to 5 seconds for faster tests
-        .parse()
-        .unwrap_or(5);
-
-    let cleanup_interval_secs = std::env::var("CONSISTENCY_CLEANUP_INTERVAL_SECS")
-        .unwrap_or_else(|_| "30".to_string())
-        .parse()
-        .unwrap_or(30);
-
-    println!(
-        "🔧 Consistency Manager Config: timeout={}s, cleanup_interval={}s",
-        consistency_timeout_secs, cleanup_interval_secs
-    );
-
+    // Create consistency manager first
     let consistency_manager = Arc::new(
         banking_es::infrastructure::consistency_manager::ConsistencyManager::new(
-            Duration::from_secs(consistency_timeout_secs), // Use environment variable
-            Duration::from_secs(cleanup_interval_secs),    // Use environment variable
+            Duration::from_secs(10), // max_wait_time - reduced from 60s to 10s for faster failure detection
+            Duration::from_secs(30), // cleanup_interval - reduced from 60s to 30s
         ),
     );
 
@@ -141,7 +126,6 @@ async fn setup_stress_test_environment(
             1000, // batch_size (increased from 500 to 1000 for better throughput)
             Duration::from_millis(50), // batch_timeout (reduced from 100ms to 50ms for ultra-fast processing)
             true,                      // enable_write_batching
-            true,                      // enable_read_batching
             Some(consistency_manager.clone()), // Pass the consistency manager
         )
         .await,
@@ -250,7 +234,6 @@ async fn cleanup_test_resources(
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_batch_processing_stress() {
     println!("🚀 Starting Batch Processing Stress Test with Full CDC Pipeline");
 
@@ -371,7 +354,6 @@ async fn test_batch_processing_stress() {
         println!("  - Successful: {}", result.successful_operations);
         println!("  - Failed: {}", result.failed_operations);
         println!("  - Success Rate: {:.2}%", result.success_rate * 100.0);
-        println!("  - Redis Lock Contention Rate: 0.00%"); // Updated: All locks successful after retry
         println!("  - Duration: {:?}", result.total_duration);
         println!("  - Ops/sec: {:.2}", result.operations_per_second);
         println!("  - Avg Latency: {:?}", result.avg_latency);
@@ -655,7 +637,7 @@ async fn create_test_accounts(cqrs_service: &Arc<CQRSAccountService>, count: usi
     );
 
     // First, submit all operations to the write batching service without waiting
-    let mut operation_ids: Vec<Uuid> = Vec::new();
+    let mut operation_ids = Vec::with_capacity(count);
 
     let test_run_id = uuid::Uuid::new_v4().to_string()[..8].to_string(); // Use unique run ID
     for i in 0..count {
@@ -734,7 +716,6 @@ async fn verify_data_integrity(cqrs_service: &Arc<CQRSAccountService>) {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_batch_processing_endurance() {
     println!("🚀 Starting Batch Processing Endurance Test");
 
@@ -769,7 +750,6 @@ async fn test_batch_processing_endurance() {
             25,
             Duration::from_secs(2),
             false, // DISABLE write batching for endurance test
-            true,  // enable_read_batching
             None,  // No consistency manager for this test
         )
         .await,
@@ -835,7 +815,6 @@ async fn test_batch_processing_endurance() {
     println!("  - Successful: {}", successful_operations);
     println!("  - Failed: {}", failed_operations);
     println!("  - Success Rate: {:.2}%", success_rate * 100.0);
-    println!("  - Redis Lock Contention Rate: 0.00%"); // Updated: All locks successful after retry
     println!("  - Ops/sec: {:.2}", operations_per_second);
 
     // Verify final state
@@ -970,7 +949,6 @@ async fn test_read_operations_after_writes() {
                 "  - Success Rate: {:.2}%",
                 ((account_ids.len() * 10) as f64 / total_events as f64) * 100.0
             );
-            println!("  - Redis Lock Contention Rate: 0.00%");
             println!(
                 "  - Write Ops/sec: {:.2}",
                 operations_count as f64 / write_duration.as_secs_f64()
@@ -986,7 +964,6 @@ async fn test_read_operations_after_writes() {
             println!("  - Total Operations: {}", operations_count);
             println!("  - Total Events: {}", total_events);
             println!("  - Success Rate: 0.00%");
-            println!("  - Redis Lock Contention Rate: 0.00%");
             println!("  - Write Ops/sec: 0.00");
             println!("  - Write Events/sec: 0.00");
         }
@@ -1255,7 +1232,6 @@ async fn test_read_operations_after_writes() {
         "  - Success Rate: {:.2}%",
         (write_success as f64 / total_events as f64) * 100.0
     );
-    println!("  - Redis Lock Contention Rate: 0.00%");
     println!("  - Duration: {:?}", write_duration);
     println!(
         "  - Write Ops/sec: {:.2}",
@@ -1274,7 +1250,6 @@ async fn test_read_operations_after_writes() {
         "  - Success Rate: {:.2}%",
         (read_success as f64 / account_ids.len() as f64) * 100.0
     );
-    println!("  - Redis Lock Contention Rate: 0.00%");
     println!("  - Duration: {:?}", read_duration);
     println!(
         "  - Read Ops/sec: {:.2}",
@@ -1392,14 +1367,12 @@ async fn test_write_batching_multi_row_inserts() {
     };
 
     println!("🔍 Test environment setup successful, proceeding to Phase 1");
-    let mut total_transactions = 0;
-    let mut total_balance = Decimal::from(0);
 
     // Phase 1: Create new test accounts with batching demonstration
     println!("\n📝 PHASE 1: Create New Test Accounts with Multi-Aggregate Batching");
     println!("===================================================================");
 
-    let account_count = 1000; // Use a smaller number for testing
+    let account_count = 50; // Use a smaller number for testing
     println!(
         "🔧 Creating {} new test accounts with batching...",
         account_count
@@ -1407,9 +1380,11 @@ async fn test_write_batching_multi_row_inserts() {
 
     // Start timer for account creation
     println!("⏱️  Starting account creation timer...");
+    let account_creation_start = Instant::now();
 
     // Submit all operations simultaneously to ensure they get batched together
-    let mut operation_ids: Vec<Uuid> = Vec::new();
+    let mut operation_ids = Vec::new();
+    let mut tasks = Vec::new();
 
     println!(
         "🚀 Submitting all {} operations simultaneously...",
@@ -1431,43 +1406,39 @@ async fn test_write_batching_multi_row_inserts() {
 
     println!("🔍 About to submit {} operations...", account_count);
 
-    // Create operations for aggregate-based batching
-    let mut operations = Vec::new();
+    // Submit all operations in parallel
     for i in 0..account_count {
         let owner_name = format!("StressTestUser_{}", i);
         let initial_balance = Decimal::new(1000, 0);
-        let aggregate_id = Uuid::new_v4();
-
-        operations.push(WriteOperation::CreateAccount {
-            account_id: aggregate_id,
-            owner_name,
-            initial_balance,
-        });
-
-        println!("🔍 Prepared operation {} for aggregate {}", i, aggregate_id);
+        let batching_service = batching_service.clone();
+        tasks.push(tokio::spawn(async move {
+            let aggregate_id = Uuid::new_v4();
+            println!(
+                "🔍 Submitting operation {} for aggregate {}",
+                i, aggregate_id
+            );
+            let result = batching_service
+                .submit_operation(
+                    aggregate_id,
+                    WriteOperation::CreateAccount {
+                        account_id: aggregate_id,
+                        owner_name,
+                        initial_balance,
+                    },
+                )
+                .await;
+            println!("🔍 Operation {} result: {:?}", i, result);
+            result
+        }));
     }
 
-    let account_creation_start = Instant::now();
-
-    // Use hash-based super batch processing
-    println!("🚀 Using hash-based super batch processing...");
-    let operation_ids = match batching_service
-        .clone()
-        .submit_operations_hash_super_batch(operations, 8) // 8 super batches with locking
-        .await
-    {
-        Ok(ids) => {
-            println!(
-                "✅ Aggregate-based batching completed with {} operation IDs",
-                ids.len()
-            );
-            ids
+    // Wait for all submissions to complete and collect operation IDs
+    let results = futures::future::join_all(tasks).await;
+    for result in results {
+        if let Ok(Ok(operation_id)) = result {
+            operation_ids.push(operation_id);
         }
-        Err(e) => {
-            println!("❌ Aggregate-based batching failed: {}", e);
-            return;
-        }
-    };
+    }
 
     println!(
         "✅ Submitted {} operations for batching",
@@ -1479,17 +1450,13 @@ async fn test_write_batching_multi_row_inserts() {
     let mut account_ids = Vec::new();
     let mut wait_tasks = Vec::new();
     for operation_id in &operation_ids {
-        let batching_service = Arc::clone(&batching_service);
+        let batching_service = batching_service.clone();
         let operation_id = *operation_id;
         wait_tasks.push(tokio::spawn(async move {
             batching_service.wait_for_result(operation_id).await
         }));
     }
     let wait_results = futures::future::join_all(wait_tasks).await;
-    // End timer for account creation
-    let account_creation_end = Instant::now();
-    let account_creation_duration = account_creation_end.duration_since(account_creation_start);
-
     for (i, result) in wait_results.into_iter().enumerate() {
         match result {
             Ok(Ok(result)) => {
@@ -1517,6 +1484,10 @@ async fn test_write_batching_multi_row_inserts() {
         }
     }
 
+    // End timer for account creation
+    let account_creation_end = Instant::now();
+    let account_creation_duration = account_creation_end.duration_since(account_creation_start);
+
     println!("⏱️  Account creation completed!");
     println!("📊 Account Creation Results:");
     println!("   • Total accounts created: {}", account_ids.len());
@@ -1543,151 +1514,74 @@ async fn test_write_batching_multi_row_inserts() {
     println!("\n📝 PHASE 2: Submit Multiple Operations Per Account");
     println!("==================================================");
 
-    // Submit multiple operations per account using aggregate-based batching
-    println!("🔧 Submitting multiple operations per account using aggregate-based batching...");
-
-    // Get the batching service for write operations
-    let batching_service = match context.cqrs_service.get_write_batching_service() {
-        Some(service) => service.clone(),
-        None => {
-            println!("❌ Write batching service not available for write operations");
-            return;
-        }
-    };
-
-    // Create all write operations for aggregate-based batching
-    let mut write_operations = Vec::new();
+    // Submit multiple operations per account to test batching
+    println!("🔧 Submitting multiple operations per account to test write batching...");
+    let mut handles = Vec::new();
 
     for &account_id in &account_ids {
-        // Create 5 deposit operations for each account
+        // Submit 5 deposit operations for each account
         for i in 0..5 {
+            let cqrs_service = context.cqrs_service.clone();
             let amount = Decimal::new(10 + i as i64, 0);
-            write_operations.push(WriteOperation::DepositMoney { account_id, amount });
-        }
-
-        // Create 5 withdraw operations for each account
-        for i in 0..5 {
-            let amount = Decimal::new(5 + i as i64, 0);
-            write_operations.push(WriteOperation::WithdrawMoney { account_id, amount });
-        }
-    }
-
-    println!(
-        "📦 Created {} write operations for aggregate-based batching",
-        write_operations.len()
-    );
-
-    // Use hash-based super batch processing for write operations
-    let write_start = Instant::now();
-    let write_operation_ids = match batching_service
-        .clone()
-        .submit_operations_hash_super_batch(write_operations, 8) // 8 super batches with locking
-        .await
-    {
-        Ok(ids) => {
-            println!(
-                "✅ Aggregate-based write batching completed with {} operation IDs",
-                ids.len()
-            );
-            ids
-        }
-        Err(e) => {
-            println!("❌ Aggregate-based write batching failed: {}", e);
-            return;
-        }
-    };
-    let write_duration = write_start.elapsed();
-
-    println!("⏱️  Write operations completed in {:?}", write_duration);
-    println!("📊 Write Operations Results:");
-    println!("   • Total write operations: {}", write_operation_ids.len());
-    println!("   • Total time: {:.2?}", write_duration);
-    println!(
-        "   • Average time per operation: {:.2?}",
-        write_duration / write_operation_ids.len() as u32
-    );
-    println!(
-        "   • Operations per second: {:.2}",
-        write_operation_ids.len() as f64 / write_duration.as_secs_f64()
-    );
-
-    // Wait for all write operations to complete
-    println!("⏳ Waiting for all write operations to complete...");
-
-    // Create wait tasks for all write operations
-    let mut write_wait_tasks = Vec::new();
-    for operation_id in &write_operation_ids {
-        let batching_service = Arc::clone(&batching_service);
-        let operation_id = *operation_id;
-        let wait_task = tokio::spawn(async move {
-            let start = Instant::now();
-            let result = batching_service.wait_for_result(operation_id).await;
-            (result.is_ok(), start.elapsed())
-        });
-        write_wait_tasks.push(wait_task);
-    }
-
-    // Wait for all write operations in parallel
-    let write_wait_results = futures::future::join_all(write_wait_tasks).await;
-
-    // Process write wait results
-    let mut write_success_count = 0;
-    let mut write_failed_count = 0;
-    let mut write_latencies = Vec::new();
-
-    for result in write_wait_results {
-        match result {
-            Ok((success, latency)) => {
-                if success {
-                    write_success_count += 1;
-                    total_transactions += 1;
-                } else {
-                    write_failed_count += 1;
+            let handle = tokio::spawn(async move {
+                match cqrs_service.deposit_money(account_id, amount).await {
+                    Ok(result) => {
+                        println!(
+                            "✅ Deposit successful for account {}: amount {}",
+                            account_id, amount
+                        );
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        println!(
+                            "❌ Deposit failed for account {}: amount {} - {}",
+                            account_id, amount, e
+                        );
+                        Err(e)
+                    }
                 }
-                write_latencies.push(latency);
-            }
-            Err(_) => {
-                write_failed_count += 1;
-            }
+            });
+            handles.push(handle);
+        }
+
+        // Submit 5 withdraw operations for each account
+        for i in 0..5 {
+            let cqrs_service = context.cqrs_service.clone();
+            let amount = Decimal::new(5 + i as i64, 0);
+            let handle = tokio::spawn(async move {
+                match cqrs_service.withdraw_money(account_id, amount).await {
+                    Ok(result) => {
+                        println!(
+                            "✅ Withdraw successful for account {}: amount {}",
+                            account_id, amount
+                        );
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        println!(
+                            "❌ Withdraw failed for account {}: amount {} - {}",
+                            account_id, amount, e
+                        );
+                        Err(e)
+                    }
+                }
+            });
+            handles.push(handle);
         }
     }
 
-    let write_wait_duration = write_start.elapsed();
-    println!(
-        "✅ Write operations wait completed in {:?}",
-        write_wait_duration
-    );
-    println!("📊 Write Wait Results:");
-    println!("   • Successful write operations: {}", write_success_count);
-    println!("   • Failed write operations: {}", write_failed_count);
-    println!("   • Total write operations: {}", write_operation_ids.len());
+    println!("⏳ Waiting for all operations to complete...");
+    let start_time = Instant::now();
+    futures::future::join_all(handles).await;
+    let duration = start_time.elapsed();
 
-    if !write_latencies.is_empty() {
-        write_latencies.sort();
-        let avg_write_latency =
-            write_latencies.iter().sum::<Duration>() / write_latencies.len() as u32;
-        let p95_write_latency = write_latencies[write_latencies.len() * 95 / 100];
-        let p99_write_latency = write_latencies[write_latencies.len() * 99 / 100];
-        let min_write_latency = write_latencies[0];
-        let max_write_latency = write_latencies[write_latencies.len() - 1];
-
-        println!("   • Average write latency: {:?}", avg_write_latency);
-        println!("   • P95 write latency: {:?}", p95_write_latency);
-        println!("   • P99 write latency: {:?}", p99_write_latency);
-        println!("   • Min write latency: {:?}", min_write_latency);
-        println!("   • Max write latency: {:?}", max_write_latency);
-    }
-
-    println!("✅ All operations completed");
+    println!("✅ All operations completed in {:?}", duration);
     println!(
         "📊 Processed {} operations for {} accounts",
         account_ids.len() * 10,
         account_ids.len()
     );
-    // Wait for CDC/projection sync after account creation
-    println!("⏳ Waiting for CDC/projection sync after write operations...");
-    tokio::time::sleep(Duration::from_secs(15)).await;
-    println!("✅ Proceeding to read operations.");
+
     // Phase 3: Wait for CDC processing to complete
     println!("\n📝 PHASE 3: Wait for CDC Processing");
     println!("===================================");
@@ -1738,256 +1632,91 @@ async fn test_write_batching_multi_row_inserts() {
     let cdc_duration = cdc_start.elapsed();
     println!("✅ CDC wait completed in {:?}", cdc_duration);
 
-    // Phase 4: Verify data integrity with optimized batch read operations
-    println!("\n📝 PHASE 4: Data Integrity Verification with Optimized Batch Reads");
-    println!("===================================================================");
+    // Phase 4: Verify data integrity
+    println!("\n📝 PHASE 4: Data Integrity Verification");
+    println!("======================================");
 
-    println!("🔍 Verifying account balances and transaction history using batch reads...");
-    // Get read batching service for optimized batch reads
-    let read_batching_service = match context.cqrs_service.get_read_batching_service() {
-        Some(service) => {
-            println!("✅ Read batching service available for optimized reads");
-            service.clone()
-        }
-        None => {
-            println!("❌ Read batching service not available, using individual reads");
-            // Fallback to individual reads
-            return verify_data_integrity_individual_reads(&context, &account_ids).await;
-        }
-    };
+    println!("🔍 Verifying account balances and transaction history...");
+    let mut verification_handles = Vec::new();
 
-    let read_start = Instant::now();
+    for &account_id in &account_ids {
+        let cqrs_service = context.cqrs_service.clone();
+        let handle = tokio::spawn(async move {
+            match cqrs_service.get_account(account_id).await {
+                Ok(Some(account)) => {
+                    // Verify that the account has some transactions
+                    // Note: Some operations might fail due to insufficient funds, which is expected
+                    let transactions = match cqrs_service.get_account_transactions(account_id).await
+                    {
+                        Ok(txs) => txs,
+                        Err(e) => {
+                            println!(
+                                "⚠️  Failed to get transactions for account {}: {}",
+                                account_id, e
+                            );
+                            vec![]
+                        }
+                    };
 
-    // Create batch read operations for all accounts
-    let target_operations = 640000;
+                    (account_id, account.balance, transactions.len(), true)
+                }
+                Ok(None) => {
+                    println!("❌ Account {} not found", account_id);
+                    (account_id, Decimal::ZERO, 0, false)
+                }
+                Err(e) => {
+                    println!("❌ Failed to get account {}: {}", account_id, e);
+                    (account_id, Decimal::ZERO, 0, false)
+                }
+            }
+        });
+        verification_handles.push(handle);
+    }
+
+    let verification_results = futures::future::join_all(verification_handles).await;
+    let mut total_balance = Decimal::ZERO;
+    let mut total_transactions = 0;
     let mut successful_verifications = 0;
-    let mut failed_verifications = 0;
-    let mut latencies = Vec::with_capacity(target_operations);
-    let mut read_operations = Vec::new();
-    for i in 0..target_operations {
-        let account_id = account_ids[i % account_ids.len()];
-        read_operations.push(ReadOperation::GetAccount { account_id });
-    }
 
-    println!(
-        "📦 Submitting {} read operations for batch processing",
-        read_operations.len()
-    );
-
-    // Submit all read operations in a single batch
-    let batch_submit_start = Instant::now();
-
-    let read_operation_ids = match read_batching_service
-        .submit_read_operations_batch_optimized(read_operations)
-        .await
-    {
-        Ok(ids) => {
-            let submit_duration = batch_submit_start.elapsed();
-            println!(
-                "✅ Batch submitted {} operations in {:?}",
-                ids.len(),
-                submit_duration
-            );
-            ids
-        }
-        Err(e) => {
-            println!("❌ Optimized batch read failed: {}", e);
-            return verify_data_integrity_individual_reads(&context, &account_ids).await;
-        }
-    };
-
-    println!("⏳ Waiting for all batch operation results...");
-    let wait_start = Instant::now();
-
-    // Wait for all results with read batching
-    for (i, operation_id) in read_operation_ids.iter().enumerate() {
-        let operation_start = Instant::now();
-
-        match read_batching_service.wait_for_result(*operation_id).await {
-            Ok(_) => {
-                successful_verifications += 1;
-                latencies.push(operation_start.elapsed());
+    for result in verification_results {
+        match result {
+            Ok((account_id, balance, transaction_count, found)) => {
+                if found {
+                    total_balance += balance;
+                    total_transactions += transaction_count;
+                    successful_verifications += 1;
+                    println!(
+                        "✅ Account {}: Balance = {}, Transactions = {}",
+                        account_id, balance, transaction_count
+                    );
+                } else {
+                    println!("❌ Account {}: Not found or failed to retrieve", account_id);
+                }
             }
-            Err(_) => {
-                failed_verifications += 1;
-                latencies.push(operation_start.elapsed());
+            Err(e) => {
+                println!("❌ Failed to verify account: {}", e);
             }
-        }
-
-        if (i + 1) % 10000 == 0 {
-            println!(
-                "  ✅ Completed {}/{} operations",
-                i + 1,
-                operation_ids.len()
-            );
         }
     }
 
-    let total_duration = read_start.elapsed();
-    let wait_duration = wait_start.elapsed();
-    let batch_submit_duration = batch_submit_start.elapsed();
-
-    // Calculate statistics
-    latencies.sort();
-    let avg_latency = if !latencies.is_empty() {
-        latencies.iter().sum::<Duration>() / latencies.len() as u32
-    } else {
-        Duration::ZERO
-    };
-
-    let p95_index = (latencies.len() as f64 * 0.95) as usize;
-    let p99_index = (latencies.len() as f64 * 0.99) as usize;
-    let p95_latency = latencies.get(p95_index).copied().unwrap_or(Duration::ZERO);
-    let p99_latency = latencies.get(p99_index).copied().unwrap_or(Duration::ZERO);
-    let min_latency = latencies.first().copied().unwrap_or(Duration::ZERO);
-    let max_latency = latencies.last().copied().unwrap_or(Duration::ZERO);
-
-    let ops_per_sec = if total_duration.as_millis() > 0 {
-        (successful_verifications as f64 / total_duration.as_millis() as f64) * 1000.0
-    } else {
-        0.0
-    };
-
-    let success_rate = if (successful_verifications + failed_verifications) > 0 {
-        (successful_verifications as f64 / (successful_verifications + failed_verifications) as f64)
-            * 100.0
-    } else {
-        0.0
-    };
-
-    println!("\n📊 COMPREHENSIVE TEST RESULTS");
-    println!("=============================");
-
-    // Calculate write operation metrics
-    let total_write_operations = account_ids.len() * 10; // 5 deposits + 5 withdrawals per account
-    let write_success_rate = if total_write_operations > 0 {
-        (successful_verifications as f64 / account_ids.len() as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    println!("\n📝 WRITE OPERATIONS:");
-    println!("  - Total Write Operations: {}", total_write_operations);
-    println!("  - Total Accounts Created: {}", account_ids.len());
+    println!("\n📊 FINAL STATISTICS:");
+    println!("===================");
+    println!("Total accounts processed: {}", account_ids.len());
     println!(
-        "  - Successfully Verified Accounts: {}",
+        "Successfully verified accounts: {}",
         successful_verifications
     );
-    println!(
-        "  - Failed Accounts: {}",
-        account_ids
-            .len()
-            .saturating_sub(successful_verifications / 500)
-    );
-    println!("  - Success Rate: {:.2}%", write_success_rate);
-    println!("  - Redis Lock Contention Rate: 0.00%");
-    println!(
-        "  - Account Creation Duration: {:?}",
-        account_creation_duration
-    );
-    println!(
-        "  - Account Creation Ops/sec: {:.2}",
-        account_ids.len() as f64 / account_creation_duration.as_secs_f64()
-    );
-    println!("  - Write Operations Duration: {:?}", write_duration);
-    println!(
-        "  - Write Ops/sec: {:.2}",
-        total_write_operations as f64 / write_duration.as_secs_f64()
-    );
-
-    println!("\n📖 READ OPERATIONS (OPTIMIZED BATCH):");
-    println!("  - Total Read Operations: {}", target_operations);
-    println!("  - Successful: {}", successful_verifications);
-    println!("  - Failed: {}", failed_verifications);
-    println!("  - Success Rate: {:.2}%", success_rate);
-    println!("  - Redis Lock Contention Rate: 0.00%");
-    println!("  - Duration: {:?}", total_duration);
-    println!(
-        "  - Read Ops/sec: {:.2}",
-        successful_verifications as f64 / total_duration.as_secs_f64()
-    );
-    println!("  - Batch Read Duration: {:?}", batch_submit_duration);
-    println!(
-        "  - Batch Read Ops/sec: {:.2}",
-        successful_verifications as f64 / batch_submit_duration.as_secs_f64()
-    );
-    println!("  - Avg Read Latency: {:?}", avg_latency);
-    println!("  - P95 Read Latency: {:?}", p95_latency);
-    println!("  - P99 Read Latency: {:?}", p99_latency);
-    println!("  - Min Read Latency: {:?}", min_latency);
-    println!("  - Max Read Latency: {:?}", max_latency);
-
-    println!("\n📖 VERIFICATION OPERATIONS:");
-    println!("  - Total Verification Operations: {}", account_ids.len());
-    println!("  - Successful: {}", successful_verifications);
-    println!(
-        "  - Failed: {}",
-        account_ids
-            .len()
-            .saturating_sub(successful_verifications / 500)
-    );
-    println!(
-        "  - Success Rate: {:.2}%",
-        (successful_verifications as f64 / account_ids.len() as f64) * 100.0
-    );
-    println!("  - Redis Lock Contention Rate: 0.00%");
-
-    println!("\n💰 ACCOUNT METRICS:");
-    println!("  - Total Balance Across All Accounts: {}", total_balance);
-    println!("  - Total Transactions: {}", total_transactions);
+    println!("Total balance across all accounts: {}", total_balance);
+    println!("Total transactions: {}", total_transactions);
     if successful_verifications > 0 {
         println!(
-            "  - Average Transactions Per Account: {:.1}",
+            "Average transactions per account: {:.1}",
             total_transactions as f64 / successful_verifications as f64
         );
-        println!(
-            "  - Average Balance Per Account: {:.2}",
-            total_balance / Decimal::from(successful_verifications)
-        );
     }
-    println!("  - Expected Transactions Per Account: 10 (5 deposits + 5 withdrawals)");
+    println!("Expected additional transactions per account: 10 (5 deposits + 5 withdrawals)");
     println!(
-        "  - Note: Some operations may fail due to insufficient funds, which is expected behavior"
-    );
-
-    // Print CDC metrics
-    println!("\n📊 CDC Pipeline Metrics:");
-    let cdc_metrics = &context.metrics;
-    println!(
-        "  - Events Processed: {}",
-        cdc_metrics
-            .events_processed
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Events Failed: {}",
-        cdc_metrics
-            .events_failed
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Processing Latency: {}ms",
-        cdc_metrics
-            .processing_latency_ms
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Total Latency: {}ms",
-        cdc_metrics
-            .total_latency_ms
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Cache Invalidations: {}",
-        cdc_metrics
-            .cache_invalidations
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Projection Updates: {}",
-        cdc_metrics
-            .projection_updates
-            .load(std::sync::atomic::Ordering::Relaxed)
+        "Note: Some operations may fail due to insufficient funds, which is expected behavior"
     );
 
     // Cleanup
@@ -2013,7 +1742,6 @@ async fn test_write_batching_multi_row_inserts() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_phase1_bulk_create_implementation() {
     let _ = tracing_subscriber::fmt::try_init();
     println!("🧪 Testing Phase 1: Bulk Create Implementation");
@@ -2093,501 +1821,4 @@ async fn get_existing_account_ids(pool: &PgPool, limit: usize) -> Result<Vec<Uui
     .await?;
 
     Ok(rows.into_iter().map(|row| row.id).collect())
-}
-
-#[tokio::test]
-async fn test_read_batching_performance() {
-    println!("🚀 Starting Read Batching Performance Test");
-    let _ = tracing_subscriber::fmt::try_init();
-
-    // Setup test environment
-    let context = match setup_stress_test_environment().await {
-        Ok(ctx) => {
-            println!("✅ Read batching test environment setup complete");
-            ctx
-        }
-        Err(e) => {
-            println!("❌ Failed to setup read batching test environment: {}", e);
-            return;
-        }
-    };
-
-    // Phase 1: Create test accounts
-    println!("\n📝 PHASE 1: Create Test Accounts");
-    println!("=================================");
-
-    let account_count = 100;
-    println!("🔧 Creating {} test accounts...", account_count);
-
-    let mut account_ids = Vec::new();
-    for i in 0..account_count {
-        let owner_name = format!("ReadTestUser_{}", i);
-        let initial_balance = Decimal::new(1000, 0);
-
-        match context
-            .cqrs_service
-            .create_account(owner_name, initial_balance)
-            .await
-        {
-            Ok(account_id) => {
-                account_ids.push(account_id);
-                println!("✅ Created account {}: {}", i, account_id);
-            }
-            Err(e) => {
-                println!("❌ Failed to create account {}: {}", i, e);
-            }
-        }
-    }
-
-    println!("✅ Created {} accounts successfully", account_ids.len());
-
-    // Phase 2: Perform some write operations to create data
-    println!("\n📝 PHASE 2: Create Test Data");
-    println!("=============================");
-
-    for (i, &account_id) in account_ids.iter().enumerate() {
-        // Perform some deposits and withdrawals
-        for j in 0..5 {
-            let amount = Decimal::new(10 + j as i64, 0);
-            match context.cqrs_service.deposit_money(account_id, amount).await {
-                Ok(_) => println!("✅ Deposit {} for account {}: {}", j, i, account_id),
-                Err(e) => println!("❌ Failed deposit {} for account {}: {}", j, i, e),
-            }
-        }
-    }
-
-    // Wait for CDC processing
-    println!("⏳ Waiting for CDC processing...");
-    tokio::time::sleep(Duration::from_secs(10)).await;
-
-    // Phase 3: Test Read Batching Performance
-    println!("\n📝 PHASE 3: Read Batching Performance Test");
-    println!("===========================================");
-
-    // Get read batching service
-    let read_batching_service = match context.cqrs_service.get_read_batching_service() {
-        Some(service) => {
-            println!("✅ Read batching service available");
-            service.clone()
-        }
-        None => {
-            println!("❌ Read batching service not available");
-            return;
-        }
-    };
-
-    // Test individual reads vs batch reads
-    println!("🔍 Testing individual reads vs batch reads...");
-
-    // Test 1: Individual reads
-    println!("📖 Test 1: Individual Reads");
-    let individual_start = Instant::now();
-    let mut individual_results = Vec::new();
-
-    for &account_id in &account_ids {
-        let start = Instant::now();
-        let result = context.cqrs_service.get_account(account_id).await;
-        let latency = start.elapsed();
-
-        individual_results.push((account_id, result.is_ok(), latency));
-    }
-
-    let individual_duration = individual_start.elapsed();
-    let individual_success = individual_results
-        .iter()
-        .filter(|(_, success, _)| *success)
-        .count();
-
-    println!("  - Individual Reads Results:");
-    println!("    • Duration: {:?}", individual_duration);
-    println!(
-        "    • Success Rate: {:.2}%",
-        (individual_success as f64 / account_ids.len() as f64) * 100.0
-    );
-    println!(
-        "    • Reads/sec: {:.2}",
-        account_ids.len() as f64 / individual_duration.as_secs_f64()
-    );
-
-    // Test 2: Batch reads
-    println!("📦 Test 2: Batch Reads");
-    let batch_start = Instant::now();
-
-    // Create batch read operations
-    let mut read_operations = Vec::new();
-    for &account_id in &account_ids {
-        read_operations.push(ReadOperation::GetAccount { account_id });
-    }
-
-    println!(
-        "  - Submitting {} read operations for batch processing",
-        read_operations.len()
-    );
-
-    let batch_operation_ids = match read_batching_service
-        .submit_read_operations_batch(read_operations)
-        .await
-    {
-        Ok(ids) => {
-            println!(
-                "  - ✅ Batch read submitted with {} operation IDs",
-                ids.len()
-            );
-            ids
-        }
-        Err(e) => {
-            println!("  - ❌ Batch read failed: {}", e);
-            return;
-        }
-    };
-
-    // Wait for all batch results
-    let mut batch_results = Vec::new();
-    for operation_id in batch_operation_ids {
-        let start = Instant::now();
-        match read_batching_service.wait_for_result(operation_id).await {
-            Ok(result) => {
-                let latency = start.elapsed();
-                let success = match result {
-                    ReadOperationResult::Account { account, .. } => account.is_some(),
-                    _ => false,
-                };
-                batch_results.push((operation_id, success, latency));
-            }
-            Err(e) => {
-                println!("  - ❌ Failed to get batch result: {}", e);
-                batch_results.push((operation_id, false, start.elapsed()));
-            }
-        }
-    }
-
-    let batch_duration = batch_start.elapsed();
-    let batch_success = batch_results
-        .iter()
-        .filter(|(_, success, _)| *success)
-        .count();
-
-    println!("  - Batch Reads Results:");
-    println!("    • Duration: {:?}", batch_duration);
-    println!(
-        "    • Success Rate: {:.2}%",
-        (batch_success as f64 / account_ids.len() as f64) * 100.0
-    );
-    println!(
-        "    • Reads/sec: {:.2}",
-        account_ids.len() as f64 / batch_duration.as_secs_f64()
-    );
-
-    // Performance comparison
-    println!("\n📊 PERFORMANCE COMPARISON");
-    println!("=========================");
-    let individual_ops_per_sec = account_ids.len() as f64 / individual_duration.as_secs_f64();
-    let batch_ops_per_sec = account_ids.len() as f64 / batch_duration.as_secs_f64();
-    let improvement = if individual_ops_per_sec > 0.0 {
-        ((batch_ops_per_sec - individual_ops_per_sec) / individual_ops_per_sec) * 100.0
-    } else {
-        0.0
-    };
-
-    println!(
-        "  - Individual Reads: {:.2} ops/sec",
-        individual_ops_per_sec
-    );
-    println!("  - Batch Reads: {:.2} ops/sec", batch_ops_per_sec);
-    println!("  - Performance Improvement: {:.2}%", improvement);
-
-    // Cleanup
-    println!("\n🧹 Cleaning up test resources...");
-    if let Err(e) = cleanup_test_resources(&context).await {
-        println!("⚠️  Warning: Cleanup failed: {}", e);
-    }
-
-    println!("✅ Read Batching Performance Test completed successfully!");
-}
-
-async fn verify_data_integrity_individual_reads(context: &StressTestContext, account_ids: &[Uuid]) {
-    println!("🔍 Verifying account balances and transaction history using individual reads...");
-    let mut verification_handles = Vec::new();
-    let mut read_latencies = Vec::new();
-    let read_start = Instant::now();
-
-    // Use a semaphore to limit concurrent read operations
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(10)); // Limit to 10 concurrent reads
-
-    for &account_id in account_ids {
-        let cqrs_service = context.cqrs_service.clone();
-        let semaphore = semaphore.clone();
-        let handle = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
-            let operation_start = Instant::now();
-
-            // Read account details with timeout from environment
-            let read_timeout_secs = std::env::var("READ_TIMEOUT_SECS")
-                .unwrap_or_else(|_| "3".to_string()) // Default to 3 seconds for faster reads
-                .parse()
-                .unwrap_or(3);
-
-            let account_result = tokio::time::timeout(
-                Duration::from_secs(read_timeout_secs), // Use environment variable
-                cqrs_service.get_account(account_id),
-            )
-            .await;
-            let account_latency = operation_start.elapsed();
-
-            match account_result {
-                Ok(Ok(Some(account))) => {
-                    // Read account transactions with timeout from environment
-                    let transaction_start = Instant::now();
-                    let transactions = match tokio::time::timeout(
-                        Duration::from_secs(read_timeout_secs), // Use same timeout from environment
-                        cqrs_service.get_account_transactions(account_id),
-                    )
-                    .await
-                    {
-                        Ok(Ok(txs)) => txs,
-                        Ok(Err(e)) => {
-                            println!(
-                                "⚠️  Failed to get transactions for account {}: {}",
-                                account_id, e
-                            );
-                            vec![]
-                        }
-                        Err(_) => {
-                            println!(
-                                "⚠️  Timeout getting transactions for account {}",
-                                account_id
-                            );
-                            vec![]
-                        }
-                    };
-                    let transaction_latency = transaction_start.elapsed();
-                    let total_latency = account_latency + transaction_latency;
-
-                    (
-                        account_id,
-                        account.balance,
-                        transactions.len(),
-                        true,
-                        total_latency,
-                    )
-                }
-                Ok(Ok(None)) => {
-                    println!("❌ Account {} not found", account_id);
-                    (account_id, Decimal::ZERO, 0, false, account_latency)
-                }
-                Ok(Err(e)) => {
-                    println!("❌ Failed to get account {}: {}", account_id, e);
-                    (account_id, Decimal::ZERO, 0, false, account_latency)
-                }
-                Err(_) => {
-                    println!("❌ Timeout getting account {}", account_id);
-                    (account_id, Decimal::ZERO, 0, false, account_latency)
-                }
-            }
-        });
-        verification_handles.push(handle);
-    }
-
-    let verification_results = futures::future::join_all(verification_handles).await;
-    let read_end = Instant::now();
-    let read_duration = read_end.duration_since(read_start);
-
-    let mut total_balance = Decimal::ZERO;
-    let mut total_transactions = 0;
-    let mut successful_verifications = 0;
-    let mut read_success = 0;
-    let mut read_failed = 0;
-
-    for result in verification_results {
-        match result {
-            Ok((account_id, balance, transaction_count, found, latency)) => {
-                read_latencies.push(latency);
-
-                if found {
-                    total_balance += balance;
-                    total_transactions += transaction_count;
-                    successful_verifications += 1;
-                    read_success += 1;
-                    println!(
-                        "✅ Account {}: Balance = {}, Transactions = {}, Latency = {:?}",
-                        account_id, balance, transaction_count, latency
-                    );
-                } else {
-                    read_failed += 1;
-                    println!("❌ Account {}: Not found or failed to retrieve", account_id);
-                }
-            }
-            Err(e) => {
-                read_failed += 1;
-                println!("❌ Failed to verify account: {}", e);
-            }
-        }
-    }
-
-    // Calculate read operation statistics
-    let total_read_operations = read_success + read_failed;
-    let read_success_rate = if total_read_operations > 0 {
-        (read_success as f64 / total_read_operations as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    // Calculate latency statistics
-    read_latencies.sort();
-    let avg_read_latency = if !read_latencies.is_empty() {
-        read_latencies.iter().sum::<Duration>() / read_latencies.len() as u32
-    } else {
-        Duration::ZERO
-    };
-
-    let p95_read_latency = if read_latencies.len() > 0 {
-        let index = (read_latencies.len() as f64 * 0.95) as usize;
-        read_latencies.get(index).copied().unwrap_or(Duration::ZERO)
-    } else {
-        Duration::ZERO
-    };
-
-    let p99_read_latency = if read_latencies.len() > 0 {
-        let index = (read_latencies.len() as f64 * 0.99) as usize;
-        read_latencies.get(index).copied().unwrap_or(Duration::ZERO)
-    } else {
-        Duration::ZERO
-    };
-
-    let min_read_latency = read_latencies.first().copied().unwrap_or(Duration::ZERO);
-    let max_read_latency = read_latencies.last().copied().unwrap_or(Duration::ZERO);
-
-    println!("\n📊 COMPREHENSIVE TEST RESULTS");
-    println!("=============================");
-
-    // Calculate write operation metrics
-    let total_write_operations = account_ids.len() * 10; // 5 deposits + 5 withdrawals per account
-    let write_success_rate = if total_write_operations > 0 {
-        (successful_verifications as f64 / account_ids.len() as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    println!("\n📝 WRITE OPERATIONS:");
-    println!("  - Total Write Operations: {}", total_write_operations);
-    println!("  - Total Accounts Created: {}", account_ids.len());
-    println!(
-        "  - Successfully Verified Accounts: {}",
-        successful_verifications
-    );
-    println!(
-        "  - Failed Accounts: {}",
-        account_ids.len().saturating_sub(successful_verifications)
-    );
-    println!("  - Success Rate: {:.2}%", write_success_rate);
-    println!("  - Redis Lock Contention Rate: 0.00%");
-
-    println!("\n📖 READ OPERATIONS (INDIVIDUAL):");
-    println!("  - Total Read Operations: {}", total_read_operations);
-    println!("  - Successful: {}", read_success);
-    println!("  - Failed: {}", read_failed);
-    println!("  - Success Rate: {:.2}%", read_success_rate);
-    println!("  - Redis Lock Contention Rate: 0.00%");
-    println!("  - Duration: {:?}", read_duration);
-    println!(
-        "  - Read Ops/sec: {:.2}",
-        total_read_operations as f64 / read_duration.as_secs_f64()
-    );
-    println!("  - Avg Read Latency: {:?}", avg_read_latency);
-    println!("  - P95 Read Latency: {:?}", p95_read_latency);
-    println!("  - P99 Read Latency: {:?}", p99_read_latency);
-    println!("  - Min Read Latency: {:?}", min_read_latency);
-    println!("  - Max Read Latency: {:?}", max_read_latency);
-
-    println!("\n📖 VERIFICATION OPERATIONS:");
-    println!("  - Total Verification Operations: {}", account_ids.len());
-    println!("  - Successful: {}", successful_verifications);
-    println!(
-        "  - Failed: {}",
-        account_ids.len().saturating_sub(successful_verifications)
-    );
-    println!(
-        "  - Success Rate: {:.2}%",
-        (successful_verifications as f64 / account_ids.len() as f64) * 100.0
-    );
-    println!("  - Redis Lock Contention Rate: 0.00%");
-
-    println!("\n💰 ACCOUNT METRICS:");
-    println!("  - Total Balance Across All Accounts: {}", total_balance);
-    println!("  - Total Transactions: {}", total_transactions);
-    if successful_verifications > 0 {
-        println!(
-            "  - Average Transactions Per Account: {:.1}",
-            total_transactions as f64 / successful_verifications as f64
-        );
-        println!(
-            "  - Average Balance Per Account: {:.2}",
-            total_balance / Decimal::from(successful_verifications)
-        );
-    }
-    println!("  - Expected Transactions Per Account: 10 (5 deposits + 5 withdrawals)");
-    println!(
-        "  - Note: Some operations may fail due to insufficient funds, which is expected behavior"
-    );
-
-    // Print CDC metrics
-    println!("\n📊 CDC Pipeline Metrics:");
-    let cdc_metrics = &context.metrics;
-    println!(
-        "  - Events Processed: {}",
-        cdc_metrics
-            .events_processed
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Events Failed: {}",
-        cdc_metrics
-            .events_failed
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Processing Latency: {}ms",
-        cdc_metrics
-            .processing_latency_ms
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Total Latency: {}ms",
-        cdc_metrics
-            .total_latency_ms
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Cache Invalidations: {}",
-        cdc_metrics
-            .cache_invalidations
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-    println!(
-        "  - Projection Updates: {}",
-        cdc_metrics
-            .projection_updates
-            .load(std::sync::atomic::Ordering::Relaxed)
-    );
-
-    // Cleanup
-    println!("\n🧹 Cleaning up test resources...");
-
-    // Stop the CDC service manager gracefully
-    println!("🛑 Stopping CDC service manager...");
-    if let Err(e) = context.cdc_service_manager.stop().await {
-        println!("⚠️  Warning: CDC service manager stop failed: {}", e);
-    } else {
-        println!("✅ CDC service manager stopped successfully");
-    }
-
-    if let Err(e) = cleanup_test_resources(&context).await {
-        println!("⚠️  Warning: Cleanup failed: {}", e);
-    }
-
-    // Add a small delay to allow the consumer to shut down completely
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    println!("✅ All background tasks (including CDC consumer) stopped. Test complete.");
-    println!("✅ Write Batching Multi-Row Insert Test completed successfully!");
 }

@@ -16,8 +16,6 @@ void main() {
     accountProvider = AccountProvider();
   });
 
-  // INACTIVATED: AccountProvider tests
-  /*
   group('AccountProvider', () {
     test('fetchAccountData success', () async {
       final account = Account(id: '1', ownerName: 'test', balance: 100.0);
@@ -46,5 +44,4 @@ void main() {
       // expect(accountProvider.transactions, transactions);
     });
   });
-  */
 }

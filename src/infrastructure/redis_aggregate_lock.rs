@@ -6,23 +6,10 @@ use redis::{aio::MultiplexedConnection, AsyncCommands, RedisError, Value as Redi
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::Once;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-
-static INIT: Once = Once::new();
-static mut PROCESS_ID: Option<String> = None;
-
-fn get_process_id() -> String {
-    unsafe {
-        INIT.call_once(|| {
-            PROCESS_ID = Some(Uuid::new_v4().to_string());
-        });
-        PROCESS_ID.clone().unwrap()
-    }
-}
 
 /// Configuration for Redis lock performance
 #[derive(Debug, Clone)]
@@ -42,16 +29,16 @@ pub struct RedisLockConfig {
 impl Default for RedisLockConfig {
     fn default() -> Self {
         Self {
-            connection_pool_size: 200, // 100'den 200'e artırıldı - daha fazla connection
-            lock_timeout_secs: 30,     // 60'tan 30'a düşürüldü - daha hızlı release
-            batch_lock_timeout_secs: 60, // 120'den 60'a düşürüldü
-            retry_attempts: 10,        // 5'ten 10'a artırıldı - daha fazla retry
-            retry_delay_ms: 50,        // 200'den 50'ye düşürüldü - daha hızlı retry
+            connection_pool_size: 50,
+            lock_timeout_secs: 30, // Increased to 30 seconds for better concurrency
+            batch_lock_timeout_secs: 45, // Increased to 45 seconds for batch operations
+            retry_attempts: 8,     // Increased from 5 to 8
+            retry_delay_ms: 500,   // Increased from 200 to 500ms
             enable_metrics: true,
             enable_lock_free_reads: true,
-            max_batch_size: 50, // 100'den 50'ye düşürüldü - daha küçük batch
-            connection_timeout: Duration::from_secs(10), // 15'ten 10'a düşürüldü
-            idle_timeout: Duration::from_secs(60), // 120'den 60'a düşürüldü
+            max_batch_size: 100,
+            connection_timeout: Duration::from_secs(10), // Increased from 5 to 10 seconds
+            idle_timeout: Duration::from_secs(300),
         }
     }
 }
@@ -125,12 +112,17 @@ impl RedisConnectionPool {
         &self,
         redis_client: &Arc<dyn RedisClientTrait>,
     ) -> Result<PooledConnection> {
-        // Try to get connection from pool first
+        let start = Instant::now();
+
+        // Try to get an existing connection from the pool
         {
             let mut connections = self.connections.lock().await;
             if let Some(conn) = connections.pop() {
                 self.metrics
                     .connection_pool_hits
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .active_connections
                     .fetch_add(1, Ordering::Relaxed);
                 return Ok(PooledConnection {
                     connection: Some(conn),
@@ -140,55 +132,20 @@ impl RedisConnectionPool {
             }
         }
 
-        // If pool is empty, create new connection with timeout
+        // Create a new connection if pool is empty
         self.metrics
             .connection_pool_misses
             .fetch_add(1, Ordering::Relaxed);
+        let conn = redis_client.get_connection().await?;
+        self.metrics
+            .active_connections
+            .fetch_add(1, Ordering::Relaxed);
 
-        // Acquire semaphore with timeout
-        let _permit =
-            tokio::time::timeout(self.config.connection_timeout, self.semaphore.acquire())
-                .await
-                .map_err(|_| {
-                    RedisError::from((redis::ErrorKind::IoError, "Connection pool timeout"))
-                })??;
-
-        // Create new connection with retry logic
-        let mut retry_count = 0;
-        let max_retries = 3;
-
-        while retry_count < max_retries {
-            match redis_client.get_connection().await {
-                Ok(conn) => {
-                    self.metrics
-                        .active_connections
-                        .fetch_add(1, Ordering::Relaxed);
-
-                    return Ok(PooledConnection {
-                        connection: Some(Arc::new(Mutex::new(conn))),
-                        pool: self.connections.clone(),
-                        metrics: self.metrics.clone(),
-                    });
-                }
-                Err(e) => {
-                    retry_count += 1;
-                    if retry_count >= max_retries {
-                        return Err(e.into());
-                    }
-                    println!(
-                        "⚠️ Connection creation failed, retrying... ({}/{})",
-                        retry_count, max_retries
-                    );
-                    tokio::time::sleep(Duration::from_millis(100 * retry_count)).await;
-                }
-            }
-        }
-
-        Err(RedisError::from((
-            redis::ErrorKind::IoError,
-            "Failed to create Redis connection after retries",
-        ))
-        .into())
+        Ok(PooledConnection {
+            connection: Some(Arc::new(Mutex::new(conn))),
+            pool: self.connections.clone(),
+            metrics: self.metrics.clone(),
+        })
     }
 }
 
@@ -264,7 +221,7 @@ impl RedisAggregateLock {
         Self {
             redis_client,
             connection_pool,
-            process_id: get_process_id(), // Static process ID kullan
+            process_id: Uuid::new_v4().to_string(),
             config,
             metrics,
             lock_cache: Arc::new(DashMap::new()),
@@ -314,10 +271,9 @@ impl RedisAggregateLock {
                         self.update_lock_metrics(duration, true);
                         self.lock_cache.insert(aggregate_id, Instant::now());
                         println!(
-                            "🔒 Acquired lock for aggregate {} (attempt {}) in {:?}",
+                            "🔒 Acquired lock for aggregate {} (attempt {})",
                             aggregate_id,
-                            attempt + 1,
-                            duration
+                            attempt + 1
                         );
                         return true;
                     } else {
@@ -333,20 +289,9 @@ impl RedisAggregateLock {
                 }
                 Err(e) => {
                     println!(
-                        "❌ Lock acquisition error for aggregate {} (attempt {}): {}",
-                        aggregate_id,
-                        attempt + 1,
-                        e
+                        "❌ Lock acquisition error for aggregate {}: {}",
+                        aggregate_id, e
                     );
-                    // Exponential backoff for errors
-                    if attempt < self.config.retry_attempts - 1 {
-                        let backoff_delay = self.config.retry_delay_ms * (1 << attempt);
-                        println!(
-                            "⏳ Exponential backoff: waiting {}ms before retry...",
-                            backoff_delay
-                        );
-                        tokio::time::sleep(Duration::from_millis(backoff_delay)).await;
-                    }
                 }
             }
 
@@ -411,114 +356,74 @@ impl RedisAggregateLock {
 
         // Handle write operations that need locks
         if !write_aggregates.is_empty() {
-            // Split large batches into smaller chunks for better success rate
-            let chunk_size = self.config.max_batch_size.min(10); // Max 10 per batch (daha küçük)
-            let mut all_batch_results = Vec::new();
-
-            for chunk in write_aggregates.chunks(chunk_size) {
-                let chunk_operation_types = write_operation_types
-                    .iter()
-                    .skip(all_batch_results.len() * chunk_size)
-                    .take(chunk.len())
-                    .cloned()
-                    .collect();
-
-                println!("🔍 Processing chunk of {} aggregates", chunk.len());
-
-                match self
-                    .acquire_batch_locks(chunk.to_vec(), chunk_operation_types)
-                    .await
-                {
-                    Ok(chunk_results) => {
-                        let successful = chunk_results.iter().filter(|&&r| r).count();
-                        println!("✅ Chunk result: {}/{} successful", successful, chunk.len());
-                        all_batch_results.extend(chunk_results);
-                    }
-                    Err(e) => {
-                        println!("❌ Batch lock acquisition error: {}", e);
-                        // Fill with false for failed chunk
-                        all_batch_results.extend(vec![false; chunk.len()]);
+            match self
+                .acquire_batch_locks(write_aggregates, write_operation_types)
+                .await
+            {
+                Ok(batch_results) => {
+                    // Assign results to the correct positions
+                    for (result_index, &original_index) in write_indices.iter().enumerate() {
+                        if result_index < batch_results.len() {
+                            results[original_index] = batch_results[result_index];
+                        }
                     }
                 }
-            }
-
-            // Map results back to original indices
-            for (i, &success) in all_batch_results.iter().enumerate() {
-                if i < write_indices.len() {
-                    results[write_indices[i]] = success;
+                Err(e) => {
+                    error!("❌ Batch lock acquisition failed: {}", e);
+                    // Keep results as false (default)
                 }
             }
         }
 
-        let successful_count = results.iter().filter(|&&r| r).count();
-        self.update_batch_lock_metrics(start.elapsed(), successful_count);
+        let duration = start.elapsed();
+        self.update_batch_lock_metrics(duration, results.iter().filter(|&&r| r).count());
 
-        println!(
+        info!(
             "📦 Batch lock acquisition completed: {}/{} successful",
-            successful_count,
+            results.iter().filter(|&&r| r).count(),
             results.len()
         );
 
         results
     }
 
-    /// Release a lock for a single aggregate
+    /// Release a single lock
     pub async fn unlock(&self, aggregate_id: Uuid) {
         let start = Instant::now();
 
-        // Remove from cache first
+        // Remove from lock cache
         self.lock_cache.remove(&aggregate_id);
-        self.operation_type_cache.remove(&aggregate_id);
 
-        match self.release_single_lock(aggregate_id).await {
-            Ok(_) => {
-                self.metrics.locks_released.fetch_add(1, Ordering::Relaxed);
-                let duration = start.elapsed();
-                println!(
-                    "🔓 Released lock for aggregate {} in {:?}",
-                    aggregate_id, duration
-                );
-            }
-            Err(e) => {
-                println!(
-                    "⚠️ Failed to release lock for aggregate {}: {}",
-                    aggregate_id, e
-                );
-            }
+        // Release lock in Redis
+        if let Err(e) = self.release_single_lock(aggregate_id).await {
+            error!(
+                "❌ Failed to release lock for aggregate {}: {}",
+                aggregate_id, e
+            );
+        } else {
+            self.metrics.locks_released.fetch_add(1, Ordering::Relaxed);
+            debug!("🔓 Released lock for aggregate {}", aggregate_id);
         }
     }
 
-    /// Release locks for multiple aggregates
+    /// Release multiple locks in batch
     pub async fn batch_unlock(&self, aggregate_ids: Vec<Uuid>) {
         let start = Instant::now();
 
-        // Remove from cache first
-        for &aggregate_id in &aggregate_ids {
-            self.lock_cache.remove(&aggregate_id);
-            self.operation_type_cache.remove(&aggregate_id);
+        // Remove from lock cache
+        for aggregate_id in &aggregate_ids {
+            self.lock_cache.remove(aggregate_id);
         }
 
-        // Split into smaller chunks for better performance
-        let chunk_size = 10;
-        let mut total_released = 0;
-
-        for chunk in aggregate_ids.chunks(chunk_size) {
-            match self.release_batch_locks(chunk.to_vec()).await {
-                Ok(released_count) => {
-                    total_released += released_count;
-                }
-                Err(e) => {
-                    println!("⚠️ Failed to release batch locks: {}", e);
-                }
-            }
+        // Release locks in Redis batch
+        if let Err(e) = self.release_batch_locks(aggregate_ids.clone()).await {
+            error!("❌ Failed to release batch locks: {}", e);
+        } else {
+            self.metrics
+                .locks_released
+                .fetch_add(aggregate_ids.len() as u64, Ordering::Relaxed);
+            debug!("🔓 Released {} locks in batch", aggregate_ids.len());
         }
-
-        self.metrics
-            .locks_released
-            .fetch_add(total_released as u64, Ordering::Relaxed);
-
-        let duration = start.elapsed();
-        println!("🔓 Released {} locks in {:?}", total_released, duration);
     }
 
     /// Get current metrics
@@ -610,12 +515,6 @@ impl RedisAggregateLock {
             RedisValue::Okay => {
                 println!("🔍 Redis response: OK, lock acquired: true");
                 true
-            }
-            RedisValue::Nil => {
-                println!(
-                    "🔍 Redis response: Nil - lock not acquired (key already exists or expired)"
-                );
-                false
             }
             RedisValue::Data(data) => {
                 println!("🔍 Found Data: {:?}", data);
@@ -724,13 +623,6 @@ impl RedisAggregateLock {
                     println!("🔍 Result {}: OK, success: true", i);
                     true
                 }
-                RedisValue::Nil => {
-                    println!(
-                        "🔍 Result {}: Nil - lock not acquired (key already exists or expired)",
-                        i
-                    );
-                    false
-                }
                 RedisValue::Data(data) => {
                     println!("🔍 Result {}: Found Data: {:?}", i, data);
 
@@ -807,14 +699,10 @@ impl RedisAggregateLock {
             .await?;
         let key = format!("lock:aggregate:{}", aggregate_id);
 
-        // Serialize process_id using bincode for comparison
-        let process_id_bytes = bincode::serialize(&self.process_id)?;
-
         // Use Lua script for safe lock release
         let script = redis::Script::new(
             r#"
-            local current_value = redis.call("get", KEYS[1])
-            if current_value == ARGV[1] then
+            if redis.call("get", KEYS[1]) == ARGV[1] then
                 return redis.call("del", KEYS[1])
             else
                 return 0
@@ -822,46 +710,30 @@ impl RedisAggregateLock {
             "#,
         );
 
-        let result: i32 = {
+        let _: i32 = {
             let mut conn_guard = conn.get_mut_connection().await?;
             script
                 .key(&key)
-                .arg(&process_id_bytes)
+                .arg(&self.process_id)
                 .invoke_async(&mut *conn_guard)
                 .await?
         };
 
-        if result == 0 {
-            println!(
-                "⚠️ Lock release failed for aggregate {} - not owned by this process",
-                aggregate_id
-            );
-        } else {
-            println!(
-                "✅ Lock released for aggregate {} (deleted {} keys)",
-                aggregate_id, result
-            );
-        }
-
         Ok(())
     }
 
-    async fn release_batch_locks(&self, aggregate_ids: Vec<Uuid>) -> Result<i32> {
+    async fn release_batch_locks(&self, aggregate_ids: Vec<Uuid>) -> Result<()> {
         let mut conn = self
             .connection_pool
             .get_connection(&self.redis_client)
             .await?;
-
-        // Serialize process_id using bincode for comparison
-        let process_id_bytes = bincode::serialize(&self.process_id)?;
 
         // Use Lua script for safe batch lock release
         let script = redis::Script::new(
             r#"
             local released = 0
             for i = 1, #KEYS do
-                local current_value = redis.call("get", KEYS[i])
-                if current_value == ARGV[1] then
+                if redis.call("get", KEYS[i]) == ARGV[1] then
                     redis.call("del", KEYS[i])
                     released = released + 1
                 end
@@ -875,22 +747,16 @@ impl RedisAggregateLock {
             .map(|id| format!("lock:aggregate:{}", id))
             .collect();
 
-        let released_count: i32 = {
+        let _: i32 = {
             let mut conn_guard = conn.get_mut_connection().await?;
             script
-                .key(&keys)
-                .arg(&process_id_bytes)
+                .key(&keys[0]) // Use first key for script invocation
+                .arg(&self.process_id)
                 .invoke_async(&mut *conn_guard)
                 .await?
         };
 
-        println!(
-            "🔓 Batch lock release: {}/{} locks released",
-            released_count,
-            aggregate_ids.len()
-        );
-
-        Ok(released_count)
+        Ok(())
     }
 
     fn update_lock_metrics(&self, duration: Duration, success: bool) {

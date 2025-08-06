@@ -1,0 +1,260 @@
+use anyhow::Result;
+use banking_es::infrastructure::outbox_cleanup_service::{
+    CleanupConfig, CleanupMetrics, OutboxCleaner,
+};
+use chrono::{Duration, Utc};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+#[tokio::test]
+async fn test_outbox_cleanup_service_integration() -> Result<()> {
+    println!("🧪 Testing Outbox Cleanup Service Integration");
+
+    // Setup database connection
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+    });
+
+    let pool = PgPool::connect(&database_url).await?;
+
+    // Ensure the table exists with deleted_at column
+    sqlx::query(
+        r#"
+        ALTER TABLE kafka_outbox_cdc
+        ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    // Create test data
+    let test_data = create_test_outbox_data(&pool).await?;
+    println!("✅ Created {} test records", test_data.len());
+
+    // Configure cleanup service
+    let config = CleanupConfig {
+        retention_hours: 1,            // Keep for 1 hour
+        safety_margin_minutes: 5,      // 5 minute safety margin
+        cleanup_interval_minutes: 1,   // Run every minute for testing
+        batch_size: 100,               // Small batches for testing
+        max_batches_per_cycle: 5,      // Limit batches
+        batch_delay_ms: 50,            // Short delay
+        max_cycle_duration_minutes: 2, // Short cycle
+        enable_vacuum: false,          // Disable vacuum for testing
+    };
+
+    let cleaner = OutboxCleaner::new(pool.clone(), config);
+
+    // Test 1: Get initial statistics
+    println!("📊 Testing initial statistics...");
+    let initial_stats = cleaner.get_outbox_stats().await?;
+    println!("  - Total records: {}", initial_stats.total_records);
+    println!("  - Active records: {}", initial_stats.active_records);
+    println!(
+        "  - Marked for deletion: {}",
+        initial_stats.marked_for_deletion
+    );
+
+    // Test 2: Run cleanup cycle
+    println!("🧹 Testing cleanup cycle...");
+    let start_time = Utc::now();
+    let metrics = cleaner.cleanup_cycle().await?;
+    let duration = Utc::now() - start_time;
+
+    println!("  - Marked for deletion: {}", metrics.marked_for_deletion);
+    println!("  - Physically deleted: {}", metrics.physically_deleted);
+    println!("  - Mark batches: {}", metrics.mark_batches);
+    println!("  - Delete batches: {}", metrics.delete_batches);
+    println!("  - Duration: {}ms", metrics.cleanup_duration_ms);
+    println!("  - Errors: {:?}", metrics.errors);
+
+    // Test 3: Verify cleanup results
+    println!("🔍 Verifying cleanup results...");
+    let final_stats = cleaner.get_outbox_stats().await?;
+    println!("  - Total records: {}", final_stats.total_records);
+    println!("  - Active records: {}", final_stats.active_records);
+    println!(
+        "  - Marked for deletion: {}",
+        final_stats.marked_for_deletion
+    );
+
+    // Test 4: Force cleanup
+    println!("⚡ Testing force cleanup...");
+    let force_metrics = cleaner.force_cleanup().await?;
+    println!(
+        "  - Force cleanup marked: {}",
+        force_metrics.marked_for_deletion
+    );
+    println!(
+        "  - Force cleanup deleted: {}",
+        force_metrics.physically_deleted
+    );
+
+    // Test 5: Health check
+    println!("🏥 Testing health check...");
+    let health_checker =
+        banking_es::infrastructure::outbox_cleanup_service::CleanupHealthCheck::new(cleaner);
+    let is_healthy = health_checker.health_check().await?;
+    println!("  - Health check passed: {}", is_healthy);
+
+    println!("✅ Outbox cleanup service integration test completed successfully!");
+    Ok(())
+}
+
+async fn create_test_outbox_data(pool: &PgPool) -> Result<Vec<Uuid>> {
+    let mut ids = Vec::new();
+
+    // Create records with different ages
+    let now = Utc::now();
+    let ages = vec![
+        Duration::hours(2),    // Old records that should be marked
+        Duration::hours(1),    // Records at retention boundary
+        Duration::minutes(30), // Recent records that should stay
+        Duration::minutes(5),  // Very recent records
+    ];
+
+    for (i, age) in ages.iter().enumerate() {
+        for j in 0..10 {
+            // Create multiple records for each age group
+            let created_at = now - *age;
+            let aggregate_id = Uuid::new_v4();
+            let event_id = Uuid::new_v4();
+
+            let event_type = format!("TestEvent_{}", i);
+            let payload = format!("{{\"test\": \"data_{}_{}\"}}", i, j)
+                .as_bytes()
+                .to_vec();
+
+            let id = sqlx::query!(
+                r#"
+                INSERT INTO kafka_outbox_cdc
+                (aggregate_id, event_id, event_type, payload, topic, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id
+                "#,
+                aggregate_id,
+                event_id,
+                event_type,
+                payload,
+                "test-topic",
+                created_at
+            )
+            .fetch_one(pool)
+            .await?
+            .id;
+
+            ids.push(id);
+        }
+    }
+
+    Ok(ids)
+}
+
+#[tokio::test]
+async fn test_cleanup_performance() -> Result<()> {
+    println!("🚀 Testing Outbox Cleanup Performance");
+
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+    });
+
+    let pool = PgPool::connect(&database_url).await?;
+
+    // Create large dataset
+    println!("📦 Creating large test dataset...");
+    let large_dataset = create_large_test_dataset(&pool).await?;
+    println!("✅ Created {} test records", large_dataset.len());
+
+    // Test different batch sizes
+    let batch_sizes = vec![100, 500, 1000, 2000];
+    let mut results = Vec::new();
+
+    for batch_size in batch_sizes {
+        println!("🧪 Testing with batch size: {}", batch_size);
+
+        let config = CleanupConfig {
+            retention_hours: 1,
+            safety_margin_minutes: 5,
+            cleanup_interval_minutes: 1,
+            batch_size: batch_size as i64,
+            max_batches_per_cycle: 10,
+            batch_delay_ms: 50,
+            max_cycle_duration_minutes: 5,
+            enable_vacuum: false,
+        };
+
+        let cleaner = OutboxCleaner::new(pool.clone(), config);
+
+        let start_time = Utc::now();
+        let metrics = cleaner.cleanup_cycle().await?;
+        let duration = Utc::now() - start_time;
+
+        results.push((batch_size, metrics.clone(), duration));
+
+        println!("  - Duration: {:?}", duration);
+        println!("  - Marked: {}", metrics.marked_for_deletion);
+        println!("  - Deleted: {}", metrics.physically_deleted);
+        println!("  - Mark batches: {}", metrics.mark_batches);
+        println!("  - Delete batches: {}", metrics.delete_batches);
+    }
+
+    // Print performance summary
+    println!("\n📊 Performance Summary:");
+    println!("======================");
+    for (batch_size, metrics, duration) in results {
+        let throughput = if duration.num_milliseconds() > 0 {
+            (metrics.marked_for_deletion + metrics.physically_deleted) as f64
+                / (duration.num_milliseconds() as f64 / 1000.0)
+        } else {
+            0.0
+        };
+
+        println!(
+            "Batch Size {}: {:?} - {:.2} records/sec",
+            batch_size, duration, throughput
+        );
+    }
+
+    println!("✅ Performance test completed!");
+    Ok(())
+}
+
+async fn create_large_test_dataset(pool: &PgPool) -> Result<Vec<Uuid>> {
+    let mut ids = Vec::new();
+    let now = Utc::now();
+
+    // Create 1000 test records with varying ages
+    for i in 0..1000 {
+        let age_hours = (i % 4) + 1; // 1-4 hours old
+        let created_at = now - Duration::hours(age_hours);
+        let aggregate_id = Uuid::new_v4();
+        let event_id = Uuid::new_v4();
+
+        let event_type = format!("PerformanceTestEvent_{}", i);
+        let payload = format!("{{\"test\": \"performance_data_{}\"}}", i)
+            .as_bytes()
+            .to_vec();
+
+        let id = sqlx::query!(
+            r#"
+            INSERT INTO kafka_outbox_cdc
+            (aggregate_id, event_id, event_type, payload, topic, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+            "#,
+            aggregate_id,
+            event_id,
+            event_type,
+            payload,
+            "performance-test-topic",
+            created_at
+        )
+        .fetch_one(pool)
+        .await?
+        .id;
+
+        ids.push(id);
+    }
+
+    Ok(ids)
+}

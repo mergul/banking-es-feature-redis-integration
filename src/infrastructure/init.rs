@@ -238,8 +238,6 @@ pub async fn init_all_services(
             .unwrap_or_else(|_| "50".to_string())
             .parse()
             .unwrap_or(50),
-        synchronous_commit: true,
-        full_page_writes: true,
     };
 
     let event_store: Arc<dyn EventStoreTrait + Send + Sync> =
@@ -341,18 +339,6 @@ pub async fn init_all_services(
 
     // Initialize ProjectionStore with optimized config for high throughput
     let mut projection_config = ProjectionConfig {
-        cache_ttl_secs: std::env::var("PROJECTION_CACHE_TTL")
-            .unwrap_or_else(|_| "600".to_string())
-            .parse()
-            .unwrap_or(600),
-        batch_size: std::env::var("PROJECTION_BATCH_SIZE")
-            .unwrap_or_else(|_| "5000".to_string())
-            .parse()
-            .unwrap_or(5000),
-        batch_timeout_ms: std::env::var("PROJECTION_BATCH_TIMEOUT_MS")
-            .unwrap_or_else(|_| "500".to_string())
-            .parse()
-            .unwrap_or(500),
         max_connections: std::env::var("PROJECTION_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "500".to_string())
             .parse()
@@ -373,8 +359,18 @@ pub async fn init_all_services(
             .unwrap_or_else(|_| "1800".to_string())
             .parse()
             .unwrap_or(1800),
-        synchronous_commit: true,
-        full_page_writes: true,
+        cache_ttl_secs: std::env::var("PROJECTION_CACHE_TTL")
+            .unwrap_or_else(|_| "600".to_string())
+            .parse()
+            .unwrap_or(600),
+        batch_size: std::env::var("PROJECTION_BATCH_SIZE")
+            .unwrap_or_else(|_| "5000".to_string())
+            .parse()
+            .unwrap_or(5000),
+        batch_timeout_ms: std::env::var("PROJECTION_BATCH_TIMEOUT_MS")
+            .unwrap_or_else(|_| "500".to_string())
+            .parse()
+            .unwrap_or(500),
     };
 
     let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> = Arc::new(
