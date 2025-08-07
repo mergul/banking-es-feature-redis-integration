@@ -80,6 +80,8 @@ pub struct KafkaConfig {
     pub producer_retries: i32,
     pub consumer_max_poll_interval_ms: i32,
     pub consumer_session_timeout_ms: i32,
+    pub consumer_heartbeat_interval_ms: i32,
+    pub consumer_max_poll_records: i32,
     pub fetch_max_bytes: i32,
     pub security_protocol: String,
     pub sasl_mechanism: String,
@@ -102,13 +104,15 @@ impl Default for KafkaConfig {
             topic_prefix: "banking-es".to_string(),
             producer_acks: 1,
             producer_retries: 3,
-            consumer_max_poll_interval_ms: 300000,
+            consumer_max_poll_interval_ms: 10000,
             consumer_session_timeout_ms: 10000,
+            consumer_heartbeat_interval_ms: 1000,
+            consumer_max_poll_records: 5000,
             fetch_max_bytes,
             security_protocol: "PLAINTEXT".to_string(),
             sasl_mechanism: "PLAIN".to_string(),
             ssl_ca_location: None,
-            auto_offset_reset: "earliest".to_string(),
+            auto_offset_reset: "latest".to_string(),
             cache_invalidation_topic: "banking-es-cache-invalidation".to_string(),
             event_topic: "banking-es-events".to_string(),
         }
@@ -492,7 +496,7 @@ impl KafkaConsumer {
                 "session.timeout.ms",
                 config.consumer_session_timeout_ms.to_string(),
             )
-            .set("heartbeat.interval.ms", "3000")
+            .set("heartbeat.interval.ms", "1000")
             .set("partition.assignment.strategy", "cooperative-sticky")
             .set("fetch.max.bytes", fetch_max_bytes.to_string())
             .create_with_context(context)?;

@@ -14,6 +14,7 @@ use rdkafka::Offset;
 use rdkafka::TopicPartitionList;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,6 +25,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 // Import the optimized components
+use crate::infrastructure::binary_utils::{PgCopyBinaryWriter, ToPgCopyBinary};
 use crate::infrastructure::cdc_event_processor::{
     BusinessLogicConfig, UltraOptimizedCDCEventProcessor,
 };
@@ -35,6 +37,7 @@ use crate::infrastructure::cdc_producer::{BusinessLogicValidator, CDCProducer, C
 use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::event_processor::EventProcessor;
 use futures::stream::StreamExt;
+use sqlx::types::JsonValue;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -104,6 +107,176 @@ impl Default for DebeziumConfig {
             topic_prefix: "banking-es".to_string(), // Match actual Debezium config
             snapshot_mode: "initial".to_string(),
             poll_interval_ms: 5, // CRITICAL FIX: Reduced from 100ms to 5ms for better performance
+        }
+    }
+}
+
+/// Binary row format for COPY operations
+#[derive(Debug, Clone)]
+struct OutboxCopyRow {
+    aggregate_id: Uuid,
+    event_id: Uuid,
+    event_type: String,
+    payload: Vec<u8>,
+    topic: String,
+    metadata: serde_json::Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl OutboxCopyRow {
+    /// Create a new OutboxCopyRow from an OutboxMessage
+    pub fn from_outbox_message(msg: crate::infrastructure::outbox::OutboxMessage) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            aggregate_id: msg.aggregate_id,
+            event_id: msg.event_id,
+            event_type: msg.event_type,
+            payload: msg.payload,
+            topic: msg.topic,
+            metadata: msg.metadata.unwrap_or(JsonValue::Null),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Write row data to an existing PgCopyBinaryWriter
+    /// Use this when you want to write multiple rows to the same writer
+    pub fn write_to_binary_writer(
+        &self,
+        writer: &mut PgCopyBinaryWriter,
+    ) -> Result<(), std::io::Error> {
+        // Write field count (8 fields for kafka_outbox_cdc table)
+        writer.write_row(8)?;
+
+        // Write each field in the exact order as defined in the table schema:
+        // (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at)
+        writer.write_uuid(&self.aggregate_id)?;
+        writer.write_uuid(&self.event_id)?;
+        writer.write_text(&self.event_type)?;
+        writer.write_bytea(&self.payload)?;
+        writer.write_text(&self.topic)?;
+        writer.write_jsonb(&self.metadata)?;
+        writer.write_timestamp(&self.created_at)?;
+        writer.write_timestamp(&self.updated_at)?;
+
+        Ok(())
+    }
+
+    /// Validate the row data before writing to COPY
+    pub fn validate(&self) -> Result<(), String> {
+        // Check event_type is not empty
+        if self.event_type.is_empty() {
+            return Err("event_type cannot be empty".to_string());
+        }
+
+        // Check topic is not empty
+        if self.topic.is_empty() {
+            return Err("topic cannot be empty".to_string());
+        }
+
+        // Validate JSON metadata
+        match &self.metadata {
+            JsonValue::Null => {} // NULL is fine
+            _ => {
+                let json_str = self.metadata.to_string();
+
+                // Check for null bytes that would cause issues
+                if json_str.contains('\0') {
+                    return Err("metadata contains null bytes".to_string());
+                }
+
+                // Validate UTF-8
+                if let Err(e) = std::str::from_utf8(json_str.as_bytes()) {
+                    return Err(format!("metadata contains invalid UTF-8: {}", e));
+                }
+            }
+        }
+
+        // Check text fields for problematic characters
+        if self.event_type.contains('\0') {
+            return Err("event_type contains null bytes".to_string());
+        }
+
+        if self.topic.contains('\0') {
+            return Err("topic contains null bytes".to_string());
+        }
+
+        Ok(())
+    }
+}
+
+// Note: We don't implement ToPgCopyBinary for single OutboxCopyRow
+// because it's inefficient - each row would create its own complete binary stream.
+// Instead, use write_to_binary_writer() to add rows to a shared writer.
+
+// Implementation for multiple rows (recommended approach)
+impl ToPgCopyBinary for Vec<OutboxCopyRow> {
+    /// Convert multiple rows to complete binary COPY format
+    /// This is more efficient than individual row conversion
+    fn to_pgcopy_binary(&self) -> Result<Vec<u8>, std::io::Error> {
+        let mut writer = PgCopyBinaryWriter::new();
+
+        for row in self {
+            row.write_to_binary_writer(&mut writer)?;
+        }
+
+        writer.finish()
+    }
+}
+
+// Helper methods for OutboxCopyRow
+impl OutboxCopyRow {
+    /// Create multiple rows from OutboxMessages with validation
+    pub fn from_outbox_messages_validated(
+        messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
+    ) -> Result<Vec<Self>, String> {
+        let mut rows = Vec::with_capacity(messages.len());
+
+        for (idx, msg) in messages.into_iter().enumerate() {
+            let row = Self::from_outbox_message(msg);
+
+            // Validate each row
+            if let Err(e) = row.validate() {
+                return Err(format!("Invalid row at index {}: {}", idx, e));
+            }
+
+            rows.push(row);
+        }
+
+        Ok(rows)
+    }
+
+    /// Batch create rows and convert to binary format
+    pub fn batch_to_binary(
+        messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        // Create and validate rows
+        let rows = Self::from_outbox_messages_validated(messages)
+            .map_err(|e| format!("Validation failed: {}", e))?;
+
+        // Convert to binary format
+        let binary_data = rows
+            .to_pgcopy_binary()
+            .map_err(|e| format!("Binary conversion failed: {}", e))?;
+
+        Ok(binary_data)
+    }
+
+    /// Create a test row (useful for debugging)
+    #[cfg(test)]
+    pub fn test_row() -> Self {
+        use uuid::Uuid;
+
+        Self {
+            aggregate_id: Uuid::new_v4(),
+            event_id: Uuid::new_v4(),
+            event_type: "TestEvent".to_string(),
+            payload: b"test payload".to_vec(),
+            topic: "test-topic".to_string(),
+            metadata: serde_json::json!({"test": "metadata"}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         }
     }
 }
@@ -455,8 +628,19 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         let start_time = std::time::Instant::now();
         let message_count = messages.len();
 
+        // ADAPTIVE: Use COPY for large batches, VALUES for small batches
+        let should_use_copy = message_count >= 100; // Threshold for COPY vs VALUES
+
+        if should_use_copy {
+            tracing::info!(
+                "CDCOutboxRepository: Using COPY for large batch of {} messages",
+                message_count
+            );
+            return self.add_pending_messages_copy(tx, messages).await;
+        }
+
         tracing::info!(
-            "CDCOutboxRepository: Starting optimized bulk insert of {} messages",
+            "CDCOutboxRepository: Using VALUES for small batch of {} messages",
             message_count
         );
 
@@ -502,6 +686,61 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
                 ))
             }
         }
+    }
+
+    /// Ultra-fast COPY-based bulk insert for outbox messages
+    /// This method uses PostgreSQL's COPY command for maximum performance
+    /// Should be used for large batches (100+ messages) for optimal performance
+    // Corrected bulk insert method
+    async fn add_pending_messages_copy(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        let start_time = std::time::Instant::now();
+        let message_count = messages.len();
+
+        tracing::info!(
+            "CDCOutboxRepository: Starting COPY-based bulk insert of {} messages",
+            message_count
+        );
+
+        // Convert and validate all messages to binary format in one go
+        let binary_data = OutboxCopyRow::batch_to_binary(messages)
+            .map_err(|e| anyhow::anyhow!("Failed to prepare binary data: {}", e))?;
+
+        // Start COPY operation
+        let mut copy = tx
+        .copy_in_raw(
+            "COPY kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) FROM STDIN BINARY"
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to start COPY operation: {:?}", e))?;
+
+        // Send all data in one operation
+        copy.send(&binary_data[..])
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send data to COPY: {:?}", e))?;
+
+        // Finish the COPY operation
+        copy.finish()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to finish COPY operation: {:?}", e))?;
+
+        let duration = start_time.elapsed();
+        let throughput = message_count as f64 / duration.as_secs_f64();
+        tracing::info!(
+            "CDCOutboxRepository: Successfully COPY inserted {} messages in {:?} ({:.0} msg/sec)",
+            message_count,
+            duration,
+            throughput
+        );
+
+        Ok(())
     }
 
     async fn fetch_and_lock_pending_messages(
@@ -861,10 +1100,10 @@ impl CDCConsumer {
         tokio::spawn(async move {
             let mut last_commit_time = std::time::Instant::now();
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 let mut offsets = offsets_clone.lock().await;
-                let should_commit = offsets.len() >= 100 || // Commit every 100 messages
-                                   last_commit_time.elapsed() > std::time::Duration::from_millis(500); // Or every 500ms
+                let should_commit = offsets.len() >= 5000 || // Commit every 5000 messages
+                                   last_commit_time.elapsed() > std::time::Duration::from_millis(25); // Or every 25ms
 
                 if should_commit && !offsets.is_empty() {
                     // Only commit the highest offset per (topic, partition)
@@ -956,7 +1195,7 @@ impl CDCConsumer {
         let mut consecutive_empty_polls = 0;
         let min_poll_interval = 1; // 1ms minimum
         let max_poll_interval = 25; // 25ms maximum
-        let adaptive_threshold = 10; // After 10 empty polls, increase interval
+        let adaptive_threshold = 5; // After 10 empty polls, increase interval
 
         // CRITICAL OPTIMIZATION: Batch processing buffer
         let mut message_batch = Vec::with_capacity(batch_size);

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod binary_utils; // Added unified binary utilities
 pub mod cache_service;
 pub mod cdc_debezium; // Added CDC module
 pub mod cdc_event_processor;
@@ -48,6 +49,7 @@ pub mod user_repository; // Added for OutboxPollingService
 pub mod write_batching; // Added write batching // Added CDC batching service
 
 pub use auth::*;
+pub use binary_utils::*; // Added binary utils exports
 pub use cache_service::*;
 pub use cdc_debezium::*; // Added CDC exports
 pub use config::*;

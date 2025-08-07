@@ -2530,7 +2530,7 @@ impl UltraOptimizedCDCEventProcessor {
         let consistency_manager = self.consistency_manager.clone();
 
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(15)); // Flush every 5 seconds
+            let mut interval = tokio::time::interval(Duration::from_secs(5)); // Flush every 5 seconds
             loop {
                 interval.tick().await;
 

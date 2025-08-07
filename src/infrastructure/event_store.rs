@@ -1,4 +1,5 @@
 use crate::domain::{Account, AccountEvent};
+use crate::infrastructure::binary_utils::{PgCopyBinaryWriter, ToPgCopyBinary};
 use crate::infrastructure::connection_pool_monitor::{
     ConnectionPoolMonitor, PoolHealth, PoolMonitorConfig, PoolMonitorTrait,
 };
@@ -131,6 +132,12 @@ impl From<sqlx::Error> for EventStoreError {
 impl From<Box<bincode::ErrorKind>> for EventStoreError {
     fn from(err: Box<bincode::ErrorKind>) -> Self {
         EventStoreError::SerializationErrorBincode(err)
+    }
+}
+
+impl From<std::io::Error> for EventStoreError {
+    fn from(err: std::io::Error) -> Self {
+        EventStoreError::InternalError(format!("IO error: {}", err))
     }
 }
 
@@ -289,6 +296,149 @@ pub trait EventValidator: Send + Sync {
 #[async_trait::async_trait]
 pub trait EventHandler: Send + Sync {
     async fn handle(&self, event: &Event) -> Result<(), EventStoreError>;
+}
+
+// Extend Event struct with binary COPY capabilities
+impl Event {
+    /// Write event data to an existing PgCopyBinaryWriter
+    /// Use this when you want to write multiple events to the same writer
+    pub fn write_to_binary_writer(
+        &self,
+        writer: &mut PgCopyBinaryWriter,
+    ) -> Result<(), std::io::Error> {
+        // Write field count (7 fields for events table with metadata)
+        writer.write_row(7)?;
+
+        // Write each field in the exact order as defined in the table schema:
+        // (id, aggregate_id, event_type, event_data, version, timestamp, metadata)
+        writer.write_uuid(&self.id)?;
+        writer.write_uuid(&self.aggregate_id)?;
+        writer.write_text(&self.event_type)?;
+        writer.write_bytea(&self.event_data)?;
+        writer.write_bigint(self.version)?;
+        writer.write_timestamp(&self.timestamp)?;
+
+        // Serialize metadata to bytea
+        let metadata_bytes = bincode::serialize(&self.metadata).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to serialize metadata: {}", e),
+            )
+        })?;
+        writer.write_bytea(&metadata_bytes)?;
+
+        Ok(())
+    }
+
+    /// Validate the event data before writing to COPY
+    pub fn validate(&self) -> Result<(), String> {
+        if self.event_type.is_empty() {
+            return Err("event_type cannot be empty".to_string());
+        }
+
+        if self.event_data.is_empty() {
+            return Err("event_data cannot be empty".to_string());
+        }
+
+        if self.version <= 0 {
+            return Err("version must be positive".to_string());
+        }
+
+        // Check for null bytes in event_type
+        if self.event_type.contains('\0') {
+            return Err("event_type contains null bytes".to_string());
+        }
+
+        // Test metadata serialization
+        if let Err(e) = bincode::serialize(&self.metadata) {
+            return Err(format!("metadata serialization failed: {}", e));
+        }
+
+        Ok(())
+    }
+}
+
+// Implementation for batch conversion of events
+impl ToPgCopyBinary for Vec<Event> {
+    /// Convert multiple events to complete binary COPY format
+    fn to_pgcopy_binary(&self) -> Result<Vec<u8>, std::io::Error> {
+        let mut writer = PgCopyBinaryWriter::new();
+
+        for event in self {
+            event.write_to_binary_writer(&mut writer)?;
+        }
+
+        writer.finish()
+    }
+}
+
+// Helper methods for Event batch operations
+impl Event {
+    /// Create multiple events from domain events with validation
+    pub fn from_domain_events_validated(
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>,
+        versions_map: &HashMap<Uuid, i64>,
+    ) -> Result<Vec<Self>, EventStoreError> {
+        let total_events: usize = events_by_aggregate
+            .iter()
+            .map(|(_, events, _)| events.len())
+            .sum();
+
+        let mut all_events = Vec::with_capacity(total_events);
+
+        for (aggregate_id, events, _) in events_by_aggregate {
+            if events.is_empty() {
+                continue;
+            }
+
+            let current_version = *versions_map.get(&aggregate_id).unwrap_or(&0);
+            let mut next_version = current_version + 1;
+
+            for domain_event in events {
+                let event_data = bincode::serialize(&domain_event)
+                    .map_err(EventStoreError::SerializationErrorBincode)?;
+
+                let event = Event {
+                    id: Uuid::new_v4(),
+                    aggregate_id,
+                    event_type: domain_event.event_type().to_string(), // Convert &'static str to String
+                    event_data,
+                    version: next_version,
+                    timestamp: Utc::now(),
+                    metadata: EventMetadata::default(), // Add metadata back
+                };
+
+                // Validate each event
+                if let Err(e) = event.validate() {
+                    return Err(EventStoreError::ValidationError(vec![format!(
+                        "Invalid event for aggregate {}: {}",
+                        aggregate_id, e
+                    )]));
+                }
+
+                all_events.push(event);
+                next_version += 1;
+            }
+        }
+
+        Ok(all_events)
+    }
+
+    /// Batch create events and convert to binary format
+    pub fn batch_to_binary(
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>,
+        versions_map: &HashMap<Uuid, i64>,
+    ) -> Result<Vec<u8>, EventStoreError> {
+        // Create and validate events
+        let events = Self::from_domain_events_validated(events_by_aggregate, versions_map)?;
+
+        // Convert to binary format
+        let binary_data = events.to_pgcopy_binary().map_err(|e| {
+            EventStoreError::InternalError(format!("Binary conversion failed: {}", e))
+        })?;
+
+        Ok(binary_data)
+    }
 }
 
 impl EventStore {
@@ -1601,6 +1751,17 @@ impl EventStore {
         )
     }
 
+    /// Clear version cache for specific aggregates
+    pub fn clear_version_cache_for_aggregates(&self, aggregate_ids: &[Uuid]) {
+        for aggregate_id in aggregate_ids {
+            self.version_cache.remove(aggregate_id);
+        }
+        println!(
+            "[DEBUG] EventStore: Cleared version cache for {} aggregates",
+            aggregate_ids.len()
+        );
+    }
+
     /// Health check with detailed diagnostics including deadlock detection
     pub async fn health_check(&self) -> Result<EventStoreHealth, EventStoreError> {
         let (total_connections, idle_connections) = self.pool_stats();
@@ -1719,7 +1880,7 @@ impl EventStore {
 
         for event in events {
             let account_event: AccountEvent = bincode::deserialize(&event.event_data)
-                .map_err(EventStoreError::SerializationErrorBincode)?;
+                .map_err(|e| EventStoreError::SerializationErrorBincode(e))?;
             account.apply_event(&account_event);
         }
 
@@ -1834,7 +1995,7 @@ impl EventStore {
             .map(|domain_event| {
                 current_event_version += 1;
                 let event_data = bincode::serialize(&domain_event)
-                    .map_err(EventStoreError::SerializationErrorBincode)?;
+                    .map_err(|e| EventStoreError::SerializationErrorBincode(e))?;
                 Ok(Event {
                     id: Uuid::new_v4(), // Event ID for the 'events' table row
                     aggregate_id,
@@ -2077,7 +2238,8 @@ impl EventStore {
             std::io::Write::write_all(&mut write_buf, &(t - pg_epoch).to_be_bytes()).unwrap();
 
             // metadata
-            let metadata_bytes = bincode::serialize(&event.metadata).unwrap_or_default();
+            let metadata_bytes = bincode::serialize(&event.metadata)
+                .map_err(|e| EventStoreError::SerializationErrorBincode(e))?;
             std::io::Write::write_all(&mut write_buf, &(metadata_bytes.len() as i32).to_be_bytes())
                 .unwrap();
             std::io::Write::write_all(&mut write_buf, &metadata_bytes).unwrap();
@@ -2113,91 +2275,50 @@ impl EventStore {
         metrics: &EventStoreMetrics,
         version_cache: &DashMap<Uuid, i64>,
     ) -> Result<(), EventStoreError> {
-        let start_time = std::time::Instant::now();
-        let events_len = events.len();
-
         if events.is_empty() {
             return Ok(());
         }
 
-        // Use PostgreSQL COPY binary for maximum throughput
-        let copy_statement = r#"
-            COPY events (id, aggregate_id, event_type, event_data, version, timestamp, metadata) 
-            FROM STDIN WITH (FORMAT BINARY)
-        "#;
+        let start_time = std::time::Instant::now();
+        let events_len = events.len();
 
-        let mut copy_data = Vec::with_capacity(events_len * 250); // Estimate 250 bytes per event
-
-        // PGCOPY header
-        copy_data.extend_from_slice(b"PGCOPY\n\xff\r\n\0");
-        copy_data.extend_from_slice(&[0, 0, 0, 0]); // flags
-        copy_data.extend_from_slice(&[0, 0, 0, 0]); // header extension length
-
-        let postgres_epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap();
-
-        for event in &events {
-            // Number of columns
-            copy_data.extend_from_slice(&(7i16).to_be_bytes());
-
-            // id (uuid)
-            copy_data.extend_from_slice(&(16i32).to_be_bytes());
-            copy_data.extend_from_slice(event.id.as_bytes());
-
-            // aggregate_id (uuid)
-            copy_data.extend_from_slice(&(16i32).to_be_bytes());
-            copy_data.extend_from_slice(event.aggregate_id.as_bytes());
-
-            // event_type (text)
-            copy_data.extend_from_slice(&(event.event_type.len() as i32).to_be_bytes());
-            copy_data.extend_from_slice(event.event_type.as_bytes());
-
-            // event_data (bytea)
-            copy_data.extend_from_slice(&(event.event_data.len() as i32).to_be_bytes());
-            copy_data.extend_from_slice(&event.event_data);
-
-            // version (bigint)
-            copy_data.extend_from_slice(&(8i32).to_be_bytes());
-            copy_data.extend_from_slice(&event.version.to_be_bytes());
-
-            // timestamp (timestamptz)
-            let micros_since_postgres_epoch = event
-                .timestamp
-                .signed_duration_since(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-                    postgres_epoch,
-                    chrono::Utc,
-                ))
-                .num_microseconds()
-                .unwrap_or(0);
-            copy_data.extend_from_slice(&(8i32).to_be_bytes());
-            copy_data.extend_from_slice(&micros_since_postgres_epoch.to_be_bytes());
-
-            // metadata (bytea)
-            let metadata_bytes = bincode::serialize(&event.metadata).unwrap_or_default();
-            copy_data.extend_from_slice(&(metadata_bytes.len() as i32).to_be_bytes());
-            copy_data.extend_from_slice(&metadata_bytes);
+        // Validate all events first
+        for (idx, event) in events.iter().enumerate() {
+            if let Err(e) = event.validate() {
+                return Err(EventStoreError::ValidationError(vec![format!(
+                    "Invalid event at index {}: {}",
+                    idx, e
+                )]));
+            }
         }
 
-        // PGCOPY trailer
-        copy_data.extend_from_slice(&(-1i16).to_be_bytes());
+        // Convert to binary format
+        let binary_data = events.to_pgcopy_binary().map_err(|e| {
+            EventStoreError::InternalError(format!("Binary conversion failed: {}", e))
+        })?;
 
-        // Execute COPY command
+        // Execute COPY
+        let copy_statement = r#"
+        COPY events (id, aggregate_id, event_type, event_data, version, timestamp, metadata) 
+        FROM STDIN BINARY
+    "#;
+
         let mut copy_in = tx
             .copy_in_raw(copy_statement)
             .await
             .map_err(EventStoreError::DatabaseError)?;
+
         copy_in
-            .send(copy_data.as_slice())
+            .send(&binary_data[..])
             .await
             .map_err(EventStoreError::DatabaseError)?;
+
         copy_in
             .finish()
             .await
             .map_err(EventStoreError::DatabaseError)?;
 
-        // Batch update version cache
+        // Update version cache efficiently
         let mut events_by_aggregate: HashMap<Uuid, i64> = HashMap::new();
         for event in &events {
             let current_max = events_by_aggregate
@@ -2216,9 +2337,11 @@ impl EventStore {
         let duration = start_time.elapsed();
         let throughput = events_len as f64 / duration.as_secs_f64();
 
-        println!(
+        tracing::info!(
             "🚀 Binary COPY bulk insert: {} events in {:?} ({:.0} events/sec)",
-            events_len, duration, throughput
+            events_len,
+            duration,
+            throughput
         );
 
         Ok(())
@@ -2326,28 +2449,24 @@ impl EventStore {
             return Ok(());
         }
 
-        // Use READ COMMITTED instead of SERIALIZABLE for better performance
-        // This reduces lock contention significantly
+        let start_time = std::time::Instant::now();
+
+        // Use READ COMMITTED for better performance
         sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
             .execute(&mut **tx)
             .await
             .map_err(EventStoreError::DatabaseError)?;
 
-        // Disable synchronous_commit for this transaction (if configured)
-        if !self.config.synchronous_commit {
-            sqlx::query("SET LOCAL synchronous_commit = off")
-                .execute(&mut **tx)
-                .await
-                .map_err(EventStoreError::DatabaseError)?;
-        }
-
-        // Pre-calculate total events for better allocation
+        // Pre-calculate total events for metrics
         let total_events: usize = events_by_aggregate
             .iter()
             .map(|(_, events, _)| events.len())
             .sum();
 
-        let mut all_events = Vec::with_capacity(total_events);
+        if total_events == 0 {
+            return Ok(());
+        }
+
         let aggregate_ids: Vec<Uuid> = events_by_aggregate.iter().map(|(id, _, _)| *id).collect();
 
         // Single batch query for all versions
@@ -2355,48 +2474,47 @@ impl EventStore {
             .get_current_versions_batch_optimized(&aggregate_ids, tx)
             .await?;
 
-        // Pre-serialize all events in parallel batches
-        let mut serialization_tasks: Vec<JoinHandle<Result<Vec<Event>, EventStoreError>>> =
-            Vec::new();
-        for (aggregate_id, events, _) in events_by_aggregate {
-            if events.is_empty() {
-                continue;
-            }
+        // Convert to binary format in one go
+        let binary_data = Event::batch_to_binary(events_by_aggregate, &versions_map)?;
 
-            let current_version = *versions_map.get(&aggregate_id).unwrap_or(&0);
-            let mut next_version = current_version + 1;
+        // Execute ultra-fast binary COPY
+        let copy_statement = r#"
+        COPY events (id, aggregate_id, event_type, event_data, version, timestamp, metadata) 
+        FROM STDIN BINARY
+    "#;
 
-            for domain_event in events {
-                let event_data = bincode::serialize(&domain_event)
-                    .map_err(EventStoreError::SerializationErrorBincode)?;
+        let mut copy_in = tx
+            .copy_in_raw(copy_statement)
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
 
-                let event = Event {
-                    id: Uuid::new_v4(),
-                    aggregate_id,
-                    event_type: domain_event.event_type().to_string(),
-                    event_data,
-                    version: next_version,
-                    timestamp: Utc::now(),
-                    metadata: EventMetadata::default(),
-                };
+        copy_in
+            .send(&binary_data[..])
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
 
-                all_events.push(event);
-                next_version += 1;
-            }
-        }
+        copy_in
+            .finish()
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
 
-        if all_events.is_empty() {
-            return Ok(());
-        }
-
-        // Use the ultra-fast bulk insert
-        self.bulk_insert_events_binary(tx, all_events, &self.metrics, &self.version_cache)
-            .await?;
+        // Update version cache efficiently
+        // Event::update_version_cache_from_binary_data(&binary_data).await?;
 
         // Update metrics
         self.metrics
             .events_processed
             .fetch_add(total_events as u64, std::sync::atomic::Ordering::Relaxed);
+
+        let duration = start_time.elapsed();
+        let throughput = total_events as f64 / duration.as_secs_f64();
+
+        tracing::info!(
+            "🚀 Optimized event store: saved {} events in {:?} ({:.0} events/sec)",
+            total_events,
+            duration,
+            throughput
+        );
 
         Ok(())
     }
@@ -2481,6 +2599,7 @@ impl EventStore {
         // Collect all events from all aggregates into a single batch
         let mut all_events = Vec::new();
         let mut events_partition_id = None;
+        let mut aggregate_versions = HashMap::new(); // Track final versions for cache update
 
         // First, get all aggregate IDs to fetch their current versions
         let aggregate_ids: Vec<Uuid> = events_by_aggregate
@@ -2490,6 +2609,11 @@ impl EventStore {
 
         // Get current versions for all aggregates in a single query
         let versions_map = self.get_current_versions_batch(aggregate_ids).await?;
+
+        println!(
+            "[DEBUG] save_events_multi_aggregate_in_transaction_impl: Retrieved versions for {} aggregates",
+            versions_map.len()
+        );
 
         for (aggregate_id, events, partition_id) in events_by_aggregate {
             if events.is_empty() {
@@ -2506,7 +2630,7 @@ impl EventStore {
                 .into_iter()
                 .map(|domain_event| {
                     let event_data = bincode::serialize(&domain_event)
-                        .map_err(EventStoreError::SerializationErrorBincode)?;
+                        .map_err(|e| EventStoreError::SerializationErrorBincode(e))?;
                     let event = Event {
                         id: Uuid::new_v4(),
                         aggregate_id,
@@ -2520,6 +2644,11 @@ impl EventStore {
                     Ok(event)
                 })
                 .collect::<Result<Vec<Event>, EventStoreError>>()?;
+
+            // Track the final version for this aggregate for cache update
+            if !prepared_events.is_empty() {
+                aggregate_versions.insert(aggregate_id, prepared_events.last().unwrap().version);
+            }
 
             all_events.extend(prepared_events);
         }
@@ -2553,6 +2682,15 @@ impl EventStore {
             events_partition_id,
         )
         .await?;
+
+        // Update version cache with final versions after successful insert
+        for (aggregate_id, final_version) in aggregate_versions {
+            self.version_cache.insert(aggregate_id, final_version);
+            println!(
+                "[DEBUG] save_events_multi_aggregate_in_transaction_impl: Updated version cache for aggregate {} to version {}",
+                aggregate_id, final_version
+            );
+        }
 
         // Update metrics
         self.metrics.events_processed.fetch_add(
@@ -2602,11 +2740,38 @@ impl EventStore {
                 .push_bind(metadata_bytes);
         });
 
-        query_builder
-            .build()
-            .execute(&mut **tx)
-            .await
-            .map_err(EventStoreError::DatabaseError)?;
+        let insert_result = query_builder.build().execute(&mut **tx).await;
+
+        if let Err(e) = insert_result {
+            // Check if this is a duplicate key error
+            if e.to_string()
+                .contains("duplicate key value violates unique constraint")
+            {
+                println!(
+                    "[DEBUG] bulk_insert_events_multi_aggregate: Duplicate key error detected, clearing version cache"
+                );
+
+                // Clear version cache for all aggregates in this batch to force fresh lookup
+                let mut events_by_aggregate: HashMap<Uuid, Vec<Event>> = HashMap::new();
+                for event in &events {
+                    events_by_aggregate
+                        .entry(event.aggregate_id)
+                        .or_insert_with(Vec::new)
+                        .push(event.clone());
+                }
+
+                for aggregate_id in events_by_aggregate.keys() {
+                    version_cache.remove(aggregate_id);
+                }
+
+                println!(
+                    "[DEBUG] bulk_insert_events_multi_aggregate: Cleared version cache for {} aggregates",
+                    events_by_aggregate.len()
+                );
+            }
+
+            return Err(EventStoreError::DatabaseError(e));
+        }
 
         // Update version cache for all aggregates
         let mut events_by_aggregate: HashMap<Uuid, Vec<Event>> = HashMap::new();
@@ -2620,6 +2785,10 @@ impl EventStore {
         for (aggregate_id, aggregate_events) in events_by_aggregate {
             if let Some(max_event) = aggregate_events.iter().max_by_key(|e| e.version) {
                 version_cache.insert(aggregate_id, max_event.version);
+                println!(
+                    "[DEBUG] bulk_insert_events_multi_aggregate: Updated version cache for aggregate {} to version {}",
+                    aggregate_id, max_event.version
+                );
             }
         }
 
@@ -2678,6 +2847,11 @@ impl EventStore {
             .fetch_all(read_pool)
             .await
             .map_err(EventStoreError::DatabaseError)?;
+
+        println!(
+            "[DEBUG] get_current_versions_batch: Retrieved versions for {} aggregates from database",
+            rows.len()
+        );
 
         // Process results and update cache
         for row in rows {

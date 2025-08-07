@@ -262,6 +262,7 @@ dependencies = [
  "banking-es",
  "base64 0.21.7",
  "bincode",
+ "byteorder",
  "chrono",
  "crossbeam",
  "dashmap",

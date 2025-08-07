@@ -50,6 +50,15 @@ pub trait OutboxRepositoryTrait: Send + Sync {
         messages: Vec<OutboxMessage>,
     ) -> Result<()>;
 
+    /// Ultra-fast COPY-based bulk insert for outbox messages.
+    /// This method uses PostgreSQL's COPY command for maximum performance.
+    /// Should be used for large batches (100+ messages) for optimal performance.
+    async fn add_pending_messages_copy(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        messages: Vec<OutboxMessage>,
+    ) -> Result<()>;
+
     /// Fetches a batch of pending messages for the poller to process.
     /// This method should ideally implement a way to lock the fetched rows
     /// (e.g., SELECT ... FOR UPDATE SKIP LOCKED) or update their status to 'PROCESSING'
@@ -148,6 +157,20 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
             .map_err(|e| anyhow::anyhow!("Failed to insert message into kafka_outbox: {}", e))?;
         }
         Ok(())
+    }
+
+    async fn add_pending_messages_copy(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        messages: Vec<OutboxMessage>,
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        // For PostgresOutboxRepository, fall back to regular add_pending_messages
+        // since it doesn't support COPY operations
+        self.add_pending_messages(tx, messages).await
     }
 
     async fn fetch_and_lock_pending_messages(

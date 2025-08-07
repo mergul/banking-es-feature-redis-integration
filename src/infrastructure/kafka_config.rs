@@ -44,10 +44,10 @@ impl Default for KafkaConfig {
             topic_prefix: "banking-es".to_string(),
             auto_offset_reset: "latest".to_string(),
             enable_auto_commit: true,
-            session_timeout_ms: 30000,
-            heartbeat_interval_ms: 10000,
-            max_poll_interval_ms: 600000,
-            max_poll_records: 500,
+            session_timeout_ms: 10000,   // 10 saniye (Kafka minimum)
+            heartbeat_interval_ms: 1000, // 1 saniye (session_timeout/10)
+            max_poll_interval_ms: 10000, // 10 saniye
+            max_poll_records: 5000,
             retry_backoff_ms: 100,
             retry_count: 3,
             request_timeout_ms: 30000,
@@ -62,8 +62,10 @@ impl Default for KafkaConfig {
             ssl_key_password: None,
             producer_acks: 1,
             producer_retries: 3,
-            consumer_max_poll_interval_ms: 600000,
-            consumer_session_timeout_ms: 30000,
+            consumer_max_poll_interval_ms: 10000,
+            consumer_session_timeout_ms: 10000,   // 10 saniye
+            consumer_heartbeat_interval_ms: 1000, // 1 saniye
+            consumer_max_poll_records: 5000,
             cache_invalidation_topic: "banking-es-cache-invalidation".to_string(),
             event_topic: "banking-es-events".to_string(),
         }
@@ -138,12 +140,12 @@ impl Default for KafkaConsumerConfig {
             bootstrap_servers: "localhost:9092".to_string(),
             group_id: "banking-es-group".to_string(),
             client_id: "banking-es-consumer".to_string(),
-            auto_offset_reset: "earliest".to_string(),
+            auto_offset_reset: "latest".to_string(),
             enable_auto_commit: true,
-            session_timeout_ms: 30000,
-            heartbeat_interval_ms: 10000,
-            max_poll_interval_ms: 300000,
-            max_poll_records: 500,
+            session_timeout_ms: 10000,   // 10 saniye (Kafka minimum)
+            heartbeat_interval_ms: 1000, // 1 saniye (session_timeout/10)
+            max_poll_interval_ms: 10000, // 10 saniye
+            max_poll_records: 5000,
             security_protocol: "PLAINTEXT".to_string(),
             sasl_mechanism: None,
             sasl_username: None,

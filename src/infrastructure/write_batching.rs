@@ -116,12 +116,11 @@ impl PartitionedBatching {
         // Process the entire batch at once
         let batch_start = Instant::now();
 
-        // Execute the batch directly using WriteBatchingService method
-        let results = WriteBatchingService::execute_batch(
+        // Execute the batch directly using WriteBatchingService unified method
+        let results = WriteBatchingService::execute_batch_unified(
             &batch,
             &create_processor.event_store,
             &create_processor.write_pool,
-            &create_processor.outbox_batcher,
             &create_processor.config,
             batch.partition_id,
         )
@@ -733,12 +732,11 @@ impl PartitionedBatching {
             let future = async move {
                 let batch_start = Instant::now();
 
-                // Execute the dedicated batch
-                let results = WriteBatchingService::execute_batch(
+                // Execute the dedicated batch with unified transaction
+                let results = WriteBatchingService::execute_batch_unified(
                     &dedicated_batch,
                     &processor.event_store,
                     &processor.write_pool,
-                    &processor.outbox_batcher,
                     &processor.config,
                     dedicated_batch.partition_id,
                 )
@@ -857,12 +855,11 @@ impl PartitionedBatching {
                         dedicated_batch.operations.len()
                     );
 
-                    // Execute the dedicated batch
-                    let batch_results = WriteBatchingService::execute_batch(
+                    // Execute the dedicated batch with unified transaction
+                    let batch_results = WriteBatchingService::execute_batch_unified(
                         &dedicated_batch,
                         &processor.event_store,
                         &processor.write_pool,
-                        &processor.outbox_batcher,
                         &processor.config,
                         dedicated_batch.partition_id,
                     )
@@ -2270,12 +2267,11 @@ impl WriteBatchingService {
                 batch_with_locked_ops.operations.len()
             );
 
-            // Execute the batch
-            let batch_results = Self::execute_batch(
+            // Execute the batch with unified transaction
+            let batch_results = Self::execute_batch_unified(
                 &batch_with_locked_ops,
                 event_store,
                 write_pool,
-                outbox_batcher,
                 config,
                 batch_with_locked_ops.partition_id,
             )
@@ -2769,13 +2765,12 @@ impl WriteBatchingService {
             self.partition_id
         );
 
-        // Execute the batch directly
+        // Execute the batch directly with unified transaction
         let batch_start = Instant::now();
-        let batch_results = Self::execute_batch(
+        let batch_results = Self::execute_batch_unified(
             &dedicated_batch,
             &self.event_store,
             &self.write_pool,
-            &self.outbox_batcher,
             &self.config,
             dedicated_batch.partition_id,
         )
@@ -2885,13 +2880,12 @@ impl WriteBatchingService {
             operation_ids.push(operation_id);
         }
 
-        // Execute the batch
+        // Execute the batch with unified transaction
         let batch_start = Instant::now();
-        let batch_results = Self::execute_batch(
+        let batch_results = Self::execute_batch_unified(
             &dedicated_batch,
             &self.event_store,
             &self.write_pool,
-            &self.outbox_batcher,
             &self.config,
             dedicated_batch.partition_id,
         )
@@ -2946,6 +2940,7 @@ impl WriteBatchingService {
         })?;
 
         // Use the CDC repository's bulk insert method directly
+        // The repository will automatically choose COPY for large batches
         let cdc_repo = crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(Arc::new(
             crate::infrastructure::PartitionedPools {
                 write_pool: (*write_pool).clone(),
@@ -2955,7 +2950,7 @@ impl WriteBatchingService {
         ));
 
         if let Err(e) = cdc_repo
-            .add_pending_messages(&mut transaction, messages)
+            .add_pending_messages_copy(&mut transaction, messages)
             .await
         {
             error!("Failed to bulk insert outbox messages directly: {}", e);
@@ -3009,11 +3004,10 @@ impl WriteBatchingService {
         // Bulk modu başlat
         self.start_bulk_mode().await?;
 
-        let results = Self::execute_batch(
+        let results = Self::execute_batch_unified(
             batch,
             &self.event_store,
             &self.write_pool,
-            &self.outbox_batcher,
             &self.config,
             batch.partition_id,
         )
@@ -3040,8 +3034,303 @@ impl WriteBatchingService {
 
         Ok(operation_ids)
     }
-}
 
+    /// Execute batch with unified transaction - both events and outbox inserts in single transaction
+    /// This provides better atomicity and performance compared to separate transactions
+    // This helper function now contains the core logic that needs to be async
+    async fn execute_batch_unified_inner(
+        batch: &WriteBatch,
+        event_store: &Arc<dyn EventStoreTrait>,
+        write_pool: &Arc<PgPool>,
+        config: &WriteBatchingConfig,
+        partition_id: Option<usize>,
+        retry_count: usize,
+    ) -> Result<Vec<(Uuid, WriteOperationResult)>, String> {
+        // Start unified transaction for both events and outbox
+        let mut transaction = write_pool
+            .begin()
+            .await
+            .map_err(|e| format!("Failed to begin unified transaction: {}", e))?;
+
+        let batch_start = Instant::now();
+
+        // Collect all events and outbox messages from all operations
+        let mut all_events = Vec::new();
+        let mut all_outbox_messages = Vec::new();
+        let mut operation_results = Vec::new();
+
+        for (operation_id, operation) in &batch.operations {
+            let op_start = Instant::now();
+            let (events, outbox_messages, result_id) = match operation {
+                WriteOperation::CreateAccount {
+                    account_id,
+                    owner_name,
+                    initial_balance,
+                } => Self::prepare_create_account_operation(
+                    *account_id,
+                    owner_name,
+                    *initial_balance,
+                ),
+                WriteOperation::DepositMoney { account_id, amount } => {
+                    Self::prepare_deposit_money_operation(*account_id, *amount)
+                }
+                WriteOperation::WithdrawMoney { account_id, amount } => {
+                    Self::prepare_withdraw_money_operation(*account_id, *amount)
+                }
+            };
+
+            all_events.extend(events);
+            all_outbox_messages.extend(outbox_messages);
+
+            operation_results.push((*operation_id, result_id, op_start.elapsed()));
+        }
+
+        info!(
+            "[DEBUG] execute_batch_unified: Prepared {} events and {} outbox messages",
+            all_events.len(),
+            all_outbox_messages.len()
+        );
+
+        // Group events by aggregate_id for efficient batch insertion
+        let mut events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)> = Vec::new();
+
+        // Group events by aggregate_id
+        for event in all_events {
+            let aggregate_id = match &event {
+                AccountEvent::AccountCreated { account_id, .. } => *account_id,
+                AccountEvent::MoneyDeposited { account_id, .. } => *account_id,
+                AccountEvent::MoneyWithdrawn { account_id, .. } => *account_id,
+                AccountEvent::AccountClosed { account_id, .. } => *account_id,
+            };
+
+            // Find or create entry for this aggregate
+            let entry = events_by_aggregate
+                .iter_mut()
+                .find(|(id, _, _)| *id == aggregate_id);
+
+            match entry {
+                Some((_, events, _)) => {
+                    // For subsequent events on the same aggregate, just add the event
+                    events.push(event);
+                }
+                None => {
+                    // For new aggregates, version will be determined by event_store
+                    events_by_aggregate.push((aggregate_id, vec![event], partition_id));
+                }
+            }
+        }
+
+        println!("[DEBUG] execute_batch_unified: About to execute parallel operations with {} aggregates and {} outbox messages", events_by_aggregate.len(), all_outbox_messages.len());
+
+        let final_result: Result<(), String> = if all_outbox_messages.is_empty() {
+            // If no outbox messages, only execute events operation
+            event_store
+                .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            // Execute events and outbox operations sequentially within the same transaction
+            let events_res = event_store
+                .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
+                .await
+                .map_err(|e| e.to_string());
+
+            let outbox_res = if events_res.is_ok() {
+                let cdc_repo = crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
+                    Arc::new(crate::infrastructure::PartitionedPools {
+                        write_pool: (**write_pool).clone(),
+                        read_pool: (**write_pool).clone(),
+                        config: crate::infrastructure::PoolPartitioningConfig::default(),
+                    }),
+                );
+                cdc_repo
+                    .add_pending_messages_copy(&mut transaction, all_outbox_messages.clone())
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                Err("Events operation failed, skipping outbox".to_string())
+            };
+
+            // Handle results - fail if either fails
+            match (events_res, outbox_res) {
+                (Ok(_), Ok(_)) => Ok(()),
+                (Err(e), _) => Err(e),
+                (_, Err(e)) => Err(e),
+            }
+        };
+
+        // Commit or rollback based on final_result
+        if final_result.is_ok() {
+            transaction.commit().await.map_err(|e| e.to_string())?;
+            println!("[DEBUG] execute_batch_unified: Successfully completed operations and committed transaction");
+            info!(
+            "[DEBUG] execute_batch_unified: Completed successfully - {} operations, {} outbox messages in unified transaction",
+            batch.operations.len(),
+            all_outbox_messages.len()
+        );
+        } else {
+            transaction.rollback().await.map_err(|e| e.to_string())?;
+            println!("[DEBUG] execute_batch_unified: Operations failed, rolled back transaction");
+        }
+
+        // Create success/failure results based on final_result
+        let final_op_results = operation_results
+            .into_iter()
+            .map(|(operation_id, result_id, op_duration)| {
+                if final_result.is_ok() {
+                    (
+                        operation_id,
+                        WriteOperationResult {
+                            operation_id,
+                            success: true,
+                            result: Some(result_id),
+                            error: None,
+                            duration: op_duration,
+                        },
+                    )
+                } else {
+                    (
+                        operation_id,
+                        WriteOperationResult {
+                            operation_id,
+                            success: false,
+                            result: None,
+                            error: final_result.as_ref().err().cloned(),
+                            duration: op_duration,
+                        },
+                    )
+                }
+            })
+            .collect();
+
+        Ok(final_op_results)
+    }
+
+    pub async fn execute_batch_unified(
+        batch: &WriteBatch,
+        event_store: &Arc<dyn EventStoreTrait>,
+        write_pool: &Arc<PgPool>,
+        config: &WriteBatchingConfig,
+        partition_id: Option<usize>,
+    ) -> Vec<(Uuid, WriteOperationResult)> {
+        let mut results = Vec::new();
+        let mut retry_count = 0;
+
+        // BULK MODE: Batch size is large, start bulk mode
+        let should_use_bulk_mode = batch.operations.len() >= 3;
+        let mut bulk_config_manager = if should_use_bulk_mode {
+            Some(BulkInsertConfigManager::new())
+        } else {
+            None
+        };
+
+        // BULK MODE: Start bulk mode if it will be used
+        if let Some(ref mut config_manager) = bulk_config_manager {
+            if let Err(e) = config_manager
+                .start_bulk_mode_event_store(event_store)
+                .await
+            {
+                error!("Failed to start bulk mode: {}", e);
+                // Continue in normal mode even if bulk mode fails to start
+            } else {
+                info!(
+                    "🚀 Bulk mode activated for unified batch with {} operations",
+                    batch.operations.len()
+                );
+            }
+        }
+
+        loop {
+            match Self::execute_batch_unified_inner(
+                batch,
+                event_store,
+                write_pool,
+                config,
+                partition_id,
+                retry_count,
+            )
+            .await
+            {
+                Ok(op_results) => {
+                    // Success path
+                    results = op_results;
+                    println!(
+                        "[DEBUG] execute_batch_unified: Finished unified batch with {} results",
+                        results.len()
+                    );
+
+                    // BULK MODE: End bulk mode if the operation was successful
+                    if let Some(ref mut config_manager) = bulk_config_manager {
+                        if let Err(e) = config_manager.end_bulk_mode_event_store(event_store).await
+                        {
+                            error!("Failed to end bulk mode: {}", e);
+                        } else {
+                            info!("🔄 Bulk mode deactivated after successful unified batch processing");
+                        }
+                    }
+                    return results;
+                }
+                Err(error_msg) => {
+                    let is_serialization_conflict = error_msg
+                        .contains("could not serialize access due to read/write dependencies");
+                    let is_duplicate_key_error =
+                        error_msg.contains("duplicate key value violates unique constraint");
+
+                    if (is_serialization_conflict || is_duplicate_key_error)
+                        && retry_count < config.max_retries as usize - 1
+                    {
+                        retry_count += 1;
+                        let backoff = Duration::from_millis(100 * retry_count as u64);
+                        info!(
+                            "[DEBUG] {} detected, retrying in {:?} (attempt {}/{})",
+                            if is_duplicate_key_error {
+                                "Duplicate key error"
+                            } else {
+                                "Serialization conflict"
+                            },
+                            backoff,
+                            retry_count,
+                            config.max_retries
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue; // Continue the loop for a retry
+                    } else {
+                        // All retries failed or it's a non-retriable error
+                        error!("Failed after all retries: {}", error_msg);
+
+                        // BULK MODE: If all retries failed, end bulk mode
+                        if let Some(ref mut config_manager) = bulk_config_manager {
+                            if let Err(e) =
+                                config_manager.end_bulk_mode_event_store(event_store).await
+                            {
+                                error!("Failed to end bulk mode after retry failures: {}", e);
+                            }
+                        }
+
+                        println!(
+                        "[DEBUG] execute_batch_unified: All retries failed, returning {} failure results",
+                        batch.operations.len()
+                    );
+
+                        for (operation_id, _) in &batch.operations {
+                            results.push((
+                                *operation_id,
+                                WriteOperationResult {
+                                    operation_id: *operation_id,
+                                    success: false,
+                                    result: None,
+                                    error: Some(error_msg.clone()),
+                                    duration: Duration::ZERO,
+                                },
+                            ));
+                        }
+                        return results;
+                    }
+                }
+            }
+        }
+    }
+}
 /// Helper to check if an error is a version conflict
 fn is_version_conflict(e: &crate::infrastructure::event_store::EventStoreError) -> bool {
     let msg = format!("{}", e);
