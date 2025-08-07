@@ -2498,8 +2498,21 @@ impl EventStore {
             .await
             .map_err(EventStoreError::DatabaseError)?;
 
-        // Update version cache efficiently
-        // Event::update_version_cache_from_binary_data(&binary_data).await?;
+        // CRITICAL FIX: Update version cache with the new highest versions
+        let mut max_versions = HashMap::new();
+        for (aggregate_id, events, _) in events_by_aggregate {
+            if !events.is_empty() {
+                // Get the starting version from the map we already fetched
+                let start_version = versions_map.get(&aggregate_id).unwrap_or(&0);
+                // The new max version is the starting version plus the number of new events
+                let new_max_version = start_version + events.len() as i64;
+                max_versions.insert(aggregate_id, new_max_version);
+            }
+        }
+
+        for (aggregate_id, max_version) in max_versions {
+            self.version_cache.insert(aggregate_id, max_version);
+        }
 
         // Update metrics
         self.metrics
