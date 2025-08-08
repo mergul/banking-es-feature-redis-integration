@@ -584,12 +584,9 @@ impl ProjectionStore {
         }
 
         // STEP 3: Use COPY to bulk insert into temp table
-        let copy_result = sqlx::query(
-            "COPY temp_account_projections FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')",
-        )
-        .bind(&csv_data[..])
-        .execute(&mut **tx)
-        .await;
+        let mut copy_in = tx.copy_in_raw("COPY temp_account_projections FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')").await?;
+        copy_in.send(&csv_data).await?;
+        let copy_result = copy_in.finish().await;
 
         match copy_result {
             Ok(result) => {
@@ -690,12 +687,9 @@ impl ProjectionStore {
         }
 
         // STEP 3: Use COPY to bulk insert into temp table
-        let copy_result = sqlx::query(
-            "COPY temp_transaction_projections FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')",
-        )
-        .bind(&csv_data[..])
-        .execute(&mut **tx)
-        .await;
+        let mut copy_in = tx.copy_in_raw("COPY temp_transaction_projections FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')").await?;
+        copy_in.send(&csv_data).await?;
+        let copy_result = copy_in.finish().await;
 
         match copy_result {
             Ok(result) => {

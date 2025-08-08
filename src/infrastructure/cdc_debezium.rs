@@ -723,7 +723,8 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         .map_err(|e| anyhow::anyhow!("Failed to start BINARY COPY operation: {:?}", e))?;
 
         // Send all data in one operation
-        copy.send(&binary_data)
+    let row = writer.finish();
+    copy.send(row.as_slice())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send data to BINARY COPY: {:?}", e))?;
 
