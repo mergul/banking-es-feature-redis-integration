@@ -1021,91 +1021,6 @@ impl CDCConsumer {
         ))
     }
 
-    /// CRITICAL OPTIMIZATION: Enhanced message batch processing with COPY optimization
-    async fn process_message_batch_with_copy(
-        messages: &[crate::infrastructure::kafka_abstraction::KafkaMessage],
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-    ) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let start_time = std::time::Instant::now();
-        let batch_size = messages.len();
-
-        // Check if COPY optimization is enabled
-        let copy_config = CopyOptimizationConfig::from_env();
-        let use_copy_optimization = copy_config.enable_copy_optimization
-            && batch_size >= copy_config.projection_copy_threshold;
-
-        tracing::info!(
-            "CDCConsumer: process_message_batch_with_copy starting batch of {} messages (COPY optimization: {})",
-            batch_size,
-            use_copy_optimization
-        );
-
-        // Deserialize all messages to CDC events
-        let mut cdc_events = Vec::with_capacity(batch_size);
-        for message in messages {
-            match serde_json::from_slice::<serde_json::Value>(&message.payload) {
-                Ok(cdc_event) => {
-                    cdc_events.push(cdc_event);
-                }
-                Err(e) => {
-                    tracing::error!("CDCConsumer: Failed to deserialize CDC event: {:?}", e);
-                    continue;
-                }
-            }
-        }
-
-        if cdc_events.is_empty() {
-            return Ok(());
-        }
-
-        // Use COPY-optimized processing for large batches
-        let result = if use_copy_optimization {
-            tracing::info!(
-                "CDCConsumer: Using COPY-optimized batch processing for {} events",
-                cdc_events.len()
-            );
-            processor
-                .process_cdc_events_batch_with_copy(cdc_events)
-                .await
-        } else {
-            tracing::info!(
-                "CDCConsumer: Using standard batch processing for {} events",
-                cdc_events.len()
-            );
-            processor.process_cdc_events_batch(cdc_events).await
-        };
-
-        let duration = start_time.elapsed();
-        match result {
-            Ok(_) => {
-                tracing::info!(
-                    "CDCConsumer: Batch processing completed successfully - {} messages in {:?} (COPY: {})",
-                    batch_size,
-                    duration,
-                    use_copy_optimization
-                );
-                Ok(())
-            }
-            Err(e) => {
-                tracing::error!(
-                    "CDCConsumer: Batch processing failed - {} messages in {:?} (COPY: {}): {:?}",
-                    batch_size,
-                    duration,
-                    use_copy_optimization,
-                    e
-                );
-                Err(anyhow::anyhow!(
-                    "Batch processing failed for {} messages: {}",
-                    batch_size,
-                    e
-                ))
-            }
-        }
-    }
 
     /// Enhanced start_consuming method with COPY optimization integration
     pub async fn start_consuming_with_cancellation_token_copy_optimized(
@@ -1277,7 +1192,7 @@ impl CDCConsumer {
                             "CDCConsumer (COPY-optimized): Processing final batch of {} messages before shutdown",
                             message_batch.len()
                         );
-                        if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                        if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
                             tracing::error!("CDCConsumer (COPY-optimized): Failed to process final batch: {:?}", e);
                         }
                     }
@@ -1343,7 +1258,7 @@ impl CDCConsumer {
                                 );
 
                                 let processing_start = std::time::Instant::now();
-                                if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
                                     tracing::error!(
                                         "CDCConsumer (COPY-optimized): Failed to process {} batch: {:?}",
                                         batch_type, e
@@ -1380,7 +1295,7 @@ impl CDCConsumer {
                                     "CDCConsumer (COPY-optimized): Processing final batch of {} messages",
                                     message_batch.len()
                                 );
-                                if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
                                     tracing::error!("CDCConsumer (COPY-optimized): Failed to process final batch: {:?}", e);
                                 }
                             }
@@ -1404,7 +1319,7 @@ impl CDCConsumer {
                                     message_batch.len()
                                 );
 
-                                if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
                                     tracing::error!("CDCConsumer (COPY-optimized): Failed to process timeout batch: {:?}", e);
                                 }
 
@@ -1945,15 +1860,20 @@ impl CDCConsumer {
 
         let start_time = std::time::Instant::now();
         let batch_size = messages.len();
+
+        // Check if COPY optimization is enabled
+        let copy_config = CopyOptimizationConfig::from_env();
+        let use_copy_optimization = copy_config.enable_copy_optimization
+            && batch_size >= copy_config.projection_copy_threshold;
+
         tracing::info!(
-            "CDCConsumer: Starting batch processing of {} messages",
-            batch_size
+            "CDCConsumer: process_message_batch starting batch of {} messages (COPY optimization: {})",
+            batch_size,
+            use_copy_optimization
         );
 
-        // CRITICAL OPTIMIZATION: Parallel processing of messages
+        // Deserialize all messages to CDC events
         let mut cdc_events = Vec::with_capacity(batch_size);
-
-        // First pass: Deserialize all messages
         for message in messages {
             match serde_json::from_slice::<serde_json::Value>(&message.payload) {
                 Ok(cdc_event) => {
@@ -1961,47 +1881,58 @@ impl CDCConsumer {
                 }
                 Err(e) => {
                     tracing::error!("CDCConsumer: Failed to deserialize CDC event: {:?}", e);
-                    // Continue processing other messages in batch
+                    continue;
                 }
             }
         }
 
-        // CRITICAL OPTIMIZATION: Use batch processing instead of individual processing
-        let mut success_count = 0;
-        let mut error_count = 0;
-
-        if !cdc_events.is_empty() {
-            match processor.process_cdc_events_batch(cdc_events).await {
-                Ok(_) => {
-                    success_count = batch_size;
-                    error_count = 0;
-                }
-                Err(e) => {
-                    success_count = 0;
-                    error_count = batch_size;
-                    tracing::error!("CDCConsumer: Batch processing failed: {:?}", e);
-                }
-            }
+        if cdc_events.is_empty() {
+            return Ok(());
         }
+
+        // Use COPY-optimized processing for large batches
+        let result = if use_copy_optimization {
+            tracing::info!(
+                "CDCConsumer: Using COPY-optimized batch processing for {} events",
+                cdc_events.len()
+            );
+            processor
+                .process_cdc_events_batch_with_copy(cdc_events)
+                .await
+        } else {
+            tracing::info!(
+                "CDCConsumer: Using standard batch processing for {} events",
+                cdc_events.len()
+            );
+            processor.process_cdc_events_batch(cdc_events).await
+        };
 
         let duration = start_time.elapsed();
-        tracing::info!(
-            "CDCConsumer: Batch processing completed - {} messages in {:?} ({} success, {} errors)",
-            batch_size,
-            duration,
-            success_count,
-            error_count
-        );
-
-        if error_count > 0 {
-            return Err(anyhow::anyhow!(
-                "Batch processing had {} errors out of {} messages",
-                error_count,
-                batch_size
-            ));
+        match result {
+            Ok(_) => {
+                tracing::info!(
+                    "CDCConsumer: Batch processing completed successfully - {} messages in {:?} (COPY: {})",
+                    batch_size,
+                    duration,
+                    use_copy_optimization
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    "CDCConsumer: Batch processing failed - {} messages in {:?} (COPY: {}): {:?}",
+                    batch_size,
+                    duration,
+                    use_copy_optimization,
+                    e
+                );
+                Err(anyhow::anyhow!(
+                    "Batch processing failed for {} messages: {}",
+                    batch_size,
+                    e
+                ))
+            }
         }
-
-        Ok(())
     }
 }
 
