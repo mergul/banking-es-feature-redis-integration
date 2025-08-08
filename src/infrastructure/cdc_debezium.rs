@@ -689,8 +689,7 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         }
     }
 
-    /// CRITICAL FIX: PostgreSQL 17.5 compatible CSV-based bulk insert for outbox messages
-    /// This method uses PostgreSQL's COPY command with CSV format to avoid binary protocol issues
+    /// Switched to COPY BINARY to avoid double encoding.
     async fn add_pending_messages_copy(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -704,69 +703,39 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         let message_count = messages.len();
 
         tracing::info!(
-            "CDCOutboxRepository: Starting CSV-based bulk insert of {} messages",
+            "CDCOutboxRepository: Starting BINARY-based bulk insert of {} messages",
             message_count
         );
 
-        // Convert messages to CSV format
-        let mut csv_writer = crate::infrastructure::binary_utils::PgCopyCsvWriter::new();
+        // Convert messages to OutboxCopyRow and then to binary format
+        let outbox_rows = OutboxCopyRow::from_outbox_messages_validated(messages)
+            .map_err(|e| anyhow::anyhow!("Failed to validate outbox messages for binary copy: {}", e))?;
 
-        for msg in &messages {
-            // Convert each field to CSV format
-            let aggregate_id = msg.aggregate_id.to_string();
-            let event_id = msg.event_id.to_string();
-            let event_type = msg.event_type.as_str();
-            let payload_hex = format!("\\x{}", hex::encode(&msg.payload));
-            let topic = msg.topic.as_str();
-            let metadata = msg
-                .metadata
-                .as_ref()
-                .unwrap_or(&serde_json::Value::Null)
-                .to_string();
-            let created_at = chrono::Utc::now()
-                .format("%Y-%m-%d %H:%M:%S%.6f UTC")
-                .to_string();
-            let updated_at = chrono::Utc::now()
-                .format("%Y-%m-%d %H:%M:%S%.6f UTC")
-                .to_string();
+        let binary_data = outbox_rows.to_pgcopy_binary()
+            .map_err(|e| anyhow::anyhow!("Failed to convert outbox messages to binary format: {}", e))?;
 
-            // Write CSV row with tab delimiter
-            csv_writer.write_csv_row(&[
-                &aggregate_id,
-                &event_id,
-                event_type,
-                &payload_hex,
-                topic,
-                &metadata,
-                &created_at,
-                &updated_at,
-            ])?;
-        }
-
-        let csv_data = csv_writer.finish()?;
-
-        // Start COPY operation with CSV format
+        // Start COPY operation with BINARY format
         let mut copy = tx
         .copy_in_raw(
-            "COPY kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')"
+            "COPY kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) FROM STDIN WITH (FORMAT binary)"
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to start COPY operation: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start BINARY COPY operation: {:?}", e))?;
 
         // Send all data in one operation
-        copy.send(&csv_data[..])
+        copy.send(&binary_data)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send data to COPY: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send data to BINARY COPY: {:?}", e))?;
 
         // Finish the COPY operation
         copy.finish()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to finish COPY operation: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to finish BINARY COPY operation: {:?}", e))?;
 
         let duration = start_time.elapsed();
         let throughput = message_count as f64 / duration.as_secs_f64();
         tracing::info!(
-            "CDCOutboxRepository: Successfully CSV-inserted {} messages in {:?} ({:.0} msg/sec)",
+            "CDCOutboxRepository: Successfully BINARY-inserted {} messages in {:?} ({:.0} msg/sec)",
             message_count,
             duration,
             throughput

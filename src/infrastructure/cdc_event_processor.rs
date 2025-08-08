@@ -2496,45 +2496,12 @@ impl UltraOptimizedCDCEventProcessor {
 
         tracing::info!("Raw payload string from CDC event: {}", payload_str);
 
-        // CRITICAL FIX: Handle both hex and base64 encoded payloads
-        let payload_bytes = if payload_str.starts_with("\\x") {
-            let hex_payload = payload_str.trim_start_matches("\\x");
-            match hex::decode(hex_payload) {
-                Ok(bytes) => {
-                    tracing::debug!(
-                        "Successfully decoded hex payload for event_id {}: {} bytes",
-                        event_id,
-                        bytes.len()
-                    );
-                    bytes
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to hex decode payload for event_id {}: {}",
-                        event_id,
-                        e
-                    );
-                    return Err(anyhow::anyhow!("Hex decode error: {}", e));
-                }
-            }
-        } else {
-            match BASE64_STANDARD.decode(payload_str) {
-                Ok(bytes) => {
-                    tracing::debug!(
-                        "Successfully decoded base64 payload for event_id {}: {} bytes",
-                        event_id,
-                        bytes.len()
-                    );
-                    bytes
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to base64 decode payload for event_id {}: {}",
-                        event_id,
-                        e
-                    );
-                    return Err(anyhow::anyhow!("Base64 decode error: {}", e));
-                }
+        // With the producer now using COPY BINARY, the payload from Debezium is just Base64 encoded.
+        let payload_bytes = match BASE64_STANDARD.decode(payload_str) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("Failed to base64 decode payload for event_id {}: {}", event_id, e);
+                return Err(anyhow::anyhow!("Base64 decode error: {}", e));
             }
         };
         let partition_key = event_data
