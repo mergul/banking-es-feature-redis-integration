@@ -2494,39 +2494,45 @@ impl UltraOptimizedCDCEventProcessor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
 
-        // CRITICAL FIX: Enhanced base64 decoding with detailed debugging
-        let payload_bytes = match BASE64_STANDARD.decode(payload_str) {
-            Ok(bytes) => {
-                tracing::debug!(
-                    "Successfully decoded base64 payload for event_id {}: {} bytes (first 16: {:?})",
-                    event_id,
-                    bytes.len(),
-                    &bytes[..bytes.len().min(16)]
-                );
-                bytes
-            }
-            Err(e) => {
-                // CRITICAL DEBUG: Analyze the payload to understand the corruption
-                tracing::error!(
-                    "Failed to base64 decode payload for event_id {}: {}",
-                    event_id,
-                    e
-                );
-                
-                // Debug payload content
-                tracing::error!(
-                    "Payload string (first 100 chars): '{}'",
-                    &payload_str[..payload_str.len().min(100)]
-                );
-                
-                // Check if it's already binary data (not base64)
-                if payload_str.len() > 0 && !payload_str.contains(|c| c == '+' || c == '/' || c == '=') {
-                    tracing::warn!(
-                        "Payload doesn't look like base64, trying to use as raw bytes for event_id {}",
-                        event_id
+        tracing::info!("Raw payload string from CDC event: {}", payload_str);
+
+        // CRITICAL FIX: Handle both hex and base64 encoded payloads
+        let payload_bytes = if payload_str.starts_with("\\x") {
+            let hex_payload = payload_str.trim_start_matches("\\x");
+            match hex::decode(hex_payload) {
+                Ok(bytes) => {
+                    tracing::debug!(
+                        "Successfully decoded hex payload for event_id {}: {} bytes",
+                        event_id,
+                        bytes.len()
                     );
-                    payload_str.as_bytes().to_vec()
-                } else {
+                    bytes
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to hex decode payload for event_id {}: {}",
+                        event_id,
+                        e
+                    );
+                    return Err(anyhow::anyhow!("Hex decode error: {}", e));
+                }
+            }
+        } else {
+            match BASE64_STANDARD.decode(payload_str) {
+                Ok(bytes) => {
+                    tracing::debug!(
+                        "Successfully decoded base64 payload for event_id {}: {} bytes",
+                        event_id,
+                        bytes.len()
+                    );
+                    bytes
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to base64 decode payload for event_id {}: {}",
+                        event_id,
+                        e
+                    );
                     return Err(anyhow::anyhow!("Base64 decode error: {}", e));
                 }
             }
