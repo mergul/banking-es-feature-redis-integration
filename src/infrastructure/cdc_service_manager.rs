@@ -123,6 +123,10 @@ pub struct EnhancedCDCMetrics {
     // Duplicate detection
     pub duplicate_events_skipped: std::sync::atomic::AtomicU64,
 
+    // Batch processing metrics
+    pub batch_processing_duration: std::sync::atomic::AtomicU64,
+    pub batch_processing_errors: std::sync::atomic::AtomicU64,
+
     // Integration helper status
     pub integration_helper_initialized: std::sync::atomic::AtomicBool,
 }
@@ -212,6 +216,14 @@ impl Clone for EnhancedCDCMetrics {
                 self.duplicate_events_skipped
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
+            batch_processing_duration: std::sync::atomic::AtomicU64::new(
+                self.batch_processing_duration
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            batch_processing_errors: std::sync::atomic::AtomicU64::new(
+                self.batch_processing_errors
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
             integration_helper_initialized: std::sync::atomic::AtomicBool::new(
                 self.integration_helper_initialized
                     .load(std::sync::atomic::Ordering::Relaxed),
@@ -244,6 +256,8 @@ impl Default for EnhancedCDCMetrics {
             last_error_time: std::sync::atomic::AtomicU64::new(0),
             error_rate: std::sync::atomic::AtomicU64::new(0),
             duplicate_events_skipped: std::sync::atomic::AtomicU64::new(0),
+            batch_processing_duration: std::sync::atomic::AtomicU64::new(0),
+            batch_processing_errors: std::sync::atomic::AtomicU64::new(0),
             integration_helper_initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -570,7 +584,7 @@ impl CDCServiceManager {
                 tracing::info!("CDCServiceManager: about to enter consumer main loop");
                 // Start consuming with unified shutdown token
                 let consumer_result = consumer
-                    .start_consuming_with_cancellation_token(
+                    .start_consuming_with_cancellation_token_copy_optimized(
                         processor.clone(),
                         shutdown_token.clone(),
                     )
@@ -872,13 +886,17 @@ impl CDCServiceManager {
     async fn create_kafka_consumer(
         config: &DebeziumConfig,
     ) -> Result<crate::infrastructure::kafka_abstraction::KafkaConsumer> {
-        tracing::info!("CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: banking-es-group, topic_prefix: {}", config.topic_prefix);
+        // Use environment variable for consumer group ID to allow test customization
+        let group_id =
+            std::env::var("KAFKA_GROUP_ID").unwrap_or_else(|_| "banking-es-group".to_string());
+
+        tracing::info!("CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: {}, topic_prefix: {}", group_id, config.topic_prefix);
 
         // Create Kafka consumer with proper configuration
         let kafka_config = crate::infrastructure::kafka_abstraction::KafkaConfig {
             enabled: true,
             bootstrap_servers: "localhost:9092".to_string(),
-            group_id: "banking-es-group".to_string(),
+            group_id,
             topic_prefix: config.topic_prefix.clone(),
             producer_acks: 1,
             producer_retries: 3,
@@ -886,7 +904,7 @@ impl CDCServiceManager {
             consumer_session_timeout_ms: 10000,
             consumer_heartbeat_interval_ms: 1000,
             consumer_max_poll_records: 5000,
-            fetch_max_bytes: 500,
+            fetch_max_bytes: 5 * 1024 * 1024,
             security_protocol: "PLAINTEXT".to_string(),
             sasl_mechanism: "PLAIN".to_string(),
             ssl_ca_location: None,

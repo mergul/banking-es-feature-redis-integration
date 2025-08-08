@@ -2474,6 +2474,26 @@ impl EventStore {
             .get_current_versions_batch_optimized(&aggregate_ids, tx)
             .await?;
 
+        // Log version plan per aggregate for conflict diagnosis
+        {
+            let mut plans = Vec::new();
+            for (agg_id, evs, _) in &events_by_aggregate {
+                let start_v = *versions_map.get(agg_id).unwrap_or(&0) + 1;
+                let end_v = start_v + evs.len() as i64 - 1;
+                plans.push(format!(
+                    "{}:v{}->v{} ({} ev)",
+                    agg_id,
+                    start_v,
+                    end_v,
+                    evs.len()
+                ));
+            }
+            // tracing::info!(
+            //     "[VERSIONS] Planned versions per aggregate: [{}]",
+            //     plans.join(", ")
+            // );
+        }
+
         // Convert to binary format in one go
         let binary_data = Event::batch_to_binary(events_by_aggregate, &versions_map)?;
 
@@ -2499,20 +2519,20 @@ impl EventStore {
             .map_err(EventStoreError::DatabaseError)?;
 
         // CRITICAL FIX: Update version cache with the new highest versions
-        let mut max_versions = HashMap::new();
-        for (aggregate_id, events, _) in events_by_aggregate {
-            if !events.is_empty() {
-                // Get the starting version from the map we already fetched
-                let start_version = versions_map.get(&aggregate_id).unwrap_or(&0);
-                // The new max version is the starting version plus the number of new events
-                let new_max_version = start_version + events.len() as i64;
-                max_versions.insert(aggregate_id, new_max_version);
-            }
-        }
+        // let mut max_versions = HashMap::new();
+        // for (aggregate_id, events, _) in events_by_aggregate {
+        //     if !events.is_empty() {
+        //         // Get the starting version from the map we already fetched
+        //         let start_version = versions_map.get(&aggregate_id).unwrap_or(&0);
+        //         // The new max version is the starting version plus the number of new events
+        //         let new_max_version = start_version + events.len() as i64;
+        //         max_versions.insert(aggregate_id, new_max_version);
+        //     }
+        // }
 
-        for (aggregate_id, max_version) in max_versions {
-            self.version_cache.insert(aggregate_id, max_version);
-        }
+        // for (aggregate_id, max_version) in max_versions {
+        //     self.version_cache.insert(aggregate_id, max_version);
+        // }
 
         // Update metrics
         self.metrics
@@ -2544,19 +2564,19 @@ impl EventStore {
 
         let mut result = HashMap::with_capacity(aggregate_ids.len());
         let mut uncached_aggregates = Vec::new();
-
+        uncached_aggregates.extend(aggregate_ids.iter().cloned());
         // Check cache first
-        for &aggregate_id in aggregate_ids {
-            if let Some(cached_version) = self.version_cache.get(&aggregate_id) {
-                result.insert(aggregate_id, *cached_version);
-            } else {
-                uncached_aggregates.push(aggregate_id);
-            }
-        }
+        // for &aggregate_id in aggregate_ids {
+        //     if let Some(cached_version) = self.version_cache.get(&aggregate_id) {
+        //         result.insert(aggregate_id, *cached_version);
+        //     } else {
+        //         uncached_aggregates.push(aggregate_id);
+        //     }
+        // }
 
-        if uncached_aggregates.is_empty() {
-            return Ok(result);
-        }
+        // if uncached_aggregates.is_empty() {
+        //     return Ok(result);
+        // }
 
         // Use optimized query with transaction for consistency
         let query = sqlx::query!(

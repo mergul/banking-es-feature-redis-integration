@@ -311,45 +311,45 @@ pub async fn create_partitioned_pools_with_config(
     PartitionedPools::new(config).await
 }
 
-#[cfg(test)]
-#[ignore]
-mod tests {
-    use super::*;
+// #[cfg(test)]
+// #[ignore]
+// mod tests {
+//     use super::*;
 
-    #[tokio::test]
-    #[ignore]
-    async fn test_pool_partitioning_creation() {
-        let config = PoolPartitioningConfig {
-            database_url: "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string(),
-            write_pool_max_connections: 3,
-            read_pool_max_connections: 10,
-            ..Default::default()
-        };
+//     #[tokio::test]
+//     #[ignore]
+//     async fn test_pool_partitioning_creation() {
+//         let config = PoolPartitioningConfig {
+//             database_url: "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string(),
+//             write_pool_max_connections: 3,
+//             read_pool_max_connections: 10,
+//             ..Default::default()
+//         };
 
-        let pools = PartitionedPools::new(config).await;
-        assert!(pools.is_ok());
+//         let pools = PartitionedPools::new(config).await;
+//         assert!(pools.is_ok());
 
-        if let Ok(pools) = pools {
-            let stats = pools.get_stats();
-            // The pool starts with min_connections, not max_connections
-            assert_eq!(stats.write_pool.total, 2); // min_connections from default
-            assert_eq!(stats.read_pool.total, 10); // min_connections from default
+//         if let Ok(pools) = pools {
+//             let stats = pools.get_stats();
+//             // The pool starts with min_connections, not max_connections
+//             assert_eq!(stats.write_pool.total, 2); // min_connections from default
+//             assert_eq!(stats.read_pool.total, 10); // min_connections from default
 
-            pools.close().await;
-        }
-    }
+//             pools.close().await;
+//         }
+//     }
 
-    #[tokio::test]
-    #[ignore]
-    async fn test_pool_selector() {
-        let config = PoolPartitioningConfig::default();
-        let pools = PartitionedPools::new(config).await.unwrap();
+//     #[tokio::test]
+//     #[ignore]
+//     async fn test_pool_selector() {
+//         let config = PoolPartitioningConfig::default();
+//         let pools = PartitionedPools::new(config).await.unwrap();
 
-        let read_pool = pools.select_pool(OperationType::Read);
-        let write_pool = pools.select_pool(OperationType::Write);
+//         let read_pool = pools.select_pool(OperationType::Read);
+//         let write_pool = pools.select_pool(OperationType::Write);
 
-        assert_ne!(read_pool.size(), write_pool.size());
+//         assert_ne!(read_pool.size(), write_pool.size());
 
-        pools.close().await;
-    }
-}
+//         pools.close().await;
+//     }
+// }

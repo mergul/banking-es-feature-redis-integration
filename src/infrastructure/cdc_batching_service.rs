@@ -1,7 +1,9 @@
 use crate::infrastructure::projections::{AccountProjection, ProjectionStoreTrait};
 use crate::infrastructure::write_batching::BulkInsertConfigManager;
 use anyhow::Result;
+use async_trait::async_trait;
 use chrono::Utc;
+use futures;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -12,9 +14,71 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-const CDC_NUM_PARTITIONS: usize = 4; // Reduced from 16 to 4 for larger batches per partition
-const CDC_DEFAULT_BATCH_SIZE: usize = 2000; // Increased to 2000 to match ProjectionConfig batch_size
-const CDC_BATCH_TIMEOUT_MS: u64 = 25; // 5x poll interval (5ms * 5 = 25ms) - consistent with other components
+// CDC configuration functions that read from environment variables
+fn get_cdc_num_partitions() -> usize {
+    std::env::var("DB_BATCH_PROCESSOR_COUNT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(8) // Default to 8 if not set or invalid
+}
+
+fn get_cdc_default_batch_size() -> usize {
+    std::env::var("CDC_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(2000) // Default to 2000 if not set or invalid
+}
+
+fn get_cdc_batch_timeout_ms() -> u64 {
+    std::env::var("CDC_BATCH_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(25) // Default to 25ms if not set or invalid
+}
+
+// Legacy constants for backward compatibility (deprecated)
+const CDC_NUM_PARTITIONS: usize = 8; // DEPRECATED: Use get_cdc_num_partitions() instead
+const CDC_DEFAULT_BATCH_SIZE: usize = 2000; // DEPRECATED: Use get_cdc_default_batch_size() instead
+const CDC_BATCH_TIMEOUT_MS: u64 = 25; // DEPRECATED: Use get_cdc_batch_timeout_ms() instead
+
+/// Trait for CDC Batching Service operations
+#[async_trait]
+pub trait CDCBatchingServiceTrait: Send + Sync {
+    /// Submit a single projection update
+    async fn submit_projection_update(
+        &self,
+        aggregate_id: Uuid,
+        projection: AccountProjection,
+    ) -> Result<Uuid>;
+
+    /// Submit multiple projection updates in bulk
+    async fn submit_projections_bulk(
+        &self,
+        projections: Vec<(Uuid, AccountProjection)>,
+    ) -> Result<Vec<Uuid>>;
+
+    /// Wait for operation result
+    async fn wait_for_result(&self, operation_id: Uuid) -> Result<CDCOperationResult>;
+
+    /// Start bulk mode for optimized processing
+    async fn start_bulk_mode(&self) -> Result<()>;
+
+    /// End bulk mode
+    async fn end_bulk_mode(&self) -> Result<()>;
+
+    /// Check if bulk mode is active
+    async fn is_bulk_mode(&self) -> bool;
+
+    /// Get processor for specific aggregate
+    fn get_processor_for_aggregate(&self, aggregate_id: &Uuid)
+        -> &Arc<dyn CDCBatchingServiceTrait>;
+
+    /// Get processor for bulk operations
+    fn get_processor_for_bulk_operation(
+        &self,
+        operation_index: usize,
+    ) -> &Arc<dyn CDCBatchingServiceTrait>;
+}
 
 #[derive(Clone)]
 pub struct CDCBatchingConfig {
@@ -27,8 +91,8 @@ pub struct CDCBatchingConfig {
 impl Default for CDCBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: CDC_DEFAULT_BATCH_SIZE,
-            max_batch_wait_time_ms: CDC_BATCH_TIMEOUT_MS,
+            max_batch_size: get_cdc_default_batch_size(),
+            max_batch_wait_time_ms: get_cdc_batch_timeout_ms(),
             max_retries: 2,
             retry_backoff_ms: 5,
         }
@@ -681,16 +745,84 @@ impl CDCBatchingService {
         &self,
         projections: Vec<(Uuid, AccountProjection)>, // (aggregate_id, projection)
     ) -> Result<Vec<Uuid>> {
-        // Start bulk mode
-        self.start_bulk_mode().await?;
+        // Use bulk config for this operation
+        let mut bulk_config_manager = BulkInsertConfigManager::new();
+        if let Err(e) = bulk_config_manager
+            .start_bulk_mode_projection_store(&self.projection_store)
+            .await
+        {
+            error!("Failed to start bulk mode for CDC batch: {}", e);
+            return Err(anyhow::anyhow!("Failed to start bulk mode: {}", e));
+        }
 
-        // Submit projections
-        let results = self.submit_projections_bulk(projections).await;
+        let result = self.submit_projections_bulk(projections).await;
 
-        // End bulk mode
-        self.end_bulk_mode().await?;
+        // Always end bulk mode
+        if let Err(e) = bulk_config_manager
+            .end_bulk_mode_projection_store(&self.projection_store)
+            .await
+        {
+            error!("Failed to end bulk mode for CDC batch: {}", e);
+        }
 
-        results
+        result
+    }
+}
+
+#[async_trait]
+impl CDCBatchingServiceTrait for CDCBatchingService {
+    async fn submit_projection_update(
+        &self,
+        aggregate_id: Uuid,
+        projection: AccountProjection,
+    ) -> Result<Uuid> {
+        self.submit_projection_update(aggregate_id, projection)
+            .await
+    }
+
+    async fn submit_projections_bulk(
+        &self,
+        projections: Vec<(Uuid, AccountProjection)>,
+    ) -> Result<Vec<Uuid>> {
+        self.submit_projections_bulk(projections).await
+    }
+
+    async fn wait_for_result(&self, operation_id: Uuid) -> Result<CDCOperationResult> {
+        self.wait_for_result(operation_id).await
+    }
+
+    async fn start_bulk_mode(&self) -> Result<()> {
+        self.start_bulk_mode().await
+    }
+
+    async fn end_bulk_mode(&self) -> Result<()> {
+        self.end_bulk_mode().await
+    }
+
+    async fn is_bulk_mode(&self) -> bool {
+        self.is_bulk_mode().await
+    }
+
+    fn get_processor_for_aggregate(
+        &self,
+        _aggregate_id: &Uuid,
+    ) -> &Arc<dyn CDCBatchingServiceTrait> {
+        // For single service, return self
+        // This is a bit tricky with Arc<dyn Trait>, so we'll need to handle this differently
+        // For now, we'll panic as this shouldn't be called on a single service
+        unimplemented!("get_processor_for_aggregate not implemented for single CDCBatchingService")
+    }
+
+    fn get_processor_for_bulk_operation(
+        &self,
+        _operation_index: usize,
+    ) -> &Arc<dyn CDCBatchingServiceTrait> {
+        // For single service, return self
+        // This is a bit tricky with Arc<dyn Trait>, so we'll need to handle this differently
+        // For now, we'll panic as this shouldn't be called on a single service
+        unimplemented!(
+            "get_processor_for_bulk_operation not implemented for single CDCBatchingService"
+        )
     }
 }
 
@@ -704,13 +836,14 @@ impl PartitionedCDCBatching {
         projection_store: Arc<dyn ProjectionStoreTrait>,
         write_pool: Arc<PgPool>,
     ) -> Self {
-        let mut processors = Vec::with_capacity(CDC_NUM_PARTITIONS);
+        let num_partitions = get_cdc_num_partitions();
+        let mut processors = Vec::with_capacity(num_partitions);
 
-        for partition_id in 0..CDC_NUM_PARTITIONS {
+        for partition_id in 0..num_partitions {
             let config = CDCBatchingConfig::default();
             let processor = Arc::new(CDCBatchingService::new_for_partition(
                 partition_id,
-                CDC_NUM_PARTITIONS,
+                num_partitions,
                 config,
                 projection_store.clone(),
                 write_pool.clone(),
@@ -731,7 +864,8 @@ impl PartitionedCDCBatching {
 
     pub fn get_processor_for_aggregate(&self, aggregate_id: &Uuid) -> &Arc<CDCBatchingService> {
         // HYBRID: Hash-based partitioning for consistency
-        let partition_id = (aggregate_id.as_u128() as usize) % CDC_NUM_PARTITIONS;
+        let num_partitions = get_cdc_num_partitions();
+        let partition_id = (aggregate_id.as_u128() as usize) % num_partitions;
         &self.processors[partition_id]
     }
 
@@ -740,7 +874,8 @@ impl PartitionedCDCBatching {
         &self,
         operation_index: usize,
     ) -> &Arc<CDCBatchingService> {
-        let partition_id = operation_index % CDC_NUM_PARTITIONS;
+        let num_partitions = get_cdc_num_partitions();
+        let partition_id = operation_index % num_partitions;
         &self.processors[partition_id]
     }
 
@@ -799,7 +934,8 @@ impl PartitionedCDCBatching {
         // CRITICAL: Process aggregates sequentially, keeping all projections of an aggregate together
         for (aggregate_id, aggregate_projections) in projections_by_aggregate {
             // Sequential distribution: aggregate_index / aggregates_per_partition
-            let partition_id = (aggregate_index / aggregates_per_partition) % CDC_NUM_PARTITIONS;
+            let num_partitions = get_cdc_num_partitions();
+            let partition_id = (aggregate_index / aggregates_per_partition) % num_partitions;
 
             // Add ALL projections for this aggregate to the selected partition
             for projection in aggregate_projections {
@@ -818,20 +954,48 @@ impl PartitionedCDCBatching {
             aggregate_count, partitions_count, aggregates_per_partition
         );
 
-        // Process each partition's projections as a dedicated batch
-        let mut all_operation_ids = Vec::new();
+        // Process each partition's projections as dedicated batches IN PARALLEL
+        let mut partition_futures = Vec::new();
+
         for (partition_id, partition_projections) in projections_by_partition {
-            let processor = &self.processors[partition_id];
+            let processor = self.processors[partition_id].clone();
 
             info!(
-                "📦 PartitionedCDC: Processing partition {} with {} projections",
+                "📦 PartitionedCDC: Preparing parallel processing for partition {} with {} projections",
                 partition_id,
                 partition_projections.len()
             );
 
-            let operation_ids = processor
-                .submit_projections_bulk(partition_projections)
-                .await?;
+            // Create future for parallel execution
+            let future = async move {
+                let operation_ids = processor
+                    .submit_projections_bulk(partition_projections)
+                    .await?;
+
+                info!(
+                    "✅ PartitionedCDC: Completed partition {} with {} projections",
+                    partition_id,
+                    operation_ids.len()
+                );
+
+                Ok::<Vec<Uuid>, anyhow::Error>(operation_ids)
+            };
+
+            partition_futures.push(future);
+        }
+
+        // Execute all partitions in parallel
+        info!(
+            "🚀 PartitionedCDC: Starting parallel processing of {} partitions",
+            partition_futures.len()
+        );
+
+        let partition_results = futures::future::join_all(partition_futures).await;
+
+        // Collect all operation IDs
+        let mut all_operation_ids = Vec::new();
+        for result in partition_results {
+            let operation_ids = result?;
             all_operation_ids.extend(operation_ids);
         }
 
@@ -886,5 +1050,69 @@ impl PartitionedCDCBatching {
         self.end_bulk_mode_all_partitions().await?;
 
         results
+    }
+}
+
+#[async_trait]
+impl CDCBatchingServiceTrait for PartitionedCDCBatching {
+    async fn submit_projection_update(
+        &self,
+        aggregate_id: Uuid,
+        projection: AccountProjection,
+    ) -> Result<Uuid> {
+        self.submit_projection_update(aggregate_id, projection)
+            .await
+    }
+
+    async fn submit_projections_bulk(
+        &self,
+        projections: Vec<(Uuid, AccountProjection)>,
+    ) -> Result<Vec<Uuid>> {
+        self.submit_projections_bulk(projections).await
+    }
+
+    async fn wait_for_result(&self, operation_id: Uuid) -> Result<CDCOperationResult> {
+        self.wait_for_result(operation_id).await
+    }
+
+    async fn start_bulk_mode(&self) -> Result<()> {
+        self.start_bulk_mode_all_partitions().await
+    }
+
+    async fn end_bulk_mode(&self) -> Result<()> {
+        self.end_bulk_mode_all_partitions().await
+    }
+
+    async fn is_bulk_mode(&self) -> bool {
+        // Check if any partition is in bulk mode
+        for processor in &self.processors {
+            if processor.is_bulk_mode().await {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn get_processor_for_aggregate(
+        &self,
+        aggregate_id: &Uuid,
+    ) -> &Arc<dyn CDCBatchingServiceTrait> {
+        // Convert Arc<CDCBatchingService> to Arc<dyn CDCBatchingServiceTrait>
+        // This is a bit tricky, but we can use the fact that CDCBatchingService implements the trait
+        let processor = self.get_processor_for_aggregate(aggregate_id);
+        // We need to return a reference to Arc<dyn Trait>, but we have Arc<ConcreteType>
+        // For now, we'll use a workaround by storing the processors as Arc<dyn Trait>
+        // This requires restructuring the PartitionedCDCBatching to store Arc<dyn CDCBatchingServiceTrait>
+        // For now, we'll panic as this is a complex conversion
+        unimplemented!("get_processor_for_aggregate needs restructuring for trait objects")
+    }
+
+    fn get_processor_for_bulk_operation(
+        &self,
+        operation_index: usize,
+    ) -> &Arc<dyn CDCBatchingServiceTrait> {
+        // Similar issue as above
+        let processor = self.get_processor_for_bulk_operation(operation_index);
+        unimplemented!("get_processor_for_bulk_operation needs restructuring for trait objects")
     }
 }

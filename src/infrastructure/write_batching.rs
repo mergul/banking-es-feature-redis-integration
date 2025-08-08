@@ -5,6 +5,7 @@ use crate::infrastructure::projections::{ProjectionConfig, ProjectionStoreTrait}
 use anyhow::{Context, Result};
 use bincode;
 use chrono::Utc;
+use futures;
 use rust_decimal::Decimal;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::hash_map::DefaultHasher;
@@ -22,17 +23,70 @@ use crate::infrastructure::redis_aggregate_lock::{
 };
 use rand::Rng;
 
-const NUM_PARTITIONS: usize = 8; // Increased from 4 to 8 to reduce partition conflicts
-const DEFAULT_BATCH_SIZE: usize = 1000;
-const CREATE_BATCH_SIZE: usize = 1000; // Optimized batch size for create operations
+// Write Batching configuration functions that read from environment variables
+fn get_write_num_partitions() -> usize {
+    std::env::var("DB_BATCH_PROCESSOR_COUNT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(8) // Default to 8 if not set or invalid
+}
+
+fn get_write_default_batch_size() -> usize {
+    std::env::var("DB_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1000) // Default to 1000 if not set or invalid
+}
+
+fn get_write_create_batch_size() -> usize {
+    std::env::var("DB_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1000) // Default to 1000 if not set or invalid
+}
+
+fn get_write_pool_size() -> usize {
+    std::env::var("WRITE_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(400) // Default to 400 if not set or invalid
+}
+
+fn get_write_batch_timeout_ms() -> u64 {
+    std::env::var("DB_BATCH_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(25) // Default to 25ms if not set or invalid
+}
+
+fn get_write_aggregates_per_partition() -> usize {
+    std::env::var("WRITE_AGGREGATES_PER_PARTITION")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1000) // Default to 1000 if not set or invalid
+}
+
+// Legacy constants for backward compatibility (deprecated)
+//const NUM_PARTITIONS: usize = 8; // DEPRECATED: Use get_write_num_partitions() instead
+const DEFAULT_BATCH_SIZE: usize = 1000; // DEPRECATED: Use get_write_default_batch_size() instead
+const CREATE_BATCH_SIZE: usize = 1000; // DEPRECATED: Use get_write_create_batch_size() instead
 const CREATE_PARTITION_ID: usize = 0; // Dedicated partition for create operations
-const WRITE_POOL_SIZE: usize = 400; // Optimized write pool size for single pool usage
-const DEFAULT_BATCH_TIMEOUT_MS: u64 = 25;
+const WRITE_POOL_SIZE: usize = 400; // DEPRECATED: Use get_write_pool_size() instead
+const DEFAULT_BATCH_TIMEOUT_MS: u64 = 25; // DEPRECATED: Use get_write_batch_timeout_ms() instead
+
+// NEW: Sequential partitioning constants to match CDC Batching
+const AGGREGATES_PER_PARTITION: usize = 1000; // DEPRECATED: Use get_write_aggregates_per_partition() instead
 
 fn partition_for_aggregate(aggregate_id: &Uuid, num_partitions: usize) -> usize {
     let mut hasher = DefaultHasher::new();
     aggregate_id.hash(&mut hasher);
     (hasher.finish() as usize) % num_partitions
+}
+
+// NEW: Sequential partitioning function to match CDC Batching logic
+fn partition_for_aggregate_sequential(aggregate_index: usize, num_partitions: usize) -> usize {
+    let aggregates_per_partition = get_write_aggregates_per_partition();
+    (aggregate_index / aggregates_per_partition) % num_partitions
 }
 
 /// Partitioned batching manager
@@ -46,7 +100,7 @@ impl PartitionedBatching {
         write_pool: Arc<PgPool>,
         outbox_batcher: crate::infrastructure::cdc_debezium::OutboxBatcher,
     ) -> Self {
-        let num_partitions = NUM_PARTITIONS;
+        let num_partitions = get_write_num_partitions();
         let mut processors = Vec::new();
 
         for partition_id in 0..num_partitions {
@@ -65,10 +119,128 @@ impl PartitionedBatching {
     }
 
     pub async fn submit_operation(&self, aggregate_id: Uuid, op: WriteOperation) -> Result<Uuid> {
-        let partition = partition_for_aggregate(&aggregate_id, NUM_PARTITIONS);
+        let num_partitions = get_write_num_partitions();
+        let partition = partition_for_aggregate(&aggregate_id, num_partitions);
         self.processors[partition]
             .submit_operation(aggregate_id, op)
             .await
+    }
+
+    /// NEW: Submit operations with sequential partitioning (matching CDC Batching logic)
+    pub async fn submit_operations_sequential_bulk(
+        &self,
+        operations: Vec<WriteOperation>,
+    ) -> Result<Vec<Uuid>> {
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        info!(
+            "🚀 WriteBatching: Starting SEQUENTIAL bulk processing for {} operations",
+            operations.len()
+        );
+
+        let operations_len = operations.len();
+
+        // SEQUENTIAL APPROACH (matching CDC Batching):
+        // 1. First group by aggregate_id for consistency
+        // 2. Then distribute using sequential partitioning (1000 per partition)
+        let mut operations_by_aggregate: HashMap<Uuid, Vec<WriteOperation>> = HashMap::new();
+
+        // Group operations by aggregate_id
+        for operation in operations {
+            let aggregate_id = operation.get_aggregate_id();
+            operations_by_aggregate
+                .entry(aggregate_id)
+                .or_insert_with(Vec::new)
+                .push(operation);
+        }
+
+        let aggregate_count = operations_by_aggregate.len();
+        info!(
+            "📊 WriteBatching: Grouped {} operations into {} aggregate groups",
+            operations_len, aggregate_count
+        );
+
+        // SEQUENTIAL: Distribute aggregates using sequential partitioning (1000 aggregates per partition)
+        let mut operations_by_partition: HashMap<usize, Vec<WriteOperation>> = HashMap::new();
+        let mut aggregate_index = 0;
+
+        // CRITICAL: Process aggregates sequentially, keeping all operations of an aggregate together
+        for (aggregate_id, aggregate_operations) in operations_by_aggregate {
+            // Sequential distribution: aggregate_index / aggregates_per_partition
+            let num_partitions = get_write_num_partitions();
+            let partition_id = partition_for_aggregate_sequential(aggregate_index, num_partitions);
+
+            // Add ALL operations for this aggregate to the selected partition
+            for operation in aggregate_operations {
+                operations_by_partition
+                    .entry(partition_id)
+                    .or_insert_with(Vec::new)
+                    .push(operation);
+            }
+
+            aggregate_index += 1; // Move to next aggregate
+        }
+
+        let partitions_count = operations_by_partition.len();
+        let aggregates_per_partition = get_write_aggregates_per_partition();
+        info!(
+            "🔄 WriteBatching: Distributed {} aggregates across {} partitions using sequential partitioning ({} aggregates per partition)",
+            aggregate_count, partitions_count, aggregates_per_partition
+        );
+
+        // Process each partition's operations as dedicated batches IN PARALLEL
+        let mut partition_futures = Vec::new();
+
+        for (partition_id, partition_operations) in operations_by_partition {
+            let processor = self.processors[partition_id].clone();
+
+            info!(
+                "📦 WriteBatching: Preparing parallel processing for partition {} with {} operations",
+                partition_id,
+                partition_operations.len()
+            );
+
+            // Create future for parallel execution
+            let future = async move {
+                let operation_ids = processor
+                    .submit_batch_operations(partition_operations)
+                    .await?;
+
+                info!(
+                    "✅ WriteBatching: Completed partition {} with {} operations",
+                    partition_id,
+                    operation_ids.len()
+                );
+
+                Ok::<Vec<Uuid>, anyhow::Error>(operation_ids)
+            };
+
+            partition_futures.push(future);
+        }
+
+        // Execute all partitions in parallel
+        info!(
+            "🚀 WriteBatching: Starting parallel processing of {} partitions",
+            partition_futures.len()
+        );
+
+        let partition_results = futures::future::join_all(partition_futures).await;
+
+        // Collect all operation IDs
+        let mut all_operation_ids = Vec::new();
+        for result in partition_results {
+            let operation_ids = result?;
+            all_operation_ids.extend(operation_ids);
+        }
+
+        info!(
+            "✅ WriteBatching: SEQUENTIAL bulk processing completed for {} operations ({} aggregates) across {} partitions",
+            operations_len, aggregate_count, partitions_count
+        );
+
+        Ok(all_operation_ids)
     }
 
     /// Phase 1: Create-specific batch method for bulk account creation
@@ -183,7 +355,8 @@ impl PartitionedBatching {
             };
 
             // Use hash-based partitioning but with collision detection
-            let partition = partition_for_aggregate(&account_id, NUM_PARTITIONS);
+            let num_partitions = get_write_num_partitions();
+            let partition = partition_for_aggregate(&account_id, num_partitions);
             account_to_partition.insert(account_id, partition);
 
             let op_id = self.processors[partition]
@@ -192,10 +365,11 @@ impl PartitionedBatching {
             operation_ids.push((op_id, account_id, partition));
         }
 
+        let num_partitions = get_write_num_partitions();
         info!(
             "📦 Distributed {} create operations across {} partitions",
             operation_ids.len(),
-            NUM_PARTITIONS
+            num_partitions
         );
 
         // Wait for all operations to complete
@@ -610,8 +784,9 @@ impl PartitionedBatching {
         let mut aggregate_to_operation_ids = HashMap::new();
 
         for (aggregate_id, aggregate_operations) in aggregate_groups {
+            let num_partitions = get_write_num_partitions();
             let processor =
-                &self.processors[partition_for_aggregate(&aggregate_id, NUM_PARTITIONS)];
+                &self.processors[partition_for_aggregate(&aggregate_id, num_partitions)];
 
             // Create operation IDs for this aggregate's operations
             let operation_ids: Vec<Uuid> = aggregate_operations
@@ -709,8 +884,9 @@ impl PartitionedBatching {
         let mut futures = Vec::new();
 
         for (aggregate_id, aggregate_operations) in aggregate_groups {
+            let num_partitions = get_write_num_partitions();
             let processor =
-                &self.processors[partition_for_aggregate(&aggregate_id, NUM_PARTITIONS)];
+                &self.processors[partition_for_aggregate(&aggregate_id, num_partitions)];
 
             // Create a dedicated batch for this aggregate
             let mut dedicated_batch = WriteBatch::new(Some(processor.partition_id.unwrap()));
@@ -1295,7 +1471,8 @@ impl PartitionedBatching {
         // Group operations by partition
         let mut operations_by_partition: HashMap<usize, Vec<WriteOperation>> = HashMap::new();
         for operation in operations {
-            let partition = partition_for_aggregate(&operation.get_aggregate_id(), NUM_PARTITIONS);
+            let num_partitions = get_write_num_partitions();
+            let partition = partition_for_aggregate(&operation.get_aggregate_id(), num_partitions);
             operations_by_partition
                 .entry(partition)
                 .or_default()
@@ -1367,7 +1544,8 @@ impl PartitionedBatching {
         // Group operations by partition
         let mut operations_by_partition: HashMap<usize, Vec<WriteOperation>> = HashMap::new();
         for operation in operations {
-            let partition = partition_for_aggregate(&operation.get_aggregate_id(), NUM_PARTITIONS);
+            let num_partitions = get_write_num_partitions();
+            let partition = partition_for_aggregate(&operation.get_aggregate_id(), num_partitions);
             operations_by_partition
                 .entry(partition)
                 .or_default()
@@ -1437,8 +1615,8 @@ pub struct WriteBatchingConfig {
 impl Default for WriteBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: CREATE_BATCH_SIZE, // Optimized batch size for better performance
-            max_batch_wait_time_ms: DEFAULT_BATCH_TIMEOUT_MS, // Increased from 10ms to 100ms for better batching
+            max_batch_size: get_write_create_batch_size(), // Optimized batch size for better performance
+            max_batch_wait_time_ms: get_write_batch_timeout_ms(), // Increased from 10ms to 100ms for better batching
             max_retries: 2,      // Reduced from 3 to 2 for faster processing
             retry_backoff_ms: 5, // Reduced from 10ms to 5ms for faster retries
         }
@@ -3085,11 +3263,11 @@ impl WriteBatchingService {
             operation_results.push((*operation_id, result_id, op_start.elapsed()));
         }
 
-        info!(
-            "[DEBUG] execute_batch_unified: Prepared {} events and {} outbox messages",
-            all_events.len(),
-            all_outbox_messages.len()
-        );
+        // info!(
+        //     "[DEBUG] execute_batch_unified: Prepared {} events and {} outbox messages",
+        //     all_events.len(),
+        //     all_outbox_messages.len()
+        // );
 
         // Group events by aggregate_id for efficient batch insertion
         let mut events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)> = Vec::new();
@@ -3120,7 +3298,20 @@ impl WriteBatchingService {
             }
         }
 
-        println!("[DEBUG] execute_batch_unified: About to execute parallel operations with {} aggregates and {} outbox messages", events_by_aggregate.len(), all_outbox_messages.len());
+        {
+            let mut agg_summaries = Vec::new();
+            for (agg_id, evs, part) in &events_by_aggregate {
+                agg_summaries.push(format!("{}:{}ev@p{:?}", agg_id, evs.len(), part));
+            }
+            // println!(
+            //     "[DEBUG] execute_batch_unified: About to execute parallel operations with {} aggregates and {} outbox messages | batch_id={} | partition_id={:?} | aggregates=[{}]",
+            //     events_by_aggregate.len(),
+            //     all_outbox_messages.len(),
+            //     batch.batch_id,
+            //     partition_id,
+            //     agg_summaries.join(",")
+            // );
+        }
 
         let final_result: Result<(), String> = if all_outbox_messages.is_empty() {
             // If no outbox messages, only execute events operation
@@ -3160,50 +3351,46 @@ impl WriteBatchingService {
         };
 
         // Commit or rollback based on final_result
-        if final_result.is_ok() {
-            transaction.commit().await.map_err(|e| e.to_string())?;
-            println!("[DEBUG] execute_batch_unified: Successfully completed operations and committed transaction");
-            info!(
+        match final_result {
+            Ok(()) => {
+                transaction.commit().await.map_err(|e| e.to_string())?;
+                // println!("[DEBUG] execute_batch_unified: Successfully completed operations and committed transaction");
+                info!(
             "[DEBUG] execute_batch_unified: Completed successfully - {} operations, {} outbox messages in unified transaction",
             batch.operations.len(),
             all_outbox_messages.len()
         );
-        } else {
-            transaction.rollback().await.map_err(|e| e.to_string())?;
-            println!("[DEBUG] execute_batch_unified: Operations failed, rolled back transaction");
-        }
 
-        // Create success/failure results based on final_result
-        let final_op_results = operation_results
-            .into_iter()
-            .map(|(operation_id, result_id, op_duration)| {
-                if final_result.is_ok() {
-                    (
-                        operation_id,
-                        WriteOperationResult {
+                // Create success results
+                let final_op_results = operation_results
+                    .into_iter()
+                    .map(|(operation_id, result_id, op_duration)| {
+                        (
                             operation_id,
-                            success: true,
-                            result: Some(result_id),
-                            error: None,
-                            duration: op_duration,
-                        },
-                    )
-                } else {
-                    (
-                        operation_id,
-                        WriteOperationResult {
-                            operation_id,
-                            success: false,
-                            result: None,
-                            error: final_result.as_ref().err().cloned(),
-                            duration: op_duration,
-                        },
-                    )
+                            WriteOperationResult {
+                                operation_id,
+                                success: true,
+                                result: Some(result_id),
+                                error: None,
+                                duration: op_duration,
+                            },
+                        )
+                    })
+                    .collect();
+
+                return Ok(final_op_results);
+            }
+            Err(e) => {
+                let msg = format!("execute_batch_unified_inner failed: {}", e);
+                if let Err(re) = transaction.rollback().await.map_err(|e| e.to_string()) {
+                    eprintln!("[DEBUG] execute_batch_unified: rollback error: {}", re);
                 }
-            })
-            .collect();
-
-        Ok(final_op_results)
+                println!(
+                    "[DEBUG] execute_batch_unified: Operations failed, rolled back transaction"
+                );
+                return Err(msg);
+            }
+        }
     }
 
     pub async fn execute_batch_unified(
@@ -3404,22 +3591,64 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_batch_should_process() {
-        let mut batch = WriteBatch::new(Some(0));
+        let batch = WriteBatch::new(Some(0));
+        assert!(!batch.should_process(100, Duration::from_secs(1)));
 
-        // Test size-based processing
-        for _ in 0..50 {
+        let mut batch = WriteBatch::new(Some(0));
+        for i in 0..100 {
             batch.add_operation(
                 Uuid::new_v4(),
                 WriteOperation::CreateAccount {
                     account_id: Uuid::new_v4(),
-                    owner_name: "Test User".to_string(),
-                    initial_balance: Decimal::new(1000, 0),
+                    owner_name: format!("user{}", i),
+                    initial_balance: Decimal::new(100, 0),
                 },
             );
         }
+        assert!(batch.should_process(100, Duration::from_secs(1)));
+    }
 
-        assert!(batch.should_process(50, Duration::from_millis(10)));
-        assert!(batch.is_full(50));
+    #[tokio::test]
+    async fn test_sequential_partitioning_logic() {
+        // Test the sequential partitioning function
+        let num_partitions = 4;
+        let aggregates_per_partition = 1000;
+
+        // Test first partition (aggregates 0-999)
+        for i in 0..1000 {
+            let partition = partition_for_aggregate_sequential(i, num_partitions);
+            assert_eq!(partition, 0, "Aggregate {} should be in partition 0", i);
+        }
+
+        // Test second partition (aggregates 1000-1999)
+        for i in 1000..2000 {
+            let partition = partition_for_aggregate_sequential(i, num_partitions);
+            assert_eq!(partition, 1, "Aggregate {} should be in partition 1", i);
+        }
+
+        // Test third partition (aggregates 2000-2999)
+        for i in 2000..3000 {
+            let partition = partition_for_aggregate_sequential(i, num_partitions);
+            assert_eq!(partition, 2, "Aggregate {} should be in partition 2", i);
+        }
+
+        // Test fourth partition (aggregates 3000-3999)
+        for i in 3000..4000 {
+            let partition = partition_for_aggregate_sequential(i, num_partitions);
+            assert_eq!(partition, 3, "Aggregate {} should be in partition 3", i);
+        }
+
+        // Test wrap-around (aggregates 4000-4999 should go back to partition 0)
+        for i in 4000..5000 {
+            let partition = partition_for_aggregate_sequential(i, num_partitions);
+            assert_eq!(
+                partition, 0,
+                "Aggregate {} should be in partition 0 (wrapped)",
+                i
+            );
+        }
+
+        println!("✅ Sequential partitioning logic test passed!");
     }
 }
 
@@ -3562,7 +3791,9 @@ impl BulkInsertConfigManager {
                 (*event_store_mut).apply_bulk_config_with_postgres().await
             };
 
-            info!("📊 Event store bulk config uygulandı: batch_size=5000, processors=16, synchronous_commit=off (full_page_writes requires server restart)");
+            info!("📊 Event store bulk config uygulandı: batch_size= {:?}, synchronous_commit= {:?}, batch_timeout_ms= {:?}",
+                _original_config.batch_size, _original_config.synchronous_commit, _original_config.batch_timeout_ms
+            );
         }
 
         Ok(())

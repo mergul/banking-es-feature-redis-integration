@@ -444,7 +444,7 @@ impl ConsumerContext for LoggingConsumerContext {
         _consumer: &rdkafka::consumer::BaseConsumer<Self>,
         rebalance: &Rebalance,
     ) {
-        tracing::info!("Pre-rebalance: {:?}", rebalance);
+        tracing::info!("KafkaConsumer: Pre-rebalance - {:?}", rebalance);
     }
 
     fn post_rebalance(
@@ -452,7 +452,18 @@ impl ConsumerContext for LoggingConsumerContext {
         _consumer: &rdkafka::consumer::BaseConsumer<Self>,
         rebalance: &Rebalance,
     ) {
-        tracing::info!("Post-rebalance: {:?}", rebalance);
+        tracing::info!("KafkaConsumer: Post-rebalance - {:?}", rebalance);
+    }
+
+    fn commit_callback(
+        &self,
+        result: Result<(), rdkafka::error::KafkaError>,
+        _offsets: &rdkafka::TopicPartitionList,
+    ) {
+        match result {
+            Ok(_) => tracing::debug!("KafkaConsumer: Offset commit successful"),
+            Err(e) => tracing::error!("KafkaConsumer: Offset commit failed: {}", e),
+        }
     }
 }
 
@@ -496,7 +507,10 @@ impl KafkaConsumer {
                 "session.timeout.ms",
                 config.consumer_session_timeout_ms.to_string(),
             )
-            .set("heartbeat.interval.ms", "1000")
+            .set(
+                "heartbeat.interval.ms",
+                config.consumer_heartbeat_interval_ms.to_string(),
+            )
             .set("partition.assignment.strategy", "cooperative-sticky")
             .set("fetch.max.bytes", fetch_max_bytes.to_string())
             .create_with_context(context)?;

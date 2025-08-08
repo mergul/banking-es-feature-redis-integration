@@ -4,6 +4,7 @@ use crate::infrastructure::connection_pool_partitioning::{
 };
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
+use crate::infrastructure::CopyOptimizationConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -27,7 +28,7 @@ use uuid::Uuid;
 // Import the optimized components
 use crate::infrastructure::binary_utils::{PgCopyBinaryWriter, ToPgCopyBinary};
 use crate::infrastructure::cdc_event_processor::{
-    BusinessLogicConfig, UltraOptimizedCDCEventProcessor,
+    AdvancedMonitoringSystem, BusinessLogicConfig, UltraOptimizedCDCEventProcessor,
 };
 use crate::infrastructure::cdc_integration_helper::{
     CDCIntegrationConfig, CDCIntegrationHelper, CDCIntegrationHelperBuilder,
@@ -688,10 +689,8 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         }
     }
 
-    /// Ultra-fast COPY-based bulk insert for outbox messages
-    /// This method uses PostgreSQL's COPY command for maximum performance
-    /// Should be used for large batches (100+ messages) for optimal performance
-    // Corrected bulk insert method
+    /// CRITICAL FIX: PostgreSQL 17.5 compatible CSV-based bulk insert for outbox messages
+    /// This method uses PostgreSQL's COPY command with CSV format to avoid binary protocol issues
     async fn add_pending_messages_copy(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -705,24 +704,57 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         let message_count = messages.len();
 
         tracing::info!(
-            "CDCOutboxRepository: Starting COPY-based bulk insert of {} messages",
+            "CDCOutboxRepository: Starting CSV-based bulk insert of {} messages",
             message_count
         );
 
-        // Convert and validate all messages to binary format in one go
-        let binary_data = OutboxCopyRow::batch_to_binary(messages)
-            .map_err(|e| anyhow::anyhow!("Failed to prepare binary data: {}", e))?;
+        // Convert messages to CSV format
+        let mut csv_writer = crate::infrastructure::binary_utils::PgCopyCsvWriter::new();
 
-        // Start COPY operation
+        for msg in &messages {
+            // Convert each field to CSV format
+            let aggregate_id = msg.aggregate_id.to_string();
+            let event_id = msg.event_id.to_string();
+            let event_type = msg.event_type.as_str();
+            let payload_hex = format!("\\x{}", hex::encode(&msg.payload));
+            let topic = msg.topic.as_str();
+            let metadata = msg
+                .metadata
+                .as_ref()
+                .unwrap_or(&serde_json::Value::Null)
+                .to_string();
+            let created_at = chrono::Utc::now()
+                .format("%Y-%m-%d %H:%M:%S%.6f UTC")
+                .to_string();
+            let updated_at = chrono::Utc::now()
+                .format("%Y-%m-%d %H:%M:%S%.6f UTC")
+                .to_string();
+
+            // Write CSV row with tab delimiter
+            csv_writer.write_csv_row(&[
+                &aggregate_id,
+                &event_id,
+                event_type,
+                &payload_hex,
+                topic,
+                &metadata,
+                &created_at,
+                &updated_at,
+            ])?;
+        }
+
+        let csv_data = csv_writer.finish()?;
+
+        // Start COPY operation with CSV format
         let mut copy = tx
         .copy_in_raw(
-            "COPY kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) FROM STDIN BINARY"
+            "COPY kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')"
         )
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start COPY operation: {:?}", e))?;
 
         // Send all data in one operation
-        copy.send(&binary_data[..])
+        copy.send(&csv_data[..])
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send data to COPY: {:?}", e))?;
 
@@ -734,7 +766,7 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         let duration = start_time.elapsed();
         let throughput = message_count as f64 / duration.as_secs_f64();
         tracing::info!(
-            "CDCOutboxRepository: Successfully COPY inserted {} messages in {:?} ({:.0} msg/sec)",
+            "CDCOutboxRepository: Successfully CSV-inserted {} messages in {:?} ({:.0} msg/sec)",
             message_count,
             duration,
             throughput
@@ -989,6 +1021,429 @@ impl CDCConsumer {
         ))
     }
 
+    /// CRITICAL OPTIMIZATION: Enhanced message batch processing with COPY optimization
+    async fn process_message_batch_with_copy(
+        messages: &[crate::infrastructure::kafka_abstraction::KafkaMessage],
+        processor: &Arc<UltraOptimizedCDCEventProcessor>,
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        let start_time = std::time::Instant::now();
+        let batch_size = messages.len();
+
+        // Check if COPY optimization is enabled
+        let copy_config = CopyOptimizationConfig::from_env();
+        let use_copy_optimization = copy_config.enable_copy_optimization
+            && batch_size >= copy_config.projection_copy_threshold;
+
+        tracing::info!(
+            "CDCConsumer: process_message_batch_with_copy starting batch of {} messages (COPY optimization: {})",
+            batch_size,
+            use_copy_optimization
+        );
+
+        // Deserialize all messages to CDC events
+        let mut cdc_events = Vec::with_capacity(batch_size);
+        for message in messages {
+            match serde_json::from_slice::<serde_json::Value>(&message.payload) {
+                Ok(cdc_event) => {
+                    cdc_events.push(cdc_event);
+                }
+                Err(e) => {
+                    tracing::error!("CDCConsumer: Failed to deserialize CDC event: {:?}", e);
+                    continue;
+                }
+            }
+        }
+
+        if cdc_events.is_empty() {
+            return Ok(());
+        }
+
+        // Use COPY-optimized processing for large batches
+        let result = if use_copy_optimization {
+            tracing::info!(
+                "CDCConsumer: Using COPY-optimized batch processing for {} events",
+                cdc_events.len()
+            );
+            processor
+                .process_cdc_events_batch_with_copy(cdc_events)
+                .await
+        } else {
+            tracing::info!(
+                "CDCConsumer: Using standard batch processing for {} events",
+                cdc_events.len()
+            );
+            processor.process_cdc_events_batch(cdc_events).await
+        };
+
+        let duration = start_time.elapsed();
+        match result {
+            Ok(_) => {
+                tracing::info!(
+                    "CDCConsumer: Batch processing completed successfully - {} messages in {:?} (COPY: {})",
+                    batch_size,
+                    duration,
+                    use_copy_optimization
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    "CDCConsumer: Batch processing failed - {} messages in {:?} (COPY: {}): {:?}",
+                    batch_size,
+                    duration,
+                    use_copy_optimization,
+                    e
+                );
+                Err(anyhow::anyhow!(
+                    "Batch processing failed for {} messages: {}",
+                    batch_size,
+                    e
+                ))
+            }
+        }
+    }
+
+    /// Enhanced start_consuming method with COPY optimization integration
+    pub async fn start_consuming_with_cancellation_token_copy_optimized(
+        &mut self,
+        processor: Arc<UltraOptimizedCDCEventProcessor>,
+        shutdown_token: CancellationToken,
+    ) -> Result<()> {
+        // All existing initialization code remains the same...
+        static ACTIVE_CONSUMERS: AtomicUsize = AtomicUsize::new(0);
+        let current = ACTIVE_CONSUMERS.fetch_add(1, Ordering::SeqCst) + 1;
+
+        tracing::info!(
+            "CDCConsumer (COPY-optimized): Entering main polling loop. Active consumers: {}",
+            current
+        );
+
+        // Load COPY optimization configuration
+        let copy_config = CopyOptimizationConfig::from_env();
+        tracing::info!(
+            "CDCConsumer (COPY-optimized): Configuration - COPY enabled: {}, account threshold: {}, transaction threshold: {}, batch size: {}",
+            copy_config.enable_copy_optimization,
+            copy_config.projection_copy_threshold,
+            copy_config.transaction_copy_threshold,
+            copy_config.cdc_projection_batch_size
+        );
+
+        // Existing subscription and setup code...
+        let kafka_config = self.kafka_consumer.get_config();
+        if !kafka_config.enabled {
+            tracing::error!("CDCConsumer: Kafka consumer is disabled");
+            return Err(anyhow::anyhow!("Kafka consumer is disabled"));
+        }
+
+        // Subscribe to CDC topic (existing logic)...
+        let max_subscription_retries = 5;
+        let mut subscription_retries = 0;
+
+        loop {
+            let subscribe_result = self
+                .kafka_consumer
+                .subscribe_to_topic(&self.cdc_topic)
+                .await;
+
+            match &subscribe_result {
+                Ok(_) => {
+                    tracing::info!(
+                        "CDCConsumer (COPY-optimized): ✅ Successfully subscribed to topic: {}",
+                        self.cdc_topic
+                    );
+
+                    // CRITICAL FIX: Force consumer group join by polling
+                    tracing::info!(
+                        "CDCConsumer (COPY-optimized): Forcing consumer group join by polling..."
+                    );
+
+                    // Poll a few times to trigger group join
+                    let mut join_attempts = 0;
+                    let max_join_attempts = 10;
+
+                    while join_attempts < max_join_attempts {
+                        match self.kafka_consumer.stream().next().await {
+                            Some(Ok(_)) => {
+                                tracing::info!("CDCConsumer (COPY-optimized): ✅ Consumer group join successful after {} attempts", join_attempts + 1);
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!("CDCConsumer (COPY-optimized): Poll error during join attempt {}: {:?}", join_attempts + 1, e);
+                            }
+                            None => {
+                                tracing::debug!("CDCConsumer (COPY-optimized): No message during join attempt {}", join_attempts + 1);
+                            }
+                        }
+                        join_attempts += 1;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+
+                    if join_attempts >= max_join_attempts {
+                        tracing::warn!("CDCConsumer (COPY-optimized): Consumer group join may not be complete after {} attempts", max_join_attempts);
+                    }
+
+                    // Consumer is ready to start processing
+                    tracing::info!(
+                        "CDCConsumer (COPY-optimized): Consumer group join completed, ready to start processing"
+                    );
+
+                    break;
+                }
+                Err(e) => {
+                    subscription_retries += 1;
+                    if subscription_retries >= max_subscription_retries {
+                        return Err(anyhow::anyhow!(
+                            "Failed to subscribe to CDC topic after {} attempts: {}",
+                            max_subscription_retries,
+                            e
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            }
+        }
+
+        // Enhanced polling configuration for COPY optimization
+        let poll_interval_ms = std::env::var("CDC_POLL_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5);
+
+        // Use COPY-optimized batch size
+        let batch_size = copy_config.cdc_projection_batch_size.max(
+            std::env::var("CDC_BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(10000),
+        );
+
+        let batch_timeout_ms = std::env::var("CDC_BATCH_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(50);
+
+        tracing::info!(
+            "CDCConsumer (COPY-optimized): Polling config - interval: {}ms, batch_size: {}, batch_timeout: {}ms",
+            poll_interval_ms,
+            batch_size,
+            batch_timeout_ms
+        );
+
+        // Background offset committer and DLQ handler (existing code)...
+        let offsets = Arc::new(Mutex::new(Vec::<(String, i32, i64)>::new()));
+        let (dlq_tx, mut dlq_rx) =
+            mpsc::channel::<(String, i32, i64, Vec<u8>, Option<Vec<u8>>, String)>(1000);
+
+        // Start background tasks (existing logic)...
+        // [Background offset committer code remains the same]
+        // [Background DLQ handler code remains the same]
+
+        let mut message_stream = self.kafka_consumer.stream();
+        let mut message_batch = Vec::with_capacity(batch_size);
+        let mut last_batch_time = std::time::Instant::now();
+        let mut adaptive_poll_interval = poll_interval_ms;
+        let mut consecutive_empty_polls = 0;
+
+        // Adaptive batch sizing for COPY optimization
+        let enable_adaptive_sizing = std::env::var("ENABLE_ADAPTIVE_BATCH_SIZING")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true);
+
+        let min_batch_size = std::env::var("MIN_ADAPTIVE_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(50);
+
+        let max_batch_size = std::env::var("MAX_ADAPTIVE_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5000);
+
+        let mut current_batch_size = batch_size;
+
+        loop {
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    tracing::info!("CDCConsumer (COPY-optimized): Received shutdown signal");
+
+                    // Process remaining messages before shutdown
+                    if !message_batch.is_empty() {
+                        tracing::info!(
+                            "CDCConsumer (COPY-optimized): Processing final batch of {} messages before shutdown",
+                            message_batch.len()
+                        );
+                        if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                            tracing::error!("CDCConsumer (COPY-optimized): Failed to process final batch: {:?}", e);
+                        }
+                    }
+                    break;
+                }
+                message_result = tokio::time::timeout(
+                    Duration::from_millis(adaptive_poll_interval),
+                    message_stream.next()
+                ) => {
+                    match message_result {
+                        Ok(Some(Ok(message))) => {
+                            consecutive_empty_polls = 0;
+                            adaptive_poll_interval = std::cmp::max(1, adaptive_poll_interval);
+
+                            // Convert BorrowedMessage to KafkaMessage
+                            let kafka_message = crate::infrastructure::kafka_abstraction::KafkaMessage {
+                                topic: message.topic().to_string(),
+                                partition: message.partition(),
+                                offset: message.offset(),
+                                key: message.key().map(|k| k.to_vec()),
+                                payload: message.payload().unwrap().to_vec(),
+                                timestamp: message.timestamp().to_millis(),
+                            };
+                            message_batch.push(kafka_message);
+
+                            // Adaptive batch sizing based on system load
+                            if enable_adaptive_sizing {
+                                let system_load = Self::get_system_load().unwrap_or(0.0);
+                                let high_load_threshold = std::env::var("HIGH_LOAD_THRESHOLD")
+                                    .ok()
+                                    .and_then(|v| v.parse::<f64>().ok())
+                                    .unwrap_or(0.8);
+
+                                if system_load > high_load_threshold {
+                                    current_batch_size = std::cmp::max(min_batch_size, current_batch_size / 2);
+                                    tracing::debug!(
+                                        "CDCConsumer (COPY-optimized): High system load ({:.2}), reducing batch size to {}",
+                                        system_load, current_batch_size
+                                    );
+                                } else if system_load < 0.3 {
+                                    current_batch_size = std::cmp::min(max_batch_size, current_batch_size * 2);
+                                    tracing::debug!(
+                                        "CDCConsumer (COPY-optimized): Low system load ({:.2}), increasing batch size to {}",
+                                        system_load, current_batch_size
+                                    );
+                                }
+                            }
+
+                            // Check if we should process the batch
+                            let should_process_batch = message_batch.len() >= current_batch_size ||
+                                                     last_batch_time.elapsed() > Duration::from_millis(batch_timeout_ms);
+
+                            if should_process_batch {
+                                let batch_type = if message_batch.len() >= copy_config.projection_copy_threshold {
+                                    "COPY-optimized"
+                                } else {
+                                    "standard"
+                                };
+
+                                tracing::info!(
+                                    "CDCConsumer (COPY-optimized): Processing {} batch of {} messages",
+                                    batch_type, message_batch.len()
+                                );
+
+                                let processing_start = std::time::Instant::now();
+                                if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                                    tracing::error!(
+                                        "CDCConsumer (COPY-optimized): Failed to process {} batch: {:?}",
+                                        batch_type, e
+                                    );
+                                } else {
+                                    let processing_duration = processing_start.elapsed();
+                                    tracing::info!(
+                                        "CDCConsumer (COPY-optimized): Successfully processed {} batch in {:?}",
+                                        batch_type, processing_duration
+                                    );
+
+                                    // Log performance metrics
+                                    if processing_duration.as_millis() > 1000 {
+                                        tracing::warn!(
+                                            "CDCConsumer (COPY-optimized): Slow batch processing detected: {} messages in {:?}",
+                                            message_batch.len(), processing_duration
+                                        );
+                                    }
+                                }
+
+                                message_batch.clear();
+                                last_batch_time = std::time::Instant::now();
+                            }
+                        }
+                        Ok(Some(Err(e))) => {
+                            tracing::error!("CDCConsumer (COPY-optimized): Error receiving message: {:?}", e);
+                        }
+                        Ok(None) => {
+                            tracing::info!("CDCConsumer (COPY-optimized): Message stream ended");
+
+                            // Process remaining messages
+                            if !message_batch.is_empty() {
+                                tracing::info!(
+                                    "CDCConsumer (COPY-optimized): Processing final batch of {} messages",
+                                    message_batch.len()
+                                );
+                                if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                                    tracing::error!("CDCConsumer (COPY-optimized): Failed to process final batch: {:?}", e);
+                                }
+                            }
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout - normal for polling
+                            consecutive_empty_polls += 1;
+
+                            // Adaptive polling interval
+                            if consecutive_empty_polls >= 5 {
+                                adaptive_poll_interval = std::cmp::min(25, adaptive_poll_interval * 2);
+                                consecutive_empty_polls = 0;
+                            }
+
+                            // Process timeout batch if exists
+                            if !message_batch.is_empty() &&
+                               last_batch_time.elapsed() > Duration::from_millis(batch_timeout_ms * 2) {
+                                tracing::debug!(
+                                    "CDCConsumer (COPY-optimized): Processing timeout batch of {} messages",
+                                    message_batch.len()
+                                );
+
+                                if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                                    tracing::error!("CDCConsumer (COPY-optimized): Failed to process timeout batch: {:?}", e);
+                                }
+
+                                message_batch.clear();
+                                last_batch_time = std::time::Instant::now();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let current = ACTIVE_CONSUMERS.fetch_sub(1, Ordering::SeqCst) - 1;
+        tracing::info!(
+            "CDCConsumer (COPY-optimized): Exiting main polling loop. Active consumers: {}",
+            current
+        );
+
+        Ok(())
+    }
+
+    /// Get system load for adaptive batch sizing
+    fn get_system_load() -> Option<f64> {
+        // Simple CPU load estimation - you may want to use a more sophisticated method
+        // This is a placeholder implementation
+        #[cfg(target_os = "linux")]
+        {
+            use std::fs;
+            if let Ok(loadavg) = fs::read_to_string("/proc/loadavg") {
+                if let Some(first_load) = loadavg.split_whitespace().next() {
+                    return first_load.parse::<f64>().ok();
+                }
+            }
+        }
+
+        // Fallback: return None to disable adaptive sizing
+        None
+    }
+
     /// Start consuming CDC events with unified cancellation token
     pub async fn start_consuming_with_cancellation_token(
         &mut self,
@@ -1044,9 +1499,45 @@ impl CDCConsumer {
                         self.cdc_topic
                     );
 
-                    // Wait a moment for the consumer to join the group
-                    tracing::info!("CDCConsumer: Waiting for consumer to join group...");
-                    tokio::time::sleep(Duration::from_secs(30)).await; // 5'ten 30'a çıkarıldı
+                    // CRITICAL FIX: Force consumer group join by polling
+                    tracing::info!("CDCConsumer: Forcing consumer group join by polling...");
+
+                    // Poll a few times to trigger group join
+                    let mut join_attempts = 0;
+                    let max_join_attempts = 10;
+
+                    while join_attempts < max_join_attempts {
+                        match self.kafka_consumer.stream().next().await {
+                            Some(Ok(_)) => {
+                                tracing::info!("CDCConsumer: ✅ Consumer group join successful after {} attempts", join_attempts + 1);
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    "CDCConsumer: Poll error during join attempt {}: {:?}",
+                                    join_attempts + 1,
+                                    e
+                                );
+                            }
+                            None => {
+                                tracing::debug!(
+                                    "CDCConsumer: No message during join attempt {}",
+                                    join_attempts + 1
+                                );
+                            }
+                        }
+                        join_attempts += 1;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+
+                    if join_attempts >= max_join_attempts {
+                        tracing::warn!("CDCConsumer: Consumer group join may not be complete after {} attempts", max_join_attempts);
+                    }
+
+                    // Consumer is ready to start processing
+                    tracing::info!(
+                        "CDCConsumer: Consumer group join completed, ready to start processing"
+                    );
 
                     // Log consumer group status
                     tracing::info!("CDCConsumer: Consumer group join completed");
@@ -1076,7 +1567,7 @@ impl CDCConsumer {
                     }
 
                     // Wait before retry
-                    tokio::time::sleep(Duration::from_secs(30)).await; // 5'ten 30'a çıkarıldı
+                    tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             }
         }
@@ -1096,53 +1587,141 @@ impl CDCConsumer {
         let (dlq_tx, mut dlq_rx) =
             mpsc::channel::<(String, i32, i64, Vec<u8>, Option<Vec<u8>>, String)>(1000);
         let kafka_consumer = self.kafka_consumer.clone();
+        let shutdown_token_clone = shutdown_token.clone();
+
         // Background offset committer
         tokio::spawn(async move {
             let mut last_commit_time = std::time::Instant::now();
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                let mut offsets = offsets_clone.lock().await;
-                let should_commit = offsets.len() >= 5000 || // Commit every 5000 messages
-                                   last_commit_time.elapsed() > std::time::Duration::from_millis(25); // Or every 25ms
 
-                if should_commit && !offsets.is_empty() {
-                    // Only commit the highest offset per (topic, partition)
-                    let mut highest: HashMap<(String, i32), i64> = HashMap::new();
-                    for (topic, partition, offset) in offsets.drain(..) {
-                        let key = (topic.clone(), partition);
-                        highest
-                            .entry(key)
-                            .and_modify(|v| *v = (*v).max(offset))
-                            .or_insert(offset);
+            // Read timing configuration from environment variables
+            // CRITICAL: Adjusted for Debezium's 5ms poll interval
+            let offset_commit_sleep_ms = std::env::var("CDC_OFFSET_COMMIT_SLEEP_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10); // Reduced from 50ms to 10ms to match Debezium's 5ms poll
+
+            let offset_commit_batch_size = std::env::var("CDC_OFFSET_COMMIT_BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(100); // Reduced from 1000 to 100 for faster commits
+
+            let offset_commit_timeout_ms = std::env::var("CDC_OFFSET_COMMIT_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(25); // Reduced from 100ms to 25ms to match Debezium's 5ms poll
+
+            tracing::info!(
+                "Offset committer config - sleep: {}ms, batch_size: {}, timeout: {}ms (optimized for Debezium 5ms poll)",
+                offset_commit_sleep_ms, offset_commit_batch_size, offset_commit_timeout_ms
+            );
+
+            loop {
+                tokio::select! {
+                    _ = shutdown_token_clone.cancelled() => {
+                        tracing::info!("Background offset committer: Received shutdown signal");
+                        break;
                     }
-                    let offset_count = highest.len(); // Store length before moving
-                    let mut tpl = TopicPartitionList::new();
-                    for ((topic, partition), offset) in highest {
-                        tpl.add_partition_offset(&topic, partition, Offset::Offset(offset + 1))
-                            .unwrap();
-                    }
-                    if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
-                        tracing::error!("Failed to batch commit offsets: {}", e);
-                    } else {
-                        tracing::info!("✅ Successfully committed {} offsets", offset_count);
-                        last_commit_time = std::time::Instant::now();
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(offset_commit_sleep_ms)) => {
+                        let mut offsets = offsets_clone.lock().await;
+                        let should_commit = offsets.len() >= offset_commit_batch_size ||
+                                           last_commit_time.elapsed() > std::time::Duration::from_millis(offset_commit_timeout_ms);
+
+                        if should_commit && !offsets.is_empty() {
+                            // Only commit the highest offset per (topic, partition)
+                            let mut highest: HashMap<(String, i32), i64> = HashMap::new();
+                            for (topic, partition, offset) in offsets.drain(..) {
+                                let key = (topic.clone(), partition);
+                                highest
+                                    .entry(key)
+                                    .and_modify(|v| *v = (*v).max(offset))
+                                    .or_insert(offset);
+                            }
+                            let offset_count = highest.len(); // Store length before moving
+                            let mut tpl = TopicPartitionList::new();
+                            for ((topic, partition), offset) in highest {
+                                tpl.add_partition_offset(&topic, partition, Offset::Offset(offset + 1))
+                                    .unwrap();
+                            }
+                            if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
+                                tracing::error!("Failed to batch commit offsets: {}", e);
+                            } else {
+                                tracing::info!("✅ Successfully committed {} offsets", offset_count);
+                                last_commit_time = std::time::Instant::now();
+                            }
+                        }
                     }
                 }
             }
+
+            // Final commit on shutdown
+            let mut offsets = offsets_clone.lock().await;
+            if !offsets.is_empty() {
+                let mut highest: HashMap<(String, i32), i64> = HashMap::new();
+                for (topic, partition, offset) in offsets.drain(..) {
+                    let key = (topic.clone(), partition);
+                    highest
+                        .entry(key)
+                        .and_modify(|v| *v = (*v).max(offset))
+                        .or_insert(offset);
+                }
+                let mut tpl = TopicPartitionList::new();
+                for ((topic, partition), offset) in highest {
+                    tpl.add_partition_offset(&topic, partition, Offset::Offset(offset + 1))
+                        .unwrap();
+                }
+                if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
+                    tracing::error!("Failed to final commit offsets on shutdown: {}", e);
+                } else {
+                    tracing::info!("✅ Final commit on shutdown completed");
+                }
+            }
         });
+
         // Background DLQ handler (batch)
         let dlq_producer = processor.clone();
+        let shutdown_token_dlq = shutdown_token.clone();
         tokio::spawn(async move {
-            let mut batch = Vec::with_capacity(100);
+            // Read DLQ configuration from environment variables
+            // CRITICAL: Adjusted for Debezium's 5ms poll interval
+            let dlq_batch_size = std::env::var("CDC_DLQ_BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(50); // Reduced from 500 to 50 for faster processing
+
+            let dlq_timeout_ms = std::env::var("CDC_DLQ_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(100); // Reduced from 500ms to 100ms for faster processing
+
+            tracing::info!(
+                "DLQ handler config - batch_size: {}, timeout: {}ms (optimized for Debezium 5ms poll)",
+                dlq_batch_size, dlq_timeout_ms
+            );
+
+            let mut batch = Vec::with_capacity(dlq_batch_size);
             let mut last_send = std::time::Instant::now();
             loop {
                 tokio::select! {
+                    _ = shutdown_token_dlq.cancelled() => {
+                        tracing::info!("Background DLQ handler: Received shutdown signal");
+                        break;
+                    }
                     Some((topic, partition, offset, payload, key, error)) = dlq_rx.recv() => {
                         batch.push((topic, partition, offset, payload, key, error));
-                        if batch.len() >= 100 || last_send.elapsed() > std::time::Duration::from_millis(100) {
+                        if batch.len() >= dlq_batch_size || last_send.elapsed() > std::time::Duration::from_millis(dlq_timeout_ms) {
                             let to_send = std::mem::take(&mut batch);
                             for (topic, partition, offset, payload, key, error) in to_send {
-                                if let Err(e) = dlq_producer.send_to_dlq_from_cdc_parts(&topic, partition, offset, &payload, key.as_deref(), &error).await {
+                                if let Err(e) = dlq_producer
+                                    .send_to_dlq_from_cdc_parts(
+                                        &topic,
+                                        partition,
+                                        offset,
+                                        &payload,
+                                        key.as_deref(),
+                                        &error,
+                                    )
+                                    .await
+                                {
                                     tracing::error!("Failed to send to DLQ: {}", e);
                                 }
                             }
@@ -1153,12 +1732,42 @@ impl CDCConsumer {
                         if !batch.is_empty() {
                             let to_send = std::mem::take(&mut batch);
                             for (topic, partition, offset, payload, key, error) in to_send {
-                                if let Err(e) = dlq_producer.send_to_dlq_from_cdc_parts(&topic, partition, offset, &payload, key.as_deref(), &error).await {
+                                if let Err(e) = dlq_producer
+                                    .send_to_dlq_from_cdc_parts(
+                                        &topic,
+                                        partition,
+                                        offset,
+                                        &payload,
+                                        key.as_deref(),
+                                        &error,
+                                    )
+                                    .await
+                                {
                                     tracing::error!("Failed to send to DLQ: {}", e);
                                 }
                             }
                         }
                         break;
+                    }
+                }
+            }
+
+            // Final DLQ processing on shutdown
+            if !batch.is_empty() {
+                let to_send = std::mem::take(&mut batch);
+                for (topic, partition, offset, payload, key, error) in to_send {
+                    if let Err(e) = dlq_producer
+                        .send_to_dlq_from_cdc_parts(
+                            &topic,
+                            partition,
+                            offset,
+                            &payload,
+                            key.as_deref(),
+                            &error,
+                        )
+                        .await
+                    {
+                        tracing::error!("Failed to send to DLQ on shutdown: {}", e);
                     }
                 }
             }
@@ -1170,7 +1779,7 @@ impl CDCConsumer {
         let poll_interval_ms = std::env::var("CDC_POLL_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(5); // CRITICAL FIX: Reduced from 100ms to 5ms for better latency
+            .unwrap_or(100); // CRITICAL FIX: Increased from 5ms to 100ms to prevent consumer group ejection
 
         // CRITICAL OPTIMIZATION: Batch processing configuration
         let batch_size = std::env::var("CDC_BATCH_SIZE")

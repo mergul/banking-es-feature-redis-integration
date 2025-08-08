@@ -3,6 +3,12 @@ use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::consistency_manager::ConsistencyManager;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
+use crate::infrastructure::CDCBatchingConfig;
+use crate::infrastructure::CDCBatchingService;
+use crate::infrastructure::CDCBatchingServiceTrait;
+use crate::infrastructure::CopyOptimizationConfig;
+use crate::infrastructure::ProjectionConfig;
+use crate::ProjectionStore;
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -26,6 +32,19 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
+use crate::infrastructure::dlq_router::dlq_router::DLQRouter;
+use crate::infrastructure::projections::{AccountProjection, TransactionProjection};
+
+/// Batch processing job types for COPY optimization
+#[derive(Debug, Clone)]
+pub enum BatchProcessingJob {
+    AccountProjections(Vec<AccountProjection>),
+    TransactionProjections(Vec<TransactionProjection>),
+    Mixed {
+        accounts: Vec<AccountProjection>,
+        transactions: Vec<TransactionProjection>,
+    },
+}
 
 // Optimized CDC outbox message with memory layout improvements
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,7 +600,7 @@ impl UltraOptimizedCDCEventProcessor {
         consistency_manager: Option<Arc<ConsistencyManager>>,
         write_pool: Option<Arc<sqlx::PgPool>>,
     ) -> Self {
-        let business_config = business_config.unwrap_or_default();
+        let business_config: BusinessLogicConfig = business_config.unwrap_or_default();
         let performance_config = performance_config.unwrap_or_default();
 
         // 1. Increase cache size and TTL with advanced configuration
@@ -622,7 +641,7 @@ impl UltraOptimizedCDCEventProcessor {
             shutdown_token: CancellationToken::new(),
             business_config: Arc::new(Mutex::new(business_config)),
             performance_config: Arc::new(Mutex::new(performance_config.clone())),
-            performance_profiler: Arc::new(Mutex::new(PerformanceProfiler::new(100))),
+            performance_profiler: Arc::new(Mutex::new(PerformanceProfiler::new(100, true))),
             adaptive_concurrency: Arc::new(Mutex::new(performance_config.min_concurrency)),
             backpressure_signal: Arc::new(AtomicBool::new(false)),
             memory_monitor: Arc::new(Mutex::new(MemoryMonitor::new(
@@ -747,6 +766,156 @@ impl UltraOptimizedCDCEventProcessor {
         // Start the batch processor
         self.start_batch_processor().await
     }
+
+    /// Enhanced CDC batch processing with COPY optimization
+    pub async fn process_cdc_events_batch_with_copy(&self, cdc_events: Vec<serde_json::Value>) -> Result<()> {
+        if cdc_events.is_empty() {
+            return Ok(());
+        }
+
+        let start_time = Instant::now();
+        let batch_size = cdc_events.len();
+        tracing::info!(
+            "🔍 CDC Event Processor (COPY-optimized): Starting batch processing of {} events",
+            batch_size
+        );
+
+        // Extract and validate all events first (unchanged)
+        let mut processable_events = Vec::with_capacity(batch_size);
+        for cdc_event in &cdc_events {
+            match self.extract_event_serde_json(cdc_event) {
+                Ok(Some(event)) => {
+                    processable_events.push(event);
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::error!("CDC Event Processor: Failed to extract event: {:?}", e);
+                    continue;
+                }
+            }
+        }
+
+        if processable_events.is_empty() {
+            return Ok(());
+        }
+
+        // Group events by aggregate (unchanged)
+        let events_by_aggregate = Self::group_events_by_aggregate(processable_events);
+        
+        // Process events and get projections (unchanged)
+        let (projections, _processed_aggregates) = Self::process_events_for_aggregates(
+            events_by_aggregate,
+            &self.projection_cache,
+            &self.cache_service,
+            &self.projection_store,
+            &self.metrics,
+        ).await?;
+
+        // CRITICAL OPTIMIZATION: Use COPY-optimized batch processing
+        if !projections.is_empty() {
+            let projections_len = projections.len();
+            
+            // Convert to format expected by projection store
+            let transactions: Vec<crate::infrastructure::projections::TransactionProjection> = Vec::new(); // Extract from domain events if needed
+            
+            // Use COPY-optimized batch processing
+            if let Some(projection_store) = self.projection_store.as_any().downcast_ref::<crate::infrastructure::projections::ProjectionStore>() {
+                match projection_store.process_cdc_batch_optimized(projections, transactions).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "🔍 CDC Event Processor (COPY-optimized): Successfully processed {} projections",
+                            projections_len
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "🔍 CDC Event Processor (COPY-optimized): Failed to process projections: {:?}",
+                            e
+                        );
+                        return Err(e);
+                    }
+                }
+            } else {
+                // Fallback to standard processing
+                tracing::warn!("🔍 CDC Event Processor: COPY optimization not available, using standard processing");
+                match self.projection_store.upsert_accounts_batch(projections).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "🔍 CDC Event Processor: Successfully batch upserted {} projections (fallback)",
+                            projections_len
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("🔍 CDC Event Processor: Failed to batch upsert projections: {:?}", e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        let duration = start_time.elapsed();
+        tracing::info!(
+            "🔍 CDC Event Processor (COPY-optimized): Batch processing completed in {:?}",
+            duration
+        );
+
+        Ok(())
+    }
+
+    /// Enhanced initialization with COPY optimization setup
+    pub async fn initialize_with_copy_optimization(&self) -> Result<()> {
+        tracing::info!("UltraOptimizedCDCEventProcessor: Initializing with COPY optimization");
+
+        // Apply database optimizations for COPY operations
+        if let Some(projection_store) = self.projection_store.as_any().downcast_ref::<ProjectionStore>() {
+            // Apply PostgreSQL optimizations
+            if let Err(e) = projection_store.apply_postgres_bulk_settings(false, true).await {
+                tracing::warn!("Failed to apply PostgreSQL COPY optimizations: {}", e);
+            } else {
+                tracing::info!("Successfully applied PostgreSQL COPY optimizations");
+            }
+
+            // Create optimized indexes if they don't exist
+            // let pool = &projection_store.pools.write_pool;
+            // if let Err(e) = sqlx::query(CREATE_OPTIMIZED_INDEXES_SQL).execute(pool).await {
+            //     tracing::warn!("Failed to create optimized indexes for COPY operations: {}", e);
+            // } else {
+            //     tracing::info!("Successfully verified/created optimized indexes for COPY operations");
+            // }
+        }
+
+        // Log final configuration
+        let copy_config = CopyOptimizationConfig::from_env();
+        tracing::info!(
+            "UltraOptimizedCDCEventProcessor: COPY optimization initialized - enabled: {}, account_threshold: {}, transaction_threshold: {}, batch_size: {}",
+            copy_config.enable_copy_optimization,
+            copy_config.projection_copy_threshold,
+            copy_config.transaction_copy_threshold,
+            copy_config.cdc_projection_batch_size
+        );
+
+        Ok(())
+    }
+
+    /// Performance monitoring for COPY operations
+    pub fn get_copy_performance_stats(&self) -> String {
+        if let Some(projection_store) = self.projection_store.as_any().downcast_ref::<ProjectionStore>() {
+            let copy_metrics = &projection_store.metrics.copy_metrics;
+            
+            format!(
+                "COPY Performance Stats - Success Rate: {:.2}%, Avg COPY Duration: {:.2}ms, Avg UNNEST Duration: {:.2}ms, Fallbacks: {}",
+                copy_metrics.get_copy_success_rate(),
+                copy_metrics.get_average_copy_duration(),
+                copy_metrics.get_average_unnest_duration(),
+                copy_metrics.copy_fallback_to_unnest.load(std::sync::atomic::Ordering::Relaxed)
+            )
+        } else {
+            "COPY optimization not available".to_string()
+        }
+    }
+
+
+
 
     /// Ultra-fast event processing with business logic validation
     #[instrument(skip(self, cdc_event))]
@@ -881,6 +1050,178 @@ impl UltraOptimizedCDCEventProcessor {
         Ok(())
     }
 
+    /// COPY-optimized batch processor
+    async fn batch_processor_with_copy_optimization(
+        mut batch_rx: mpsc::Receiver<BatchProcessingJob>,
+        projection_store: Arc<ProjectionStore>,
+        metrics: Arc<EnhancedCDCMetrics>,
+        circuit_breaker: Arc<AdvancedCircuitBreaker>,
+        performance_profiler: Arc<PerformanceProfiler>,
+        shutdown_token: CancellationToken,
+        copy_config: CopyOptimizationConfig,
+    ) {
+        tracing::info!("COPY-optimized batch processor started");
+
+        let mut batch_buffer = Vec::new();
+        let mut last_flush = std::time::Instant::now();
+        let flush_interval = Duration::from_millis(copy_config.cdc_projection_batch_size as u64);
+
+        loop {
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    tracing::info!("COPY-optimized batch processor shutting down");
+
+                    // Process remaining batches
+                    if !batch_buffer.is_empty() {
+                        Self::process_accumulated_batch_with_copy(
+                            &batch_buffer,
+                            &projection_store,
+                            &metrics,
+                            &performance_profiler,
+                            &copy_config,
+                        ).await;
+                    }
+                    break;
+                }
+
+                Some(job) = batch_rx.recv() => {
+                    batch_buffer.push(job);
+
+                    // Process batch if it's large enough or timeout reached
+                    let should_flush = batch_buffer.len() >= copy_config.cdc_projection_batch_size ||
+                                     last_flush.elapsed() >= flush_interval;
+
+                    if should_flush && circuit_breaker.can_execute().await {
+                        let batch_to_process = std::mem::take(&mut batch_buffer);
+
+                        let result = Self::process_accumulated_batch_with_copy(
+                            &batch_to_process,
+                            &projection_store,
+                            &metrics,
+                            &performance_profiler,
+                            &copy_config,
+                        ).await;
+
+                        if result.is_err() {
+                            circuit_breaker.on_failure();
+                        } else {
+                            circuit_breaker.on_success();
+                        }
+
+                        last_flush = std::time::Instant::now();
+                    }
+                }
+
+                _ = tokio::time::sleep(flush_interval) => {
+                    if !batch_buffer.is_empty() && circuit_breaker.can_execute().await {
+                        let batch_to_process = std::mem::take(&mut batch_buffer);
+
+                        let result = Self::process_accumulated_batch_with_copy(
+                            &batch_to_process,
+                            &projection_store,
+                            &metrics,
+                            &performance_profiler,
+                            &copy_config,
+                        ).await;
+
+                        if result.is_err() {
+                            circuit_breaker.on_failure();
+                        } else {
+                            circuit_breaker.on_success();
+                        }
+
+                        last_flush = std::time::Instant::now();
+                    }
+                }
+            }
+        }
+
+        tracing::info!("COPY-optimized batch processor stopped");
+    }
+
+
+    /// Process accumulated batch with COPY optimization
+    async fn process_accumulated_batch_with_copy(
+        batch_jobs: &[BatchProcessingJob],
+        projection_store: &Arc<ProjectionStore>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+        performance_profiler: &Arc<PerformanceProfiler>,
+        copy_config: &CopyOptimizationConfig,
+    ) -> Result<()> {
+        if batch_jobs.is_empty() {
+            return Ok(());
+        }
+
+        let start_time = std::time::Instant::now();
+
+        // Aggregate all projections from batch jobs
+        let mut all_accounts = Vec::new();
+        let mut all_transactions = Vec::new();
+
+        for job in batch_jobs {
+            match job {
+                BatchProcessingJob::AccountProjections(accounts) => {
+                    all_accounts.extend_from_slice(accounts);
+                }
+                BatchProcessingJob::TransactionProjections(transactions) => {
+                    all_transactions.extend_from_slice(transactions);
+                }
+                BatchProcessingJob::Mixed {
+                    accounts,
+                    transactions,
+                } => {
+                    all_accounts.extend_from_slice(accounts);
+                    all_transactions.extend_from_slice(transactions);
+                }
+            }
+        }
+
+        tracing::info!(
+            "COPY-optimized batch processor: Processing {} accounts, {} transactions",
+            all_accounts.len(),
+            all_transactions.len()
+        );
+
+        // Use COPY-optimized processing
+        let result = projection_store
+            .process_cdc_batch_optimized(all_accounts, all_transactions)
+            .await;
+
+        let duration = start_time.elapsed();
+
+        match result {
+            Ok(_) => {
+                metrics.batch_processing_duration.fetch_add(
+                    duration.as_millis() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                metrics
+                    .batches_processed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                tracing::info!(
+                    "COPY-optimized batch processor: Successfully processed {} jobs in {:?}",
+                    batch_jobs.len(),
+                    duration
+                );
+            }
+            Err(ref e) => {
+                metrics
+                    .batch_processing_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                tracing::error!(
+                    "COPY-optimized batch processor: Failed to process {} jobs in {:?}: {:?}",
+                    batch_jobs.len(),
+                    duration,
+                    e
+                );
+            }
+        }
+
+        result
+    }
+ 
     /// CRITICAL OPTIMIZATION: Process multiple CDC events in batch
     pub async fn process_cdc_events_batch(&self, cdc_events: Vec<serde_json::Value>) -> Result<()> {
         if cdc_events.is_empty() {
@@ -2153,10 +2494,11 @@ impl UltraOptimizedCDCEventProcessor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
 
+        // CRITICAL FIX: Enhanced base64 decoding with detailed debugging
         let payload_bytes = match BASE64_STANDARD.decode(payload_str) {
             Ok(bytes) => {
                 tracing::debug!(
-                    "Decoded base64 payload for event_id {}: {} bytes (first 16: {:?})",
+                    "Successfully decoded base64 payload for event_id {}: {} bytes (first 16: {:?})",
                     event_id,
                     bytes.len(),
                     &bytes[..bytes.len().min(16)]
@@ -2164,38 +2506,31 @@ impl UltraOptimizedCDCEventProcessor {
                 bytes
             }
             Err(e) => {
+                // CRITICAL DEBUG: Analyze the payload to understand the corruption
                 tracing::error!(
                     "Failed to base64 decode payload for event_id {}: {}",
                     event_id,
                     e
                 );
-                return Err(anyhow::anyhow!("Base64 decode error: {}", e));
+                
+                // Debug payload content
+                tracing::error!(
+                    "Payload string (first 100 chars): '{}'",
+                    &payload_str[..payload_str.len().min(100)]
+                );
+                
+                // Check if it's already binary data (not base64)
+                if payload_str.len() > 0 && !payload_str.contains(|c| c == '+' || c == '/' || c == '=') {
+                    tracing::warn!(
+                        "Payload doesn't look like base64, trying to use as raw bytes for event_id {}",
+                        event_id
+                    );
+                    payload_str.as_bytes().to_vec()
+                } else {
+                    return Err(anyhow::anyhow!("Base64 decode error: {}", e));
+                }
             }
         };
-        let domain_event_result =
-            bincode::deserialize::<crate::domain::AccountEvent>(&payload_bytes);
-        if domain_event_result.is_err() {
-            let this = self.clone();
-            let event_type_clone = event_type.clone();
-            let payload_bytes_clone = payload_bytes.clone();
-            tokio::spawn(async move {
-                let _ = this
-                    .send_to_dlq(
-                        &ProcessableEvent {
-                            event_id,
-                            aggregate_id,
-                            event_type: event_type_clone,
-                            payload: payload_bytes_clone,
-                            partition_key: None,
-                            domain_event: None,
-                        },
-                        &anyhow::anyhow!("Bincode deserialize error"),
-                        0,
-                        crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Deserialization,
-                    )
-                    .await;
-            });
-        }
         let partition_key = event_data
             .get("partition_key")
             .and_then(|v| v.as_str())
@@ -2218,6 +2553,159 @@ impl UltraOptimizedCDCEventProcessor {
         .map(Some)
     }
 
+    fn extract_event_from_cdc_data(
+        &self,
+        event_data: &serde_json::Value,
+    ) -> Result<Option<ProcessableEvent>> {
+        let event_id = event_data
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing event ID"))?
+            .parse::<Uuid>()
+            .map_err(|e| anyhow::anyhow!("Invalid event ID: {}", e))?;
+
+        let aggregate_id = event_data
+            .get("aggregate_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing aggregate ID"))?
+            .parse::<Uuid>()
+            .map_err(|e| anyhow::anyhow!("Invalid aggregate ID: {}", e))?;
+
+        let event_type = event_data
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing event type"))?
+            .to_string();
+
+        tracing::info!(
+            "CDC EXTRACTED: aggregate_id={}, event_id={}, event_type={}",
+            aggregate_id,
+            event_id,
+            event_type
+        );
+
+        let payload_str = event_data
+            .get("payload")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
+
+        // CRITICAL FIX: Enhanced base64 decoding with detailed debugging
+        let payload_bytes = match BASE64_STANDARD.decode(payload_str) {
+            Ok(bytes) => {
+                tracing::debug!(
+                    "Successfully decoded base64 payload for event_id {}: {} bytes (first 16: {:?})",
+                    event_id,
+                    bytes.len(),
+                    &bytes[..bytes.len().min(16)]
+                );
+                bytes
+            }
+            Err(e) => {
+                // CRITICAL DEBUG: Analyze the payload to understand the corruption
+                tracing::error!(
+                    "Failed to base64 decode payload for event_id {}: {}",
+                    event_id,
+                    e
+                );
+                
+                // Debug payload content
+                tracing::error!(
+                    "Payload string (first 100 chars): '{}'",
+                    &payload_str[..payload_str.len().min(100)]
+                );
+                
+                // Check if it's already binary data (not base64)
+                if payload_str.len() > 0 && !payload_str.contains(|c| c == '+' || c == '/' || c == '=') {
+                    tracing::warn!(
+                        "Payload doesn't look like base64, trying to use as raw bytes for event_id {}",
+                        event_id
+                    );
+                    payload_str.as_bytes().to_vec()
+                } else {
+                    return Err(anyhow::anyhow!("Base64 decode error: {}", e));
+                }
+            }
+        };
+
+        // CRITICAL FIX: Enhanced bincode deserialization with fallback
+        let domain_event_result = bincode::deserialize::<crate::domain::AccountEvent>(&payload_bytes);
+        
+        match domain_event_result {
+            Ok(domain_event) => {
+                tracing::debug!(
+                    "Successfully deserialized domain event for event_id {}",
+                    event_id
+                );
+                
+                let partition_key = event_data
+                    .get("partition_key")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                ProcessableEvent::new(
+                    event_id,
+                    aggregate_id,
+                    event_type,
+                    payload_bytes,
+                    partition_key,
+                )
+                .map(Some)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to deserialize domain event for event_id {}: {}",
+                    event_id,
+                    e
+                );
+                
+                // CRITICAL FIX: Send to DLQ instead of failing completely
+                let this = self.clone();
+                let event_type_clone = event_type.clone();
+                let payload_bytes_clone = payload_bytes.clone();
+                
+                tokio::spawn(async move {
+                    let _ = this
+                        .send_to_dlq(
+                            &ProcessableEvent {
+                                event_id,
+                                aggregate_id,
+                                event_type: event_type_clone,
+                                payload: payload_bytes_clone,
+                                partition_key: None,
+                                domain_event: None,
+                            },
+                            &anyhow::anyhow!("Bincode deserialize error: {}", e),
+                            0,
+                            crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Deserialization,
+                        )
+                        .await;
+                });
+                
+                // Return None to skip this event but continue processing others
+                Ok(None)
+            }
+        }
+    }
+
+    /// Performance monitor loop
+    async fn performance_monitor_loop(
+        monitoring_system: Arc<AdvancedMonitoringSystem>,
+        shutdown_token: CancellationToken,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+
+        loop {
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    tracing::info!("Performance monitor shutting down");
+                    break;
+                }
+                _ = interval.tick() => {
+                    monitoring_system.get_metrics_summary().await;
+                }
+            }
+        }
+    }
     /// Get comprehensive metrics for monitoring and observability
     pub async fn get_metrics(&self) -> EnhancedCDCMetrics {
         // Update metrics with current state
@@ -3311,6 +3799,11 @@ pub struct AdvancedPerformanceConfig {
     // Performance monitoring
     pub enable_performance_profiling: bool,
     pub metrics_collection_interval_ms: u64,
+    pub enable_detailed_profiling: bool,
+    pub enable_adaptive_batching: bool,
+    pub max_retries: u32,
+    pub retry_backoff_ms: u64,
+    pub batch_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -3343,6 +3836,11 @@ impl Default for AdvancedPerformanceConfig {
 
             enable_performance_profiling: true,
             metrics_collection_interval_ms: 500, // Reduced from 1000ms to 500ms for more frequent updates
+            enable_detailed_profiling: true,
+            max_retries: 3,
+            retry_backoff_ms: 100,
+            enable_adaptive_batching: true,
+            batch_timeout: Duration::from_millis(50),
         }
     }
 }
@@ -3357,10 +3855,11 @@ pub struct PerformanceProfiler {
     error_rates: Vec<f64>,
     last_reset: Instant,
     max_history_size: usize,
+    enable_detailed_profiling: bool,
 }
 
 impl PerformanceProfiler {
-    pub fn new(max_history_size: usize) -> Self {
+    pub fn new(max_history_size: usize, enable_detailed_profiling: bool) -> Self {
         Self {
             batch_times: Vec::new(),
             memory_usage: Vec::new(),
@@ -3369,6 +3868,7 @@ impl PerformanceProfiler {
             error_rates: Vec::new(),
             last_reset: Instant::now(),
             max_history_size,
+            enable_detailed_profiling,
         }
     }
 

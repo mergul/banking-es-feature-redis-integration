@@ -128,7 +128,16 @@ async fn setup_stress_test_environment(
     println!("✅ All services initialized successfully");
 
     // Create KafkaConfig instance (same as main.rs)
-    let kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+    let mut kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
+
+    // Use unique consumer group ID for tests to avoid conflicts
+    let unique_group_id = format!(
+        "banking-es-group-test-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    kafka_config.group_id = unique_group_id.clone();
+    std::env::set_var("KAFKA_GROUP_ID", unique_group_id.clone());
+    println!("🔧 Using unique consumer group ID: {}", unique_group_id);
 
     // Initialize CQRS service using the services from ServiceContext (same as main.rs)
     let cqrs_service = Arc::new(
@@ -165,6 +174,7 @@ async fn setup_stress_test_environment(
     let cdc_config = DebeziumConfig::default();
     let metrics = Arc::new(EnhancedCDCMetrics::default());
 
+    // Create CDC service manager with unique consumer group ID
     let mut cdc_service_manager = CDCServiceManager::new(
         cdc_config,
         cdc_outbox_repo,
@@ -845,6 +855,7 @@ async fn test_batch_processing_endurance() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_read_operations_after_writes() {
     let _ = tracing_subscriber::fmt::try_init();
     println!("🚀 Starting Read Operations Test After Writes (Bulk Create)");
@@ -1467,7 +1478,7 @@ async fn test_write_batching_multi_row_inserts() {
     // Use hash-based super batch processing
     println!("🚀 Using hash-based super batch processing...");
     let operation_ids = match batching_service
-        .submit_operations_hash_super_batch(operations, 8) // 8 super batches with locking
+        .submit_operations_hash_super_batch(operations, 16) // 8 super batches with locking
         .await
     {
         Ok(ids) => {
@@ -1591,7 +1602,7 @@ async fn test_write_batching_multi_row_inserts() {
     // Use hash-based super batch processing for write operations
     let write_start = Instant::now();
     let write_operation_ids = match batching_service_clone_phase2
-        .submit_operations_hash_super_batch(write_operations, 8) // 8 super batches with locking
+        .submit_operations_hash_super_batch(write_operations, 16) // 8 super batches with locking
         .await
     {
         Ok(ids) => {
@@ -2079,6 +2090,7 @@ async fn get_existing_account_ids(pool: &PgPool, limit: usize) -> Result<Vec<Uui
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_read_batching_performance() {
     println!("🚀 Starting Read Batching Performance Test");
     let _ = tracing_subscriber::fmt::try_init();

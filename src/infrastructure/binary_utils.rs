@@ -146,3 +146,88 @@ impl PgCopyBinaryWriter {
 pub trait ToPgCopyBinary {
     fn to_pgcopy_binary(&self) -> Result<Vec<u8>, std::io::Error>;
 }
+
+/// CRITICAL FIX: PostgreSQL 17.5 compatible CSV-based COPY writer
+/// This avoids the binary protocol issues with newer PostgreSQL versions
+pub struct PgCopyCsvWriter {
+    buffer: Cursor<Vec<u8>>,
+}
+
+impl PgCopyCsvWriter {
+    pub fn new() -> Self {
+        Self {
+            buffer: Cursor::new(Vec::new()),
+        }
+    }
+
+    /// Write a CSV row with tab delimiter
+    pub fn write_csv_row(&mut self, fields: &[&str]) -> Result<(), std::io::Error> {
+        for (i, field) in fields.iter().enumerate() {
+            if i > 0 {
+                self.buffer.write_all(b"\t")?;
+            }
+
+            // Escape special characters for CSV
+            let escaped_field = field
+                .replace('\t', "\\t")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\\', "\\\\");
+
+            self.buffer.write_all(escaped_field.as_bytes())?;
+        }
+        self.buffer.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// Write UUID as string
+    pub fn write_uuid_csv(&mut self, uuid: &Uuid) -> Result<(), std::io::Error> {
+        self.buffer.write_all(uuid.to_string().as_bytes())?;
+        Ok(())
+    }
+
+    /// Write bytea as hex string
+    pub fn write_bytea_csv(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
+        self.buffer.write_all(b"\\x")?;
+        for byte in data {
+            write!(&mut self.buffer, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+
+    /// Write JSONB as string
+    pub fn write_jsonb_csv(
+        &mut self,
+        json_value: &serde_json::Value,
+    ) -> Result<(), std::io::Error> {
+        match json_value {
+            serde_json::Value::Null => {
+                // Write empty string for NULL
+                self.buffer.write_all(b"")?;
+            }
+            _ => {
+                let json_str = json_value.to_string();
+                // Escape special characters
+                let escaped_json = json_str
+                    .replace('\t', "\\t")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r")
+                    .replace('\\', "\\\\");
+                self.buffer.write_all(escaped_json.as_bytes())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write timestamp as ISO string
+    pub fn write_timestamp_csv(&mut self, timestamp: &DateTime<Utc>) -> Result<(), std::io::Error> {
+        let timestamp_str = timestamp.format("%Y-%m-%d %H:%M:%S%.6f UTC").to_string();
+        self.buffer.write_all(timestamp_str.as_bytes())?;
+        Ok(())
+    }
+
+    /// Finish and get the CSV data
+    pub fn finish(self) -> Result<Vec<u8>, std::io::Error> {
+        Ok(self.buffer.into_inner())
+    }
+}
