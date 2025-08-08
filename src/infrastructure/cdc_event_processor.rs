@@ -2595,42 +2595,35 @@ impl UltraOptimizedCDCEventProcessor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
 
-        // CRITICAL FIX: Enhanced base64 decoding with detailed debugging
-        let payload_bytes = match BASE64_STANDARD.decode(payload_str) {
-            Ok(bytes) => {
-                tracing::debug!(
-                    "Successfully decoded base64 payload for event_id {}: {} bytes (first 16: {:?})",
-                    event_id,
-                    bytes.len(),
-                    &bytes[..bytes.len().min(16)]
-                );
-                bytes
-            }
+        // The payload from Debezium for a BYTEA column is always Base64 encoded.
+        let decoded_payload = match BASE64_STANDARD.decode(payload_str) {
+            Ok(bytes) => bytes,
             Err(e) => {
-                // CRITICAL DEBUG: Analyze the payload to understand the corruption
-                tracing::error!(
-                    "Failed to base64 decode payload for event_id {}: {}",
-                    event_id,
-                    e
-                );
-                
-                // Debug payload content
-                tracing::error!(
-                    "Payload string (first 100 chars): '{}'",
-                    &payload_str[..payload_str.len().min(100)]
-                );
-                
-                // Check if it's already binary data (not base64)
-                if payload_str.len() > 0 && !payload_str.contains(|c| c == '+' || c == '/' || c == '=') {
-                    tracing::warn!(
-                        "Payload doesn't look like base64, trying to use as raw bytes for event_id {}",
-                        event_id
-                    );
-                    payload_str.as_bytes().to_vec()
-                } else {
-                    return Err(anyhow::anyhow!("Base64 decode error: {}", e));
+                tracing::error!("Failed to base64 decode payload for event_id {}: {}", event_id, e);
+                return Err(anyhow::anyhow!("Base64 decode error: {}", e));
+            }
+        };
+
+        // The result of the Base64 decode might be a hex string (from the COPY command)
+        // or raw bincode bytes. We check for the `\x` prefix to decide.
+        let decoded_str = String::from_utf8_lossy(&decoded_payload);
+
+        let payload_bytes = if decoded_str.starts_with("\\x") {
+            let hex_payload = decoded_str.trim_start_matches("\\x");
+            match hex::decode(hex_payload) {
+                Ok(bytes) => {
+                    tracing::debug!("Successfully hex-decoded payload from Base64 envelope for event_id {}", event_id);
+                    bytes
+                }
+                Err(e) => {
+                    tracing::error!("Failed to hex-decode payload from Base64 envelope for event_id {}: {}", event_id, e);
+                    return Err(anyhow::anyhow!("Hex decode error: {}", e));
                 }
             }
+        } else {
+            // If no `\x` prefix, the decoded payload is the raw bincode data.
+            tracing::debug!("Using raw base64-decoded payload for event_id {}", event_id);
+            decoded_payload
         };
 
         // CRITICAL FIX: Enhanced bincode deserialization with fallback
