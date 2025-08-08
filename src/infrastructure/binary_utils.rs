@@ -134,6 +134,13 @@ impl PgCopyBinaryWriter {
         Ok(())
     }
 
+    /// Write boolean field
+    pub fn write_bool(&mut self, value: bool) -> Result<(), std::io::Error> {
+        self.buffer.write_i32::<BigEndian>(1)?; // 1 byte for boolean
+        self.buffer.write_u8(if value { 1 } else { 0 })?;
+        Ok(())
+    }
+
     /// Finish the COPY operation
     pub fn finish(mut self) -> Result<Vec<u8>, std::io::Error> {
         // Write PGCOPY trailer

@@ -511,7 +511,7 @@ impl ProjectionStore {
 
         let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
         tracing::info!(
-            "[ProjectionStore] bulk_upsert_accounts_with_copy: about to COPY {} accounts: ids={:?}",
+            "[ProjectionStore] bulk_upsert_accounts_with_copy: about to COPY BINARY {} accounts: ids={:?}",
             accounts.len(),
             account_ids
         );
@@ -519,25 +519,9 @@ impl ProjectionStore {
         // Deduplicate accounts by ID (keep the latest version)
         let accounts_to_upsert = if accounts.len() > 1 {
             let mut unique_accounts = std::collections::HashMap::new();
-            let mut duplicate_count = 0;
-
             for account in accounts {
-                if unique_accounts
-                    .insert(account.id, account.clone())
-                    .is_some()
-                {
-                    duplicate_count += 1;
-                }
+                unique_accounts.insert(account.id, account.clone());
             }
-
-            if duplicate_count > 0 {
-                tracing::warn!(
-                    "[ProjectionStore] bulk_upsert_accounts_with_copy: Found {} duplicates in batch of {} accounts",
-                    duplicate_count,
-                    accounts.len()
-                );
-            }
-
             unique_accounts.into_values().collect::<Vec<_>>()
         } else {
             accounts.to_vec()
@@ -559,45 +543,37 @@ impl ProjectionStore {
         .execute(&mut **tx)
         .await?;
 
-        // STEP 2: Prepare CSV data for COPY
-        let mut csv_data = BytesMut::new();
+        // STEP 2: Prepare BINARY data for COPY
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new();
         for account in &accounts_to_upsert {
-            // Escape special characters in CSV format
-            let owner_name_escaped = account
-                .owner_name
-                .replace("\\", "\\\\")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
-
-            writeln!(
-                &mut csv_data,
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                account.id,
-                owner_name_escaped,
-                account.balance,
-                account.is_active,
-                account.created_at.to_rfc3339(),
-                account.updated_at.to_rfc3339()
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to write CSV data: {}", e))?;
+            writer.write_row(6)?;
+            writer.write_uuid(&account.id)?;
+            writer.write_text(&account.owner_name)?;
+            // Write decimal as text to avoid complex binary format
+            writer.write_text(&account.balance.to_string())?;
+            writer.write_bool(account.is_active)?;
+            writer.write_timestamp(&account.created_at)?;
+            writer.write_timestamp(&account.updated_at)?;
         }
+        let binary_data = writer.finish()?;
+
 
         // STEP 3: Use COPY to bulk insert into temp table
-        let mut copy_in = tx.copy_in_raw("COPY temp_account_projections FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')").await?;
-        copy_in.send(&csv_data).await?;
+        let mut copy_in = tx.copy_in_raw("COPY temp_account_projections FROM STDIN WITH (FORMAT BINARY)").await?;
+        copy_in.send(binary_data.as_slice()).await?;
         let copy_result = copy_in.finish().await;
+
 
         match copy_result {
             Ok(result) => {
                 tracing::info!(
-                    "[ProjectionStore] bulk_upsert_accounts_with_copy: COPY inserted {} rows into temp table",
-                    result.rows_affected()
+                    "[ProjectionStore] bulk_upsert_accounts_with_copy: COPY BINARY inserted {} rows into temp table",
+                    result
                 );
             }
             Err(e) => {
                 tracing::error!(
-                    "[ProjectionStore] bulk_upsert_accounts_with_copy: COPY failed: {}",
+                    "[ProjectionStore] bulk_upsert_accounts_with_copy: COPY BINARY failed: {}",
                     e
                 );
 
@@ -626,7 +602,7 @@ impl ProjectionStore {
         match upsert_result {
             Ok(res) => {
                 tracing::info!(
-                    "[ProjectionStore] bulk_upsert_accounts_with_copy: Successfully upserted {} accounts via COPY method",
+                    "[ProjectionStore] bulk_upsert_accounts_with_copy: Successfully upserted {} accounts via COPY BINARY method",
                     res.rows_affected()
                 );
                 Ok(())
@@ -652,7 +628,7 @@ impl ProjectionStore {
         }
 
         tracing::info!(
-            "[ProjectionStore] bulk_insert_transactions_with_copy: about to COPY {} transactions",
+            "[ProjectionStore] bulk_insert_transactions_with_copy: about to COPY BINARY {} transactions",
             transactions.len()
         );
 
@@ -671,36 +647,34 @@ impl ProjectionStore {
         .execute(&mut **tx)
         .await?;
 
-        // STEP 2: Prepare CSV data for COPY
-        let mut csv_data = BytesMut::new();
+        // STEP 2: Prepare BINARY data for COPY
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new();
         for transaction in transactions {
-            writeln!(
-                &mut csv_data,
-                "{}\t{}\t{}\t{}\t{}",
-                transaction.id,
-                transaction.account_id,
-                transaction.transaction_type,
-                transaction.amount,
-                transaction.timestamp.to_rfc3339()
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to write transaction CSV data: {}", e))?;
+            writer.write_row(5)?;
+            writer.write_uuid(&transaction.id)?;
+            writer.write_uuid(&transaction.account_id)?;
+            writer.write_text(&transaction.transaction_type)?;
+            // Write decimal as text
+            writer.write_text(&transaction.amount.to_string())?;
+            writer.write_timestamp(&transaction.timestamp)?;
         }
+        let binary_data = writer.finish()?;
 
         // STEP 3: Use COPY to bulk insert into temp table
-        let mut copy_in = tx.copy_in_raw("COPY temp_transaction_projections FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')").await?;
-        copy_in.send(&csv_data).await?;
+        let mut copy_in = tx.copy_in_raw("COPY temp_transaction_projections FROM STDIN WITH (FORMAT BINARY)").await?;
+        copy_in.send(binary_data.as_slice()).await?;
         let copy_result = copy_in.finish().await;
 
         match copy_result {
             Ok(result) => {
                 tracing::info!(
-                    "[ProjectionStore] bulk_insert_transactions_with_copy: COPY inserted {} rows into temp table",
-                    result.rows_affected()
+                    "[ProjectionStore] bulk_insert_transactions_with_copy: COPY BINARY inserted {} rows into temp table",
+                    result
                 );
             }
             Err(e) => {
                 tracing::error!(
-                    "[ProjectionStore] bulk_insert_transactions_with_copy: COPY failed: {}",
+                    "[ProjectionStore] bulk_insert_transactions_with_copy: COPY BINARY failed: {}",
                     e
                 );
 
@@ -725,7 +699,7 @@ impl ProjectionStore {
         match insert_result {
             Ok(res) => {
                 tracing::info!(
-                    "[ProjectionStore] bulk_insert_transactions_with_copy: Successfully inserted {} transactions via COPY method",
+                    "[ProjectionStore] bulk_insert_transactions_with_copy: Successfully inserted {} transactions via COPY BINARY method",
                     res.rows_affected()
                 );
                 Ok(())
