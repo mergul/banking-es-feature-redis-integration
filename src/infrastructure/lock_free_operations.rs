@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_lock_free_operations_creation() {
-        let pool = PgPool::connect("postgresql://localhost/test")
+        let pool = PgPool::connect("postgresql://127.0.0.1:5432/test")
             .await
             .unwrap();
         let event_store = Arc::new(EventStore::new(pool.clone()));
@@ -524,7 +524,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_cache_operations() {
-        let pool = PgPool::connect("postgresql://localhost/test")
+        let pool = PgPool::connect("postgresql://127.0.0.1:5432/test")
             .await
             .unwrap();
         let event_store = Arc::new(EventStore::new(pool.clone()));

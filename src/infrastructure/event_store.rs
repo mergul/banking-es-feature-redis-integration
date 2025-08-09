@@ -362,7 +362,7 @@ impl Event {
 impl ToPgCopyBinary for Vec<Event> {
     /// Convert multiple events to complete binary COPY format
     fn to_pgcopy_binary(&self) -> Result<Vec<u8>, std::io::Error> {
-        let mut writer = PgCopyBinaryWriter::new();
+        let mut writer = PgCopyBinaryWriter::new()?;
 
         for event in self {
             event.write_to_binary_writer(&mut writer)?;
@@ -2977,16 +2977,31 @@ impl EventStore {
 
         // Set synchronous_commit (only runtime-changeable parameter)
         let sync_setting = if synchronous_commit { "on" } else { "off" };
-        sqlx::query(&format!("SET synchronous_commit = {}", sync_setting))
-            .execute(&pool)
-            .await
-            .map_err(|e| EventStoreError::DatabaseError(e))?;
 
-        info!(
-            "🔧 PostgreSQL setting: synchronous_commit={} (full_page_writes requires server restart)",
-            sync_setting
-        );
-        Ok(())
+        // Add timeout to prevent hanging
+        let query = format!("SET synchronous_commit = {}", sync_setting);
+
+        // Use tokio::time::timeout to prevent hanging
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5), // 5 second timeout
+            sqlx::query(&query).execute(&pool),
+        )
+        .await
+        {
+            Ok(result) => {
+                result.map_err(|e| EventStoreError::DatabaseError(e))?;
+                info!(
+                    "🔧 PostgreSQL setting: synchronous_commit={} (full_page_writes requires server restart)",
+                    sync_setting
+                );
+                Ok(())
+            }
+            Err(_) => {
+                warn!("⚠️ PostgreSQL synchronous_commit setting timed out after 5 seconds");
+                // Continue without the setting rather than failing
+                Ok(())
+            }
+        }
     }
 
     /// Apply bulk config with PostgreSQL settings
@@ -3086,7 +3101,7 @@ impl Default for EventStoreConfig {
     fn default() -> Self {
         Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+                "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
             }),
             max_connections: std::env::var("DB_MAX_CONNECTIONS")
                 .unwrap_or_else(|_| "80".to_string())
@@ -3154,7 +3169,7 @@ impl EventStoreConfig {
     pub fn default_in_memory_for_tests() -> Result<Self, anyhow::Error> {
         Ok(Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+                "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
             }),
             max_connections: std::env::var("DB_MAX_CONNECTIONS")
                 .unwrap_or_else(|_| "20".to_string())
@@ -3227,6 +3242,23 @@ impl Default for EventMetadata {
     }
 }
 
+impl EventMetadata {
+    pub fn to_json_value(&self) -> serde_json::Value {
+        // Prefer serde serialization if available; fallback to manual mapping
+        match serde_json::to_value(self) {
+            Ok(v) => v,
+            Err(_) => serde_json::json!({
+                "correlation_id": self.correlation_id,
+                "causation_id": self.causation_id,
+                "user_id": self.user_id,
+                "source": self.source,
+                "schema_version": self.schema_version,
+                "tags": self.tags,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     pub max_retries: u32,
@@ -3249,7 +3281,7 @@ impl Default for RetryConfig {
 impl Default for EventStore {
     fn default() -> Self {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+            "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
         });
         let max_connections = std::env::var("DB_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "80".to_string())

@@ -135,7 +135,16 @@ impl OutboxCopyRow {
             event_type: msg.event_type,
             payload: msg.payload,
             topic: msg.topic,
-            metadata: msg.metadata.unwrap_or(JsonValue::Null),
+            metadata: msg.metadata.unwrap_or_else(|| {
+                serde_json::json!({
+                    "correlation_id": null,
+                    "causation_id": null,
+                    "user_id": null,
+                    "source": "cdc_outbox",
+                    "schema_version": "1.0",
+                    "tags": []
+                })
+            }),
             created_at: now,
             updated_at: now,
         }
@@ -216,7 +225,7 @@ impl ToPgCopyBinary for Vec<OutboxCopyRow> {
     /// Convert multiple rows to complete binary COPY format
     /// This is more efficient than individual row conversion
     fn to_pgcopy_binary(&self) -> Result<Vec<u8>, std::io::Error> {
-        let mut writer = PgCopyBinaryWriter::new();
+        let mut writer = PgCopyBinaryWriter::new()?;
 
         for row in self {
             row.write_to_binary_writer(&mut writer)?;
@@ -608,8 +617,23 @@ impl OutboxBatcher {
         pools: Arc<PartitionedPools>,
     ) -> Self {
         // OPTIMIZED: Updated batch size and timeout for better performance
-        // Reduced batch size and increased timeout to prevent blocking
-        Self::new(repo, pools, 50, Duration::from_millis(100))
+        // CRITICAL OPTIMIZATION: Batch processing configuration
+        let batch_timeout_ms = std::env::var("CDC_BATCH_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(50);
+
+        let batch_size = std::env::var("CDC_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10000);
+
+        Self::new(
+            repo,
+            pools,
+            batch_size,
+            Duration::from_millis(batch_timeout_ms),
+        )
     }
 }
 
@@ -633,32 +657,43 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         let should_use_copy = message_count >= 100; // Threshold for COPY vs VALUES
 
         if should_use_copy {
-            tracing::info!(
+            tracing::debug!(
                 "CDCOutboxRepository: Using COPY for large batch of {} messages",
                 message_count
             );
             return self.add_pending_messages_copy(tx, messages).await;
         }
 
-        tracing::info!(
+        tracing::debug!(
             "CDCOutboxRepository: Using VALUES for small batch of {} messages",
             message_count
         );
 
         // OPTIMIZED: Use VALUES clause for better performance than UNNEST
         let mut query_builder = sqlx::QueryBuilder::new(
-            "INSERT INTO kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) "
+            "INSERT INTO kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) ",
         );
-
+        let now = chrono::Utc::now();
         query_builder.push_values(messages.iter(), |mut b, msg| {
+            let metadata_value = msg.metadata.clone().unwrap_or_else(|| {
+                serde_json::json!({
+                    "correlation_id": null,
+                    "causation_id": null,
+                    "user_id": null,
+                    "source": "cdc_outbox",
+                    "schema_version": "1.0",
+                    "tags": []
+                })
+            });
+
             b.push_bind(msg.aggregate_id)
                 .push_bind(msg.event_id)
                 .push_bind(&msg.event_type)
                 .push_bind(&msg.payload)
                 .push_bind(&msg.topic)
-                .push_bind(msg.metadata.as_ref().unwrap_or(&serde_json::Value::Null))
-                .push_bind(chrono::Utc::now())
-                .push_bind(chrono::Utc::now());
+                .push_bind(metadata_value)
+                .push_bind(now)
+                .push_bind(now);
         });
 
         let result = query_builder.build().execute(&mut **tx).await;
@@ -689,8 +724,7 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
         }
     }
 
-    /// CRITICAL FIX: PostgreSQL 17.5 compatible CSV-based bulk insert for outbox messages
-    /// This method uses PostgreSQL's COPY command with CSV format to avoid binary protocol issues
+    /// Switched to COPY BINARY to avoid double encoding.
     async fn add_pending_messages_copy(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -702,72 +736,128 @@ impl crate::infrastructure::outbox::OutboxRepositoryTrait for CDCOutboxRepositor
 
         let start_time = std::time::Instant::now();
         let message_count = messages.len();
-
         tracing::info!(
-            "CDCOutboxRepository: Starting CSV-based bulk insert of {} messages",
+            "CDCOutboxRepository: Starting BINARY COPY via temp table for {} messages",
             message_count
         );
 
-        // Convert messages to CSV format
-        let mut csv_writer = crate::infrastructure::binary_utils::PgCopyCsvWriter::new();
+        // 1) Create temp table with metadata as TEXT to avoid jsonb binary encoding
+        sqlx::query(
+            r#"
+            CREATE TEMP TABLE IF NOT EXISTS temp_kafka_outbox_cdc (
+                aggregate_id UUID NOT NULL,
+                event_id UUID NOT NULL,
+                event_type TEXT NOT NULL,
+                payload BYTEA NOT NULL,
+                topic TEXT NOT NULL,
+                metadata TEXT,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            ) ON COMMIT PRESERVE ROWS
+            "#,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create temp table for CDC COPY: {:?}", e))?;
+
+        // 2) Build binary COPY payload targeting the temp table (metadata as TEXT)
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()
+            .map_err(|e| anyhow::anyhow!("Failed to init binary writer: {:?}", e))?;
 
         for msg in &messages {
-            // Convert each field to CSV format
-            let aggregate_id = msg.aggregate_id.to_string();
-            let event_id = msg.event_id.to_string();
-            let event_type = msg.event_type.as_str();
-            let payload_hex = format!("\\x{}", hex::encode(&msg.payload));
-            let topic = msg.topic.as_str();
-            let metadata = msg
-                .metadata
-                .as_ref()
-                .unwrap_or(&serde_json::Value::Null)
-                .to_string();
-            let created_at = chrono::Utc::now()
-                .format("%Y-%m-%d %H:%M:%S%.6f UTC")
-                .to_string();
-            let updated_at = chrono::Utc::now()
-                .format("%Y-%m-%d %H:%M:%S%.6f UTC")
-                .to_string();
+            // Prepare metadata JSON string or NULL
+            let metadata_json_opt = msg.metadata.clone().or_else(|| {
+                Some(serde_json::json!({
+                    "correlation_id": null,
+                    "causation_id": null,
+                    "user_id": null,
+                    "source": "cdc_outbox",
+                    "schema_version": "1.0",
+                    "tags": []
+                }))
+            });
 
-            // Write CSV row with tab delimiter
-            csv_writer.write_csv_row(&[
-                &aggregate_id,
-                &event_id,
-                event_type,
-                &payload_hex,
-                topic,
-                &metadata,
-                &created_at,
-                &updated_at,
-            ])?;
+            let now = chrono::Utc::now();
+
+            writer
+                .write_row(8)
+                .map_err(|e| anyhow::anyhow!("Failed to write row header: {:?}", e))?;
+            writer
+                .write_uuid(&msg.aggregate_id)
+                .map_err(|e| anyhow::anyhow!("Failed to write aggregate_id: {:?}", e))?;
+            writer
+                .write_uuid(&msg.event_id)
+                .map_err(|e| anyhow::anyhow!("Failed to write event_id: {:?}", e))?;
+            writer
+                .write_text(&msg.event_type)
+                .map_err(|e| anyhow::anyhow!("Failed to write event_type: {:?}", e))?;
+            writer
+                .write_bytea(&msg.payload)
+                .map_err(|e| anyhow::anyhow!("Failed to write payload: {:?}", e))?;
+            writer
+                .write_text(&msg.topic)
+                .map_err(|e| anyhow::anyhow!("Failed to write topic: {:?}", e))?;
+
+            match metadata_json_opt {
+                Some(val) if !val.is_null() => writer
+                    .write_text(&val.to_string())
+                    .map_err(|e| anyhow::anyhow!("Failed to write metadata text: {:?}", e))?,
+                _ => writer
+                    .write_null()
+                    .map_err(|e| anyhow::anyhow!("Failed to write metadata NULL: {:?}", e))?,
+            }
+
+            writer
+                .write_timestamp(&now)
+                .map_err(|e| anyhow::anyhow!("Failed to write created_at: {:?}", e))?;
+            writer
+                .write_timestamp(&now)
+                .map_err(|e| anyhow::anyhow!("Failed to write updated_at: {:?}", e))?;
         }
 
-        let csv_data = csv_writer.finish()?;
+        let binary_data = writer
+            .finish()
+            .map_err(|e| anyhow::anyhow!("Failed to finish binary writer: {:?}", e))?;
 
-        // Start COPY operation with CSV format
+        // 3) COPY BINARY into the temp table
         let mut copy = tx
-        .copy_in_raw(
-            "COPY kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')"
+            .copy_in_raw(
+                "COPY temp_kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at) FROM STDIN WITH (FORMAT binary)",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to start BINARY COPY into temp table: {:?}", e))?;
+
+        copy.send(binary_data.as_slice())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send data to BINARY COPY (temp): {:?}", e))?;
+
+        let copied_rows = copy
+            .finish()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to finish BINARY COPY (temp): {:?}", e))?;
+
+        tracing::info!(
+            "CDCOutboxRepository: BINARY COPY -> temp inserted {} rows",
+            copied_rows
+        );
+
+        // 4) Insert from temp table to final table, casting metadata TEXT -> JSONB
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO kafka_outbox_cdc (aggregate_id, event_id, event_type, payload, topic, metadata, created_at, updated_at)
+            SELECT aggregate_id, event_id, event_type, payload, topic, metadata::jsonb, created_at, updated_at
+            FROM temp_kafka_outbox_cdc
+            "#
         )
+        .execute(&mut **tx)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to start COPY operation: {:?}", e))?;
-
-        // Send all data in one operation
-        copy.send(&csv_data[..])
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send data to COPY: {:?}", e))?;
-
-        // Finish the COPY operation
-        copy.finish()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to finish COPY operation: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to insert from temp into kafka_outbox_cdc: {:?}", e))?;
 
         let duration = start_time.elapsed();
         let throughput = message_count as f64 / duration.as_secs_f64();
         tracing::info!(
-            "CDCOutboxRepository: Successfully CSV-inserted {} messages in {:?} ({:.0} msg/sec)",
-            message_count,
+            "CDCOutboxRepository: Successfully inserted {} messages via BINARY COPY (temp) in {:?} ({:.0} msg/sec)",
+            inserted.rows_affected(),
             duration,
             throughput
         );
@@ -1021,92 +1111,6 @@ impl CDCConsumer {
         ))
     }
 
-    /// CRITICAL OPTIMIZATION: Enhanced message batch processing with COPY optimization
-    async fn process_message_batch_with_copy(
-        messages: &[crate::infrastructure::kafka_abstraction::KafkaMessage],
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-    ) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let start_time = std::time::Instant::now();
-        let batch_size = messages.len();
-
-        // Check if COPY optimization is enabled
-        let copy_config = CopyOptimizationConfig::from_env();
-        let use_copy_optimization = copy_config.enable_copy_optimization
-            && batch_size >= copy_config.projection_copy_threshold;
-
-        tracing::info!(
-            "CDCConsumer: process_message_batch_with_copy starting batch of {} messages (COPY optimization: {})",
-            batch_size,
-            use_copy_optimization
-        );
-
-        // Deserialize all messages to CDC events
-        let mut cdc_events = Vec::with_capacity(batch_size);
-        for message in messages {
-            match serde_json::from_slice::<serde_json::Value>(&message.payload) {
-                Ok(cdc_event) => {
-                    cdc_events.push(cdc_event);
-                }
-                Err(e) => {
-                    tracing::error!("CDCConsumer: Failed to deserialize CDC event: {:?}", e);
-                    continue;
-                }
-            }
-        }
-
-        if cdc_events.is_empty() {
-            return Ok(());
-        }
-
-        // Use COPY-optimized processing for large batches
-        let result = if use_copy_optimization {
-            tracing::info!(
-                "CDCConsumer: Using COPY-optimized batch processing for {} events",
-                cdc_events.len()
-            );
-            processor
-                .process_cdc_events_batch_with_copy(cdc_events)
-                .await
-        } else {
-            tracing::info!(
-                "CDCConsumer: Using standard batch processing for {} events",
-                cdc_events.len()
-            );
-            processor.process_cdc_events_batch(cdc_events).await
-        };
-
-        let duration = start_time.elapsed();
-        match result {
-            Ok(_) => {
-                tracing::info!(
-                    "CDCConsumer: Batch processing completed successfully - {} messages in {:?} (COPY: {})",
-                    batch_size,
-                    duration,
-                    use_copy_optimization
-                );
-                Ok(())
-            }
-            Err(e) => {
-                tracing::error!(
-                    "CDCConsumer: Batch processing failed - {} messages in {:?} (COPY: {}): {:?}",
-                    batch_size,
-                    duration,
-                    use_copy_optimization,
-                    e
-                );
-                Err(anyhow::anyhow!(
-                    "Batch processing failed for {} messages: {}",
-                    batch_size,
-                    e
-                ))
-            }
-        }
-    }
-
     /// Enhanced start_consuming method with COPY optimization integration
     pub async fn start_consuming_with_cancellation_token_copy_optimized(
         &mut self,
@@ -1257,12 +1261,12 @@ impl CDCConsumer {
         let min_batch_size = std::env::var("MIN_ADAPTIVE_BATCH_SIZE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(50);
+            .unwrap_or(5000);
 
         let max_batch_size = std::env::var("MAX_ADAPTIVE_BATCH_SIZE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(5000);
+            .unwrap_or(20000);
 
         let mut current_batch_size = batch_size;
 
@@ -1277,7 +1281,7 @@ impl CDCConsumer {
                             "CDCConsumer (COPY-optimized): Processing final batch of {} messages before shutdown",
                             message_batch.len()
                         );
-                        if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                        if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
                             tracing::error!("CDCConsumer (COPY-optimized): Failed to process final batch: {:?}", e);
                         }
                     }
@@ -1343,7 +1347,7 @@ impl CDCConsumer {
                                 );
 
                                 let processing_start = std::time::Instant::now();
-                                if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
                                     tracing::error!(
                                         "CDCConsumer (COPY-optimized): Failed to process {} batch: {:?}",
                                         batch_type, e
@@ -1380,7 +1384,7 @@ impl CDCConsumer {
                                     "CDCConsumer (COPY-optimized): Processing final batch of {} messages",
                                     message_batch.len()
                                 );
-                                if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
                                     tracing::error!("CDCConsumer (COPY-optimized): Failed to process final batch: {:?}", e);
                                 }
                             }
@@ -1404,7 +1408,7 @@ impl CDCConsumer {
                                     message_batch.len()
                                 );
 
-                                if let Err(e) = Self::process_message_batch_with_copy(&message_batch, &processor).await {
+                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
                                     tracing::error!("CDCConsumer (COPY-optimized): Failed to process timeout batch: {:?}", e);
                                 }
 
@@ -1603,7 +1607,7 @@ impl CDCConsumer {
             let offset_commit_batch_size = std::env::var("CDC_OFFSET_COMMIT_BATCH_SIZE")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(100); // Reduced from 1000 to 100 for faster commits
+                .unwrap_or(5000);
 
             let offset_commit_timeout_ms = std::env::var("CDC_OFFSET_COMMIT_TIMEOUT_MS")
                 .ok()
@@ -1785,7 +1789,7 @@ impl CDCConsumer {
         let batch_size = std::env::var("CDC_BATCH_SIZE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(2000); // Increased to 500 for better throughput with large incoming batches
+            .unwrap_or(10000);
 
         let batch_timeout_ms = std::env::var("CDC_BATCH_TIMEOUT_MS")
             .ok()
@@ -1945,15 +1949,20 @@ impl CDCConsumer {
 
         let start_time = std::time::Instant::now();
         let batch_size = messages.len();
+
+        // Check if COPY optimization is enabled
+        let copy_config = CopyOptimizationConfig::from_env();
+        let use_copy_optimization = copy_config.enable_copy_optimization
+            && batch_size >= copy_config.projection_copy_threshold;
+
         tracing::info!(
-            "CDCConsumer: Starting batch processing of {} messages",
-            batch_size
+            "CDCConsumer: process_message_batch starting batch of {} messages (COPY optimization: {})",
+            batch_size,
+            use_copy_optimization
         );
 
-        // CRITICAL OPTIMIZATION: Parallel processing of messages
+        // Deserialize all messages to CDC events
         let mut cdc_events = Vec::with_capacity(batch_size);
-
-        // First pass: Deserialize all messages
         for message in messages {
             match serde_json::from_slice::<serde_json::Value>(&message.payload) {
                 Ok(cdc_event) => {
@@ -1961,47 +1970,58 @@ impl CDCConsumer {
                 }
                 Err(e) => {
                     tracing::error!("CDCConsumer: Failed to deserialize CDC event: {:?}", e);
-                    // Continue processing other messages in batch
+                    continue;
                 }
             }
         }
 
-        // CRITICAL OPTIMIZATION: Use batch processing instead of individual processing
-        let mut success_count = 0;
-        let mut error_count = 0;
-
-        if !cdc_events.is_empty() {
-            match processor.process_cdc_events_batch(cdc_events).await {
-                Ok(_) => {
-                    success_count = batch_size;
-                    error_count = 0;
-                }
-                Err(e) => {
-                    success_count = 0;
-                    error_count = batch_size;
-                    tracing::error!("CDCConsumer: Batch processing failed: {:?}", e);
-                }
-            }
+        if cdc_events.is_empty() {
+            return Ok(());
         }
+
+        // Use COPY-optimized processing for large batches
+        let result = if use_copy_optimization {
+            tracing::info!(
+                "CDCConsumer: Using COPY-optimized batch processing for {} events",
+                cdc_events.len()
+            );
+            processor
+                .process_cdc_events_batch_with_copy(cdc_events)
+                .await
+        } else {
+            tracing::info!(
+                "CDCConsumer: Using standard batch processing for {} events",
+                cdc_events.len()
+            );
+            processor.process_cdc_events_batch(cdc_events).await
+        };
 
         let duration = start_time.elapsed();
-        tracing::info!(
-            "CDCConsumer: Batch processing completed - {} messages in {:?} ({} success, {} errors)",
-            batch_size,
-            duration,
-            success_count,
-            error_count
-        );
-
-        if error_count > 0 {
-            return Err(anyhow::anyhow!(
-                "Batch processing had {} errors out of {} messages",
-                error_count,
-                batch_size
-            ));
+        match result {
+            Ok(_) => {
+                tracing::info!(
+                    "CDCConsumer: Batch processing completed successfully - {} messages in {:?} (COPY: {})",
+                    batch_size,
+                    duration,
+                    use_copy_optimization
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    "CDCConsumer: Batch processing failed - {} messages in {:?} (COPY: {}): {:?}",
+                    batch_size,
+                    duration,
+                    use_copy_optimization,
+                    e
+                );
+                Err(anyhow::anyhow!(
+                    "Batch processing failed for {} messages: {}",
+                    batch_size,
+                    e
+                ))
+            }
         }
-
-        Ok(())
     }
 }
 

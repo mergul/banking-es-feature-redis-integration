@@ -143,14 +143,19 @@ impl AccountCommandHandler {
             .filter_map(|event| {
                 // OPTIMIZED: Fast serialization with minimal error handling
                 match bincode::serialize(event) {
-                    Ok(payload) => Some(OutboxMessage {
-                        aggregate_id: account_id,
-                        event_id: Self::generate_event_id_for_outbox(event),
-                        event_type: event.event_type().to_string(),
-                        payload,
-                        topic: cdc_topic.clone(),
-                        metadata: None,
-                    }),
+                    Ok(payload) => {
+                        let event_metadata =
+                            crate::infrastructure::event_store::EventMetadata::default();
+                        let metadata_json = event_metadata.to_json_value();
+                        Some(OutboxMessage {
+                            aggregate_id: account_id,
+                            event_id: Self::generate_event_id_for_outbox(event),
+                            event_type: event.event_type().to_string(),
+                            payload,
+                            topic: cdc_topic.clone(),
+                            metadata: Some(metadata_json),
+                        })
+                    }
                     Err(e) => {
                         tracing::error!("Failed to serialize event for outbox: {}", e);
                         None

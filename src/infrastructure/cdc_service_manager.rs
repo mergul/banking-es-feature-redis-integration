@@ -890,12 +890,12 @@ impl CDCServiceManager {
         let group_id =
             std::env::var("KAFKA_GROUP_ID").unwrap_or_else(|_| "banking-es-group".to_string());
 
-        tracing::info!("CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: localhost:9092, group_id: {}, topic_prefix: {}", group_id, config.topic_prefix);
+        tracing::info!("CDCServiceManager: Creating Kafka consumer with config - bootstrap_servers: 127.0.0.1:9092, group_id: {}, topic_prefix: {}", group_id, config.topic_prefix);
 
         // Create Kafka consumer with proper configuration
         let kafka_config = crate::infrastructure::kafka_abstraction::KafkaConfig {
             enabled: true,
-            bootstrap_servers: "localhost:9092".to_string(),
+            bootstrap_servers: "127.0.0.1:9092".to_string(),
             group_id,
             topic_prefix: config.topic_prefix.clone(),
             producer_acks: 1,

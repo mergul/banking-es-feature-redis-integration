@@ -39,7 +39,7 @@ impl KafkaTracing {
         // Configure OpenTelemetry
         let tracer = opentelemetry_jaeger::new_agent_pipeline()
             .with_service_name("banking-es-kafka")
-            .with_endpoint("localhost:6831")
+            .with_endpoint("127.0.0.1:6831")
             .with_trace_config(
                 opentelemetry_sdk::trace::config()
                     .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)

@@ -184,7 +184,7 @@ pub async fn init_all_services(
     // Initialize EventStore with the provided partitioned pools
     let event_store_config = EventStoreConfig {
         database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+            "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
         }),
         max_connections: std::env::var("DB_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "800".to_string())
@@ -421,7 +421,7 @@ pub async fn init_all_services(
             .parse()
             .unwrap_or(true),
         bootstrap_servers: std::env::var("KAFKA_BOOTSTRAP_SERVERS")
-            .unwrap_or_else(|_| "localhost:9092".to_string()),
+            .unwrap_or_else(|_| "127.0.0.1:9092".to_string()),
         group_id: std::env::var("KAFKA_GROUP_ID")
             .unwrap_or_else(|_| "banking-es-group".to_string()),
         topic_prefix: std::env::var("KAFKA_TOPIC_PREFIX")

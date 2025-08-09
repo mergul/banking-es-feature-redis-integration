@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let pool_config = crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig {
         database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+            "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
         }),
         write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "200".to_string())

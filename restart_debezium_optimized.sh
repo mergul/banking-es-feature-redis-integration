@@ -4,21 +4,21 @@ echo "🚀 Restarting Debezium Connector with Optimized Configuration..."
 
 # Stop existing connector
 echo "📴 Stopping existing connector..."
-curl -X DELETE http://localhost:8083/connectors/banking-es-connector
+curl -X DELETE http://127.0.0.1:8083/connectors/banking-es-connector
 
 # Wait for connector to stop
 sleep 3
 
 # Start connector with optimized configuration
 echo "🔄 Starting connector with optimized configuration..."
-curl -X POST http://localhost:8083/connectors \
+curl -X POST http://127.0.0.1:8083/connectors \
   -H "Content-Type: application/json" \
   -d @debezium-config.json
 
 # Check connector status
 echo "📊 Checking connector status..."
 sleep 2
-curl -X GET http://localhost:8083/connectors/banking-es-connector/status
+curl -X GET http://127.0.0.1:8083/connectors/banking-es-connector/status
 
 echo "✅ Debezium connector restarted with optimized configuration!"
 echo ""

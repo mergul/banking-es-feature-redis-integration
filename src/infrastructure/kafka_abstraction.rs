@@ -99,7 +99,7 @@ impl Default for KafkaConfig {
             .unwrap_or(5 * 1024 * 1024);
         Self {
             enabled: true, // Enable Kafka by default
-            bootstrap_servers: "localhost:9092".to_string(),
+            bootstrap_servers: "127.0.0.1:9092".to_string(),
             group_id: "banking-es-group".to_string(),
             topic_prefix: "banking-es".to_string(),
             producer_acks: 1,

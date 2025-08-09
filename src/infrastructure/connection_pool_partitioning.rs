@@ -21,7 +21,7 @@ impl Default for PoolPartitioningConfig {
     fn default() -> Self {
         Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+                "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
             }),
             write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
                 .unwrap_or_else(|_| "200".to_string())
@@ -320,7 +320,7 @@ pub async fn create_partitioned_pools_with_config(
 //     #[ignore]
 //     async fn test_pool_partitioning_creation() {
 //         let config = PoolPartitioningConfig {
-//             database_url: "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string(),
+//             database_url: "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string(),
 //             write_pool_max_connections: 3,
 //             read_pool_max_connections: 10,
 //             ..Default::default()

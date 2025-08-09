@@ -311,7 +311,7 @@ impl PartitionedBatching {
             if result.success {
                 if let Some(account_id) = result.result {
                     successful_account_ids.push(account_id);
-                    info!("✅ Account created successfully: {}", account_id);
+                    //    info!("✅ Account created successfully: {}", account_id);
                 }
             } else {
                 error!(
@@ -1759,7 +1759,7 @@ impl WriteBatchingService {
             operations_processed: Arc::new(Mutex::new(0)),
             partition_id: None,
             num_partitions: None,
-            redis_lock: Arc::new(RedisAggregateLock::new_legacy("redis://localhost:6379")),
+            redis_lock: Arc::new(RedisAggregateLock::new_legacy("redis://127.0.0.1:6379")),
             bulk_config_manager: Arc::new(Mutex::new(BulkInsertConfigManager::new())),
         }
     }
@@ -2834,7 +2834,9 @@ impl WriteBatchingService {
             event_type: "AccountCreated".to_string(),
             payload: bincode::serialize(&event).unwrap_or_default(),
             topic: "banking-es.public.kafka_outbox_cdc".to_string(), // FIXED: Use correct CDC topic format
-            metadata: None,
+            metadata: Some(
+                crate::infrastructure::event_store::EventMetadata::default().to_json_value(),
+            ),
         };
 
         (vec![event], vec![outbox_message], account_id)
@@ -2856,7 +2858,9 @@ impl WriteBatchingService {
             event_type: "MoneyDeposited".to_string(),
             payload: bincode::serialize(&event).unwrap_or_default(),
             topic: "banking-es.public.kafka_outbox_cdc".to_string(), // FIXED: Use correct CDC topic format
-            metadata: None,
+            metadata: Some(
+                crate::infrastructure::event_store::EventMetadata::default().to_json_value(),
+            ),
         };
 
         (vec![event], vec![outbox_message], account_id)
@@ -2878,7 +2882,9 @@ impl WriteBatchingService {
             event_type: "MoneyWithdrawn".to_string(),
             payload: bincode::serialize(&event).unwrap_or_default(),
             topic: "banking-es.public.kafka_outbox_cdc".to_string(), // FIXED: Use correct CDC topic format
-            metadata: None,
+            metadata: Some(
+                crate::infrastructure::event_store::EventMetadata::default().to_json_value(),
+            ),
         };
 
         (vec![event], vec![outbox_message], account_id)

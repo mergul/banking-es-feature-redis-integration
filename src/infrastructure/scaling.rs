@@ -320,7 +320,7 @@ mod tests {
 
         let instance = ServiceInstance {
             id: "test-instance".to_string(),
-            host: "localhost".to_string(),
+            host: "127.0.0.1".to_string(),
             port: 8080,
             status: InstanceStatus::Active,
             metrics: InstanceMetrics {
@@ -348,7 +348,7 @@ mod tests {
 
         let instance = ServiceInstance {
             id: "test-instance".to_string(),
-            host: "localhost".to_string(),
+            host: "127.0.0.1".to_string(),
             port: 8080,
             status: InstanceStatus::Active,
             metrics: InstanceMetrics {

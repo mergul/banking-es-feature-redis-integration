@@ -52,7 +52,7 @@ async fn setup_stress_test_environment(
 
     let pool_config = PoolPartitioningConfig {
         database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+            "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
         }),
         write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
             .unwrap_or_else(|_| "100".to_string()) // 20'den 100'e artırıldı
@@ -750,7 +750,7 @@ async fn test_batch_processing_endurance() {
 
     // Setup services (same as stress test)
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
+        "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
     });
 
     let pool = PgPool::connect(&database_url)
@@ -758,7 +758,7 @@ async fn test_batch_processing_endurance() {
         .expect("Failed to connect to database");
 
     let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let redis_client = redis::Client::open(redis_url).expect("Failed to create Redis client");
     let redis_client_trait = RealRedisClient::new(redis_client, None);
 
@@ -1466,7 +1466,7 @@ async fn test_write_batching_multi_row_inserts() {
             initial_balance,
         });
 
-        println!("🔍 Prepared operation {} for aggregate {}", i, aggregate_id);
+        //println!("🔍 Prepared operation {} for aggregate {}", i, aggregate_id);
     }
 
     let account_creation_start = Instant::now();
@@ -1478,7 +1478,7 @@ async fn test_write_batching_multi_row_inserts() {
     // Use hash-based super batch processing
     println!("🚀 Using hash-based super batch processing...");
     let operation_ids = match batching_service
-        .submit_operations_hash_super_batch(operations, 16) // 8 super batches with locking
+        .submit_operations_hash_super_batch(operations, 5) // 8 super batches with locking
         .await
     {
         Ok(ids) => {
@@ -1524,7 +1524,7 @@ async fn test_write_batching_multi_row_inserts() {
                 if result.success {
                     if let Some(account_id) = result.result {
                         account_ids.push(account_id);
-                        println!("✅ Account {} created successfully: {}", i, account_id);
+                        // println!("✅ Account {} created successfully: {}", i, account_id);
                     } else {
                         println!("⚠️  Account {} creation succeeded but no ID returned", i);
                     }
@@ -1602,7 +1602,7 @@ async fn test_write_batching_multi_row_inserts() {
     // Use hash-based super batch processing for write operations
     let write_start = Instant::now();
     let write_operation_ids = match batching_service_clone_phase2
-        .submit_operations_hash_super_batch(write_operations, 16) // 8 super batches with locking
+        .submit_operations_hash_super_batch(write_operations, 5) // 8 super batches with locking
         .await
     {
         Ok(ids) => {

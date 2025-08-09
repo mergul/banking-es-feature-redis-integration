@@ -38,7 +38,7 @@ impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            bootstrap_servers: "localhost:9092".to_string(),
+            bootstrap_servers: "127.0.0.1:9092".to_string(),
             group_id: "banking-es-group".to_string(),
             client_id: "banking-es-client".to_string(),
             topic_prefix: "banking-es".to_string(),
@@ -94,7 +94,7 @@ pub struct KafkaProducerConfig {
 impl Default for KafkaProducerConfig {
     fn default() -> Self {
         Self {
-            bootstrap_servers: "localhost:9092".to_string(),
+            bootstrap_servers: "127.0.0.1:9092".to_string(),
             client_id: "banking-es-producer".to_string(),
             acks: "all".to_string(),
             retries: 3,
@@ -137,7 +137,7 @@ pub struct KafkaConsumerConfig {
 impl Default for KafkaConsumerConfig {
     fn default() -> Self {
         Self {
-            bootstrap_servers: "localhost:9092".to_string(),
+            bootstrap_servers: "127.0.0.1:9092".to_string(),
             group_id: "banking-es-group".to_string(),
             client_id: "banking-es-consumer".to_string(),
             auto_offset_reset: "latest".to_string(),

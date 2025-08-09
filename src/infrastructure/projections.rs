@@ -3,6 +3,7 @@ use crate::infrastructure::connection_pool_partitioning::{
     OperationType, PartitionedPools, PoolSelector,
 };
 use crate::infrastructure::event_store::DB_POOL;
+use crate::infrastructure::DiagnosticPgCopyBinaryWriter;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -10,6 +11,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Acquire, PgPool};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -368,12 +370,9 @@ impl ProjectionStore {
                     // CRITICAL: Optimize for bulk operations
                     sqlx::query(
                         r#"
-                        SET statement_timeout = 30000;
-                        SET lock_timeout = 5000;
-                        SET idle_in_transaction_session_timeout = 60000;
-                        SET work_mem = '256MB';
-                        SET maintenance_work_mem = '512MB';
-                        SET effective_cache_size = '2GB';
+                        SET statement_timeout = 10000;
+                        SET lock_timeout = 3000;
+                        SET idle_in_transaction_session_timeout = 10000;
                     "#,
                     )
                     .execute(conn)
@@ -500,8 +499,382 @@ impl ProjectionStore {
         ))
     }
 
-    /// CRITICAL OPTIMIZATION: Use PostgreSQL COPY for bulk account upserts
+    // DIAGNOSTIC BULK INSERT WITH EXTENSIVE LOGGING
+    async fn bulk_upsert_accounts_with_copy_diagnostic(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        accounts: &[AccountProjection],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if accounts.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            "🚀 DIAGNOSTIC: Starting bulk upsert for {} accounts",
+            accounts.len()
+        );
+
+        // Log first account for inspection
+        if let Some(first_account) = accounts.first() {
+            tracing::info!("🔍 DIAGNOSTIC: First account sample:");
+            tracing::info!("  - ID: {}", first_account.id);
+            tracing::info!("  - Owner: '{}'", first_account.owner_name);
+            tracing::info!("  - Balance: {}", first_account.balance);
+            tracing::info!("  - Active: {}", first_account.is_active);
+            tracing::info!("  - Created: {}", first_account.created_at);
+            tracing::info!("  - Updated: {}", first_account.updated_at);
+        }
+
+        // Create temporary table
+        tracing::info!("🔍 DIAGNOSTIC: Creating temporary table");
+        sqlx::query!(
+            r#"
+        CREATE TEMP TABLE temp_account_projections (
+            id UUID,
+            owner_name TEXT,
+            balance DECIMAL,
+            is_active BOOLEAN,
+            created_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ
+        ) ON COMMIT DROP
+        "#
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        // TEST WITH JUST ONE RECORD FIRST
+        let test_accounts = &accounts[..std::cmp::min(1, accounts.len())];
+        tracing::warn!(
+            "🔍 DIAGNOSTIC: Testing with only {} record(s) first",
+            test_accounts.len()
+        );
+
+        // Create binary data with extensive logging
+        tracing::info!("🔍 DIAGNOSTIC: Creating binary data");
+        let mut writer = DiagnosticPgCopyBinaryWriter::new(true)?;
+
+        for (i, account) in test_accounts.iter().enumerate() {
+            tracing::info!(
+                "🔍 DIAGNOSTIC: Processing account {} of {}",
+                i + 1,
+                test_accounts.len()
+            );
+
+            writer.write_row(6)?; // 6 fields
+            writer.write_uuid(&account.id, "id")?;
+            writer.write_text(&account.owner_name, "owner_name")?;
+            writer.write_decimal(&account.balance, "balance")?;
+            writer.write_bool(account.is_active, "is_active")?;
+            writer.write_timestamp(&account.created_at, "created_at")?;
+            writer.write_timestamp(&account.updated_at, "updated_at")?;
+        }
+
+        let binary_data = writer.finish()?;
+
+        tracing::info!(
+            "🔍 DIAGNOSTIC: Generated {} bytes of binary data",
+            binary_data.len()
+        );
+        let first_account = &test_accounts[0];
+        // Expected size calculation for verification
+        let expected_size_per_tuple = 2 +  // tuple header (field count)
+        20 + // UUID: 4-byte length + 16-byte data
+        4 + first_account.owner_name.len() + // TEXT: 4-byte length + data
+        4 + first_account.balance.to_string().len() + // DECIMAL as TEXT: 4-byte length + data  
+        5 +  // BOOLEAN: 4-byte length + 1-byte data
+        12 + // TIMESTAMP: 4-byte length + 8-byte data
+        12; // TIMESTAMP: 4-byte length + 8-byte data
+
+        let expected_total_size = 19 + // header: 11-byte signature + 4-byte flags + 4-byte extension
+        expected_size_per_tuple * test_accounts.len() +
+        2; // trailer: 2-byte -1
+
+        tracing::info!(
+            "🔍 DIAGNOSTIC: Expected size: ~{} bytes, actual: {} bytes",
+            expected_total_size,
+            binary_data.len()
+        );
+
+        // Execute COPY with detailed error handling
+        tracing::info!("🔍 DIAGNOSTIC: Executing COPY command");
+        let copy_command = "COPY temp_account_projections FROM STDIN WITH (FORMAT BINARY)";
+
+        match tx.copy_in_raw(copy_command).await {
+            Ok(mut copy_in) => {
+                tracing::info!("🔍 DIAGNOSTIC: COPY command accepted, sending data");
+
+                match copy_in.send(binary_data.as_slice()).await {
+                    Ok(_) => {
+                        tracing::info!("🔍 DIAGNOSTIC: Data sent successfully, finishing");
+
+                        match copy_in.finish().await {
+                            Ok(rows_affected) => {
+                                tracing::info!(
+                                    "✅ DIAGNOSTIC: COPY succeeded! {} rows inserted",
+                                    rows_affected
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ DIAGNOSTIC: COPY finish failed: {:?}", e);
+                                tracing::error!("❌ DIAGNOSTIC: Error details: {}", e);
+
+                                // Log specific error information
+                                if let Some(db_error) = e.as_database_error() {
+                                    if let Some(code) = db_error.code() {
+                                        tracing::error!(
+                                            "❌ DIAGNOSTIC: Database error code: {}",
+                                            code
+                                        );
+                                    }
+                                    tracing::error!(
+                                        "❌ DIAGNOSTIC: Database error message: {}",
+                                        db_error.message()
+                                    );
+                                    // Note: detail() method may not be available depending on sqlx version
+                                    tracing::error!("❌ DIAGNOSTIC: Full error: {:?}", db_error);
+                                }
+
+                                return Err(e.into());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ DIAGNOSTIC: Failed to send data: {:?}", e);
+                        return Err(e.into());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("❌ DIAGNOSTIC: Failed to start COPY: {:?}", e);
+                return Err(e.into());
+            }
+        }
+
+        tracing::info!("🎯 DIAGNOSTIC: Test completed successfully!");
+        Ok(())
+    }
+
+    // UPDATED BULK INSERT FUNCTIONS WITH FIXED BINARY WRITER
+
+    /// Fixed bulk upsert accounts with proper binary format
     async fn bulk_upsert_accounts_with_copy(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        accounts: &[AccountProjection],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        if accounts.is_empty() {
+            return Ok(());
+        }
+
+        let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
+        tracing::info!(
+            "[ProjectionStore] bulk_upsert_accounts_with_copy_fixed: processing {}",
+            accounts.len()
+        );
+
+        // Deduplicate accounts by ID
+        let accounts_to_upsert = if accounts.len() > 1 {
+            let mut unique_accounts = std::collections::HashMap::new();
+            for account in accounts {
+                unique_accounts.insert(account.id, account.clone());
+            }
+            unique_accounts.into_values().collect::<Vec<_>>()
+        } else {
+            accounts.to_vec()
+        };
+
+        // Create temporary table
+        sqlx::query!(
+            r#"
+        CREATE TEMP TABLE temp_account_projections (
+            id UUID,
+            owner_name TEXT,
+            balance DECIMAL,
+            is_active BOOLEAN,
+            created_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ
+        ) ON COMMIT DROP
+        "#
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        // CRITICAL: Use fixed binary writer
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;
+        for account in &accounts_to_upsert {
+            writer.write_row(6)?; // 6 fields
+            writer.write_uuid(&account.id)?;
+            writer.write_text(&account.owner_name)?;
+            writer.write_decimal(&account.balance, "balance")?; // FIXED: now supported
+            writer.write_bool(account.is_active)?;
+            writer.write_timestamp(&account.created_at)?;
+            writer.write_timestamp(&account.updated_at)?;
+        }
+        let binary_data = writer.finish()?;
+
+        tracing::debug!(
+            "[ProjectionStore] Generated binary data: {} bytes for {} tuples",
+            binary_data.len(),
+            accounts_to_upsert.len()
+        );
+
+        // Execute COPY
+        let copy_command = "COPY temp_account_projections FROM STDIN WITH (FORMAT BINARY)";
+        let mut copy_in = tx.copy_in_raw(copy_command).await?;
+        copy_in.send(binary_data.as_slice()).await?;
+        let copy_result = copy_in.finish().await?;
+
+        tracing::info!(
+            "[ProjectionStore] COPY BINARY inserted {} rows into temp table",
+            copy_result
+        );
+
+        // Upsert from temp table to main table
+        let upsert_result = sqlx::query(
+            r#"
+        INSERT INTO account_projections (id, owner_name, balance, is_active, created_at, updated_at)
+        SELECT id, owner_name, balance, is_active, created_at, updated_at
+        FROM temp_account_projections
+        ON CONFLICT (id) DO UPDATE SET
+            owner_name = EXCLUDED.owner_name,
+            balance = EXCLUDED.balance,
+            is_active = EXCLUDED.is_active,
+            updated_at = EXCLUDED.updated_at
+        "#,
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        tracing::info!(
+            "[ProjectionStore] Successfully upserted {} accounts via COPY BINARY",
+            upsert_result.rows_affected()
+        );
+
+        Ok(())
+    }
+
+    /// Fixed bulk insert transactions with proper binary format
+    async fn bulk_insert_transactions_with_copy(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        transactions: &[TransactionProjection],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        if transactions.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+        "[ProjectionStore] bulk_insert_transactions_with_copy_fixed: processing {} transactions",
+        transactions.len()
+    );
+
+        // Create temporary table
+        sqlx::query!(
+            r#"
+        CREATE TEMP TABLE temp_transaction_projections (
+            id UUID,
+            account_id UUID,
+            transaction_type TEXT,
+            amount DECIMAL,
+            timestamp TIMESTAMPTZ
+        ) ON COMMIT DROP
+        "#
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        // CRITICAL: Use fixed binary writer
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;
+        for transaction in transactions {
+            writer.write_row(5)?; // 5 fields
+            writer.write_uuid(&transaction.id)?;
+            writer.write_uuid(&transaction.account_id)?;
+            writer.write_text(&transaction.transaction_type)?;
+            writer.write_decimal(&transaction.amount, "amount")?; // FIXED: now supported
+            writer.write_timestamp(&transaction.timestamp)?;
+        }
+        let binary_data = writer.finish()?;
+
+        tracing::debug!(
+            "[ProjectionStore] Generated binary data: {} bytes for {} tuples",
+            binary_data.len(),
+            transactions.len()
+        );
+
+        // Execute COPY
+        let copy_command = "COPY temp_transaction_projections FROM STDIN WITH (FORMAT BINARY)";
+        let mut copy_in = tx.copy_in_raw(copy_command).await?;
+        copy_in.send(binary_data.as_slice()).await?;
+        let copy_result = copy_in.finish().await?;
+
+        tracing::info!(
+            "[ProjectionStore] COPY BINARY inserted {} rows into temp table",
+            copy_result
+        );
+
+        // Insert from temp table to main table
+        let insert_result = sqlx::query(
+            r#"
+        INSERT INTO transaction_projections (id, account_id, transaction_type, amount, timestamp)
+        SELECT id, account_id, transaction_type, amount, timestamp
+        FROM temp_transaction_projections
+        ON CONFLICT (id, timestamp) DO NOTHING
+        "#,
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        tracing::info!(
+            "[ProjectionStore] Successfully inserted {} transactions via COPY BINARY",
+            insert_result.rows_affected()
+        );
+
+        // LOST EVENT LOGGING: rows_affected < transactions.len() implies conflicts or drops
+        let inserted_rows: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*)::bigint FROM transaction_projections WHERE id = ANY($1)"#,
+            &transactions.iter().map(|t| t.id).collect::<Vec<_>>()
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0_i64);
+
+        let expected = transactions.len() as i64;
+        if inserted_rows < expected {
+            let lost = expected - inserted_rows;
+            tracing::warn!(
+                "[ProjectionStore] LOST transactions detected: expected={}, present={}, lost={}",
+                expected,
+                inserted_rows,
+                lost
+            );
+
+            // Log sample of missing ids to help debugging
+            let present_ids: std::collections::HashSet<Uuid> = sqlx::query_scalar!(
+                r#"SELECT id FROM transaction_projections WHERE id = ANY($1)"#,
+                &transactions.iter().map(|t| t.id).collect::<Vec<_>>()
+            )
+            .fetch_all(&mut **tx)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+            let missing: Vec<Uuid> = transactions
+                .iter()
+                .map(|t| t.id)
+                .filter(|id| !present_ids.contains(id))
+                .take(50)
+                .collect();
+            tracing::warn!(
+                "[ProjectionStore] Missing transaction ids (sample up to 50): {:?}",
+                missing
+            );
+        }
+
+        Ok(())
+    }
+
+    /// CRITICAL OPTIMIZATION: Use PostgreSQL COPY for bulk account upserts
+    async fn bulk_upsert_accounts_with_copy_old(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         accounts: &[AccountProjection],
     ) -> Result<()> {
@@ -511,7 +884,7 @@ impl ProjectionStore {
 
         let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
         tracing::info!(
-            "[ProjectionStore] bulk_upsert_accounts_with_copy: about to COPY {} accounts: ids={:?}",
+            "[ProjectionStore] bulk_upsert_accounts_with_copy: about to COPY BINARY {} accounts: ids={:?}",
             accounts.len(),
             account_ids
         );
@@ -519,32 +892,16 @@ impl ProjectionStore {
         // Deduplicate accounts by ID (keep the latest version)
         let accounts_to_upsert = if accounts.len() > 1 {
             let mut unique_accounts = std::collections::HashMap::new();
-            let mut duplicate_count = 0;
-
             for account in accounts {
-                if unique_accounts
-                    .insert(account.id, account.clone())
-                    .is_some()
-                {
-                    duplicate_count += 1;
-                }
+                unique_accounts.insert(account.id, account.clone());
             }
-
-            if duplicate_count > 0 {
-                tracing::warn!(
-                    "[ProjectionStore] bulk_upsert_accounts_with_copy: Found {} duplicates in batch of {} accounts",
-                    duplicate_count,
-                    accounts.len()
-                );
-            }
-
             unique_accounts.into_values().collect::<Vec<_>>()
         } else {
             accounts.to_vec()
         };
 
         // STEP 1: Create temporary table for COPY
-        sqlx::query!(
+        sqlx::query(
             r#"
             CREATE TEMP TABLE temp_account_projections (
                 id UUID,
@@ -554,53 +911,42 @@ impl ProjectionStore {
                 created_at TIMESTAMPTZ,
                 updated_at TIMESTAMPTZ
             ) ON COMMIT DROP
-            "#
+            "#,
         )
         .execute(&mut **tx)
         .await?;
 
-        // STEP 2: Prepare CSV data for COPY
-        let mut csv_data = BytesMut::new();
+        // STEP 2: Prepare BINARY data for COPY
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;
         for account in &accounts_to_upsert {
-            // Escape special characters in CSV format
-            let owner_name_escaped = account
-                .owner_name
-                .replace("\\", "\\\\")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
-
-            writeln!(
-                &mut csv_data,
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                account.id,
-                owner_name_escaped,
-                account.balance,
-                account.is_active,
-                account.created_at.to_rfc3339(),
-                account.updated_at.to_rfc3339()
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to write CSV data: {}", e))?;
+            writer.write_row(6)?;
+            writer.write_uuid(&account.id)?;
+            writer.write_text(&account.owner_name)?;
+            // Write decimal as text to avoid complex binary format
+            writer.write_text(&account.balance.to_string())?;
+            writer.write_bool(account.is_active)?;
+            writer.write_timestamp(&account.created_at)?;
+            writer.write_timestamp(&account.updated_at)?;
         }
+        let binary_data = writer.finish()?;
 
         // STEP 3: Use COPY to bulk insert into temp table
-        let copy_result = sqlx::query(
-            "COPY temp_account_projections FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')",
-        )
-        .bind(&csv_data[..])
-        .execute(&mut **tx)
-        .await;
+        let mut copy_in = tx
+            .copy_in_raw("COPY temp_account_projections FROM STDIN WITH (FORMAT BINARY)")
+            .await?;
+        copy_in.send(binary_data.as_slice()).await?;
+        let copy_result = copy_in.finish().await;
 
         match copy_result {
             Ok(result) => {
                 tracing::info!(
-                    "[ProjectionStore] bulk_upsert_accounts_with_copy: COPY inserted {} rows into temp table",
-                    result.rows_affected()
+                    "[ProjectionStore] bulk_upsert_accounts_with_copy: COPY BINARY inserted {} rows into temp table",
+                    result
                 );
             }
             Err(e) => {
                 tracing::error!(
-                    "[ProjectionStore] bulk_upsert_accounts_with_copy: COPY failed: {}",
+                    "[ProjectionStore] bulk_upsert_accounts_with_copy: COPY BINARY failed: {}",
                     e
                 );
 
@@ -629,7 +975,7 @@ impl ProjectionStore {
         match upsert_result {
             Ok(res) => {
                 tracing::info!(
-                    "[ProjectionStore] bulk_upsert_accounts_with_copy: Successfully upserted {} accounts via COPY method",
+                    "[ProjectionStore] bulk_upsert_accounts_with_copy: Successfully upserted {} accounts via COPY BINARY method",
                     res.rows_affected()
                 );
                 Ok(())
@@ -646,7 +992,7 @@ impl ProjectionStore {
     }
 
     /// CRITICAL OPTIMIZATION: Use PostgreSQL COPY for bulk transaction inserts
-    async fn bulk_insert_transactions_with_copy(
+    async fn bulk_insert_transactions_with_copy_old(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         transactions: &[TransactionProjection],
     ) -> Result<()> {
@@ -655,12 +1001,12 @@ impl ProjectionStore {
         }
 
         tracing::info!(
-            "[ProjectionStore] bulk_insert_transactions_with_copy: about to COPY {} transactions",
+            "[ProjectionStore] bulk_insert_transactions_with_copy: about to COPY BINARY {} transactions",
             transactions.len()
         );
 
         // STEP 1: Create temporary table for COPY
-        sqlx::query!(
+        sqlx::query(
             r#"
             CREATE TEMP TABLE temp_transaction_projections (
                 id UUID,
@@ -669,44 +1015,41 @@ impl ProjectionStore {
                 amount DECIMAL,
                 timestamp TIMESTAMPTZ
             ) ON COMMIT DROP
-            "#
+            "#,
         )
         .execute(&mut **tx)
         .await?;
 
-        // STEP 2: Prepare CSV data for COPY
-        let mut csv_data = BytesMut::new();
+        // STEP 2: Prepare BINARY data for COPY
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;
         for transaction in transactions {
-            writeln!(
-                &mut csv_data,
-                "{}\t{}\t{}\t{}\t{}",
-                transaction.id,
-                transaction.account_id,
-                transaction.transaction_type,
-                transaction.amount,
-                transaction.timestamp.to_rfc3339()
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to write transaction CSV data: {}", e))?;
+            writer.write_row(5)?;
+            writer.write_uuid(&transaction.id)?;
+            writer.write_uuid(&transaction.account_id)?;
+            writer.write_text(&transaction.transaction_type)?;
+            // Write decimal as text
+            writer.write_text(&transaction.amount.to_string())?;
+            writer.write_timestamp(&transaction.timestamp)?;
         }
+        let binary_data = writer.finish()?;
 
         // STEP 3: Use COPY to bulk insert into temp table
-        let copy_result = sqlx::query(
-            "COPY temp_transaction_projections FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')",
-        )
-        .bind(&csv_data[..])
-        .execute(&mut **tx)
-        .await;
+        let mut copy_in = tx
+            .copy_in_raw("COPY temp_transaction_projections FROM STDIN WITH (FORMAT BINARY)")
+            .await?;
+        copy_in.send(binary_data.as_slice()).await?;
+        let copy_result = copy_in.finish().await;
 
         match copy_result {
             Ok(result) => {
                 tracing::info!(
-                    "[ProjectionStore] bulk_insert_transactions_with_copy: COPY inserted {} rows into temp table",
-                    result.rows_affected()
+                    "[ProjectionStore] bulk_insert_transactions_with_copy: COPY BINARY inserted {} rows into temp table",
+                    result
                 );
             }
             Err(e) => {
                 tracing::error!(
-                    "[ProjectionStore] bulk_insert_transactions_with_copy: COPY failed: {}",
+                    "[ProjectionStore] bulk_insert_transactions_with_copy: COPY BINARY failed: {}",
                     e
                 );
 
@@ -731,7 +1074,7 @@ impl ProjectionStore {
         match insert_result {
             Ok(res) => {
                 tracing::info!(
-                    "[ProjectionStore] bulk_insert_transactions_with_copy: Successfully inserted {} transactions via COPY method",
+                    "[ProjectionStore] bulk_insert_transactions_with_copy: Successfully inserted {} transactions via COPY BINARY method",
                     res.rows_affected()
                 );
                 Ok(())
@@ -818,6 +1161,50 @@ impl ProjectionStore {
         .execute(&mut **tx)
         .await?;
 
+        // LOST EVENT LOGGING: rows_affected < transactions.len() implies conflicts or drops
+        let inserted_rows: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*)::bigint FROM transaction_projections WHERE id = ANY($1)"#,
+            &transactions.iter().map(|t| t.id).collect::<Vec<_>>()
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0_i64);
+
+        let expected = transactions.len() as i64;
+        if inserted_rows < expected {
+            let lost = expected - inserted_rows;
+            tracing::warn!(
+                "[ProjectionStore] LOST transactions detected: expected={}, present={}, lost={}",
+                expected,
+                inserted_rows,
+                lost
+            );
+
+            // Log sample of missing ids to help debugging
+            let present_ids: std::collections::HashSet<Uuid> = sqlx::query_scalar!(
+                r#"SELECT id FROM transaction_projections WHERE id = ANY($1)"#,
+                &transactions.iter().map(|t| t.id).collect::<Vec<_>>()
+            )
+            .fetch_all(&mut **tx)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+            let missing: Vec<Uuid> = transactions
+                .iter()
+                .map(|t| t.id)
+                .filter(|id| !present_ids.contains(id))
+                .take(50)
+                .collect();
+            tracing::warn!(
+                "[ProjectionStore] Missing transaction ids (sample up to 50): {:?}",
+                missing
+            );
+        }
+
         Ok(())
     }
 
@@ -850,13 +1237,17 @@ impl ProjectionStore {
                 "[ProjectionStore] Using COPY method for large batch of {} accounts (threshold: {})",
                 account_count, use_copy_threshold
             );
-            Self::bulk_upsert_accounts_with_copy(&mut tx, &accounts).await?;
+            Self::bulk_upsert_accounts_with_copy(&mut tx, &accounts)
+                .await
+                .map_err(|e| anyhow::anyhow!("Error upserting accounts with COPY: {}", e))?;
         } else {
             tracing::info!(
                 "[ProjectionStore] Using UNNEST method for small batch of {} accounts (threshold: {})",
                 account_count, use_copy_threshold
             );
-            Self::bulk_upsert_accounts_unnest(&mut tx, &accounts).await?;
+            Self::bulk_upsert_accounts_unnest(&mut tx, &accounts)
+                .await
+                .map_err(|e| anyhow::anyhow!("Error upserting accounts with UNNEST: {}", e))?;
         }
 
         tx.commit().await?;
@@ -899,13 +1290,17 @@ impl ProjectionStore {
                 "[ProjectionStore] Using COPY method for large transaction batch of {} (threshold: {})",
                 transaction_count, use_copy_threshold
             );
-            Self::bulk_insert_transactions_with_copy(&mut tx, &transactions).await?;
+            Self::bulk_insert_transactions_with_copy(&mut tx, &transactions)
+                .await
+                .map_err(|e| anyhow::anyhow!("Error inserting transactions with COPY: {}", e))?;
         } else {
             tracing::info!(
                 "[ProjectionStore] Using UNNEST method for small transaction batch of {} (threshold: {})",
                 transaction_count, use_copy_threshold
             );
-            Self::bulk_insert_transactions_unnest(&mut tx, &transactions).await?;
+            Self::bulk_insert_transactions_unnest(&mut tx, &transactions)
+                .await
+                .map_err(|e| anyhow::anyhow!("Error inserting transactions with UNNEST: {}", e))?;
         }
 
         tx.commit().await?;
@@ -1059,11 +1454,17 @@ impl ProjectionStore {
             let mut tx = pool.begin().await?;
 
             if use_direct_copy_accounts && !accounts.is_empty() {
-                Self::bulk_upsert_accounts_with_copy(&mut tx, &accounts).await?;
+                Self::bulk_upsert_accounts_with_copy(&mut tx, &accounts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Error upserting accounts with COPY: {}", e))?;
             }
 
             if use_direct_copy_transactions && !transactions.is_empty() {
-                Self::bulk_insert_transactions_with_copy(&mut tx, &transactions).await?;
+                Self::bulk_insert_transactions_with_copy(&mut tx, &transactions)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Error inserting transactions with COPY: {}", e)
+                    })?;
             }
 
             tx.commit().await?;
@@ -1923,6 +2324,50 @@ impl ProjectionStore {
         )
         .execute(&mut **tx)
         .await?;
+
+        // LOST EVENT LOGGING: rows_affected < transactions.len() implies conflicts or drops
+        let inserted_rows: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*)::bigint FROM transaction_projections WHERE id = ANY($1)"#,
+            &transactions.iter().map(|t| t.id).collect::<Vec<_>>()
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0_i64);
+
+        let expected = transactions.len() as i64;
+        if inserted_rows < expected {
+            let lost = expected - inserted_rows;
+            tracing::warn!(
+                "[ProjectionStore] LOST transactions detected: expected={}, present={}, lost={}",
+                expected,
+                inserted_rows,
+                lost
+            );
+
+            // Log sample of missing ids to help debugging
+            let present_ids: std::collections::HashSet<Uuid> = sqlx::query_scalar!(
+                r#"SELECT id FROM transaction_projections WHERE id = ANY($1)"#,
+                &transactions.iter().map(|t| t.id).collect::<Vec<_>>()
+            )
+            .fetch_all(&mut **tx)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+            let missing: Vec<Uuid> = transactions
+                .iter()
+                .map(|t| t.id)
+                .filter(|id| !present_ids.contains(id))
+                .take(50)
+                .collect();
+            tracing::warn!(
+                "[ProjectionStore] Missing transaction ids (sample up to 50): {:?}",
+                missing
+            );
+        }
 
         Ok(())
     }
