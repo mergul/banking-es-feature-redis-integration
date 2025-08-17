@@ -513,12 +513,7 @@ pub struct UltraOptimizedCDCEventProcessor {
 
     // CDC Batching Service requires write pool
     write_pool: Option<Arc<sqlx::PgPool>>,
-
-    // CRITICAL OPTIMIZATION: Accumulated batching for database operations
-    accumulated_projections: Arc<Mutex<Vec<crate::infrastructure::projections::AccountProjection>>>,
-    accumulated_transactions:
-        Arc<Mutex<Vec<crate::infrastructure::projections::TransactionProjection>>>,
-    accumulation_flush_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    // REMOVED: Accumulation batching - using ProjectionStore standard batching instead
 }
 
 #[derive(Debug, Clone)]
@@ -576,11 +571,7 @@ impl Clone for UltraOptimizedCDCEventProcessor {
             monitoring_system: self.monitoring_system.clone(),
             cdc_batching_service: self.cdc_batching_service.clone(),
             write_pool: self.write_pool.clone(),
-
-            // CRITICAL OPTIMIZATION: Clone accumulation buffers
-            accumulated_projections: self.accumulated_projections.clone(),
-            accumulated_transactions: self.accumulated_transactions.clone(),
-            accumulation_flush_handle: Arc::new(Mutex::new(None)), // Don't clone the handle
+            // REMOVED: Accumulation batching - using ProjectionStore standard batching instead
         }
     }
 }
@@ -672,12 +663,79 @@ impl UltraOptimizedCDCEventProcessor {
             monitoring_system: Arc::new(Mutex::new(None)),
             cdc_batching_service: None,
             write_pool,
-
-            // CRITICAL OPTIMIZATION: Initialize accumulation buffers
-            accumulated_projections: Arc::new(Mutex::new(Vec::with_capacity(1000))),
-            accumulated_transactions: Arc::new(Mutex::new(Vec::with_capacity(1000))),
-            accumulation_flush_handle: Arc::new(Mutex::new(None)),
+            // REMOVED: Accumulation batching - using ProjectionStore standard batching instead
         }
+    }
+
+    // REMOVED: Accumulation flush task - using ProjectionStore standard batching instead
+
+    /// NEW: Static version for AccountCreated events processing (without CDC Batching Service)
+    async fn process_account_created_events_direct_copy_static(
+        account_created_events: HashMap<Uuid, Vec<ProcessableEvent>>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Result<(
+        Vec<crate::infrastructure::projections::AccountProjection>,
+        Vec<Uuid>,
+    )> {
+        let mut new_projections = Vec::new();
+        let mut processed_aggregates = Vec::new();
+
+        // CRITICAL OPTIMIZATION: Build projections directly from AccountCreated events
+        for (aggregate_id, events) in account_created_events {
+            // AccountCreated events should have exactly one event
+            if let Some(event) = events.first() {
+                if let Ok(domain_event) = event.get_domain_event() {
+                    if let crate::domain::AccountEvent::AccountCreated {
+                        owner_name,
+                        initial_balance,
+                        ..
+                    } = domain_event
+                    {
+                        // Create projection directly from AccountCreated event
+                        let projection = crate::infrastructure::projections::AccountProjection {
+                            id: aggregate_id,
+                            owner_name: owner_name.clone(),
+                            balance: *initial_balance,
+                            is_active: true,
+                            created_at: event.timestamp,
+                            updated_at: event.timestamp,
+                        };
+
+                        new_projections.push(projection);
+                        processed_aggregates.push(aggregate_id);
+
+                        tracing::debug!(
+                            "🚀 OPTIMIZED: Created projection from AccountCreated - account: {}, owner: {}, balance: {}",
+                            aggregate_id, owner_name, initial_balance
+                        );
+                    }
+                }
+            }
+        }
+
+        // Use direct COPY for all AccountCreated events in static context
+        if !new_projections.is_empty() {
+            let batch_size = new_projections.len();
+            tracing::info!(
+                "🚀 DIRECT COPY: Using direct COPY for {} AccountCreated projections (static context)",
+                batch_size
+            );
+            if let Some(projection_store_impl) = projection_store
+                .as_any()
+                .downcast_ref::<crate::infrastructure::projections::ProjectionStore>(
+            ) {
+                projection_store_impl
+                    .bulk_insert_new_accounts_with_copy(new_projections.clone())
+                    .await?;
+            } else {
+                projection_store
+                    .upsert_accounts_batch(new_projections.clone())
+                    .await?;
+            }
+        }
+
+        Ok((new_projections, processed_aggregates))
     }
 
     /// Initialize CDC Batching Service with write pool
@@ -1380,6 +1438,7 @@ impl UltraOptimizedCDCEventProcessor {
                         )> = projections.iter().map(|p| (p.id, p.clone())).collect();
 
                         // Submit ALL projections as bulk (like write_batching) - NO CHUNKING
+                        // Note: CDC Batching Service will internally separate AccountCreated from other events
                         match batching_service
                             .submit_projections_bulk(projections_for_bulk)
                             .await
@@ -1972,7 +2031,7 @@ impl UltraOptimizedCDCEventProcessor {
         // CRITICAL OPTIMIZATION: Process AccountCreated events with direct COPY (INSERT)
         if !account_created_events.is_empty() {
             let (new_projections, new_aggregates) =
-                Self::process_account_created_events_direct_copy(
+                Self::process_account_created_events_direct_copy_static(
                     account_created_events,
                     projection_store,
                     metrics,
@@ -2055,6 +2114,7 @@ impl UltraOptimizedCDCEventProcessor {
                     account_created_events,
                     projection_store,
                     metrics,
+                    self.cdc_batching_service.as_ref(),
                 )
                 .await?;
 
@@ -2089,17 +2149,7 @@ impl UltraOptimizedCDCEventProcessor {
             );
         }
 
-        // CRITICAL OPTIMIZATION: Add projections to accumulation buffer instead of immediate DB write
-        if !all_projections.is_empty() {
-            let mut acc_proj = self.accumulated_projections.lock().await;
-            acc_proj.extend(all_projections.clone());
-
-            tracing::info!(
-                "🚀 ACCUMULATION: Added {} projections to accumulation buffer (total: {})",
-                all_projections.len(),
-                acc_proj.len()
-            );
-        }
+        // REMOVED: Accumulation logic - using ProjectionStore standard batching instead
 
         let duration = start_time.elapsed();
         tracing::info!(
@@ -2157,6 +2207,9 @@ impl UltraOptimizedCDCEventProcessor {
         account_created_events: HashMap<Uuid, Vec<ProcessableEvent>>,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         metrics: &Arc<EnhancedCDCMetrics>,
+        cdc_batching_service: Option<
+            &Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>,
+        >,
     ) -> Result<(
         Vec<crate::infrastructure::projections::AccountProjection>,
         Vec<Uuid>,
@@ -2197,19 +2250,76 @@ impl UltraOptimizedCDCEventProcessor {
             }
         }
 
-        // CRITICAL OPTIMIZATION: Accumulate instead of immediate database write
-        // This prevents 1579 individual database calls
+        // CRITICAL: Use CDC Batching Service for large batches, direct COPY for small batches
         if !new_projections.is_empty() {
-            tracing::info!(
-                "🚀 ACCUMULATION: Accumulating {} new account projections (not writing to DB yet)",
-                new_projections.len()
-            );
+            let batch_size = new_projections.len();
+            let cdc_batch_threshold = std::env::var("CDC_BATCH_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1000); // Use CDC batching for batches >= 1000
 
-            // Update metrics for accumulated projections
-            metrics.projection_updates.fetch_add(
-                new_projections.len() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            if batch_size >= cdc_batch_threshold {
+                // Use CDC Batching Service for large batches
+                if let Some(batching_service) = cdc_batching_service {
+                    tracing::info!(
+                        "🚀 CDC BATCHING: Using CDC Batching Service for {} AccountCreated projections (threshold: {})",
+                        batch_size, cdc_batch_threshold
+                    );
+
+                    // Convert to format expected by CDC Batching Service
+                    let projections_for_batching: Vec<(
+                        Uuid,
+                        crate::infrastructure::projections::AccountProjection,
+                    )> = new_projections.iter().map(|p| (p.id, p.clone())).collect();
+
+                    batching_service
+                        .submit_account_created_projections_bulk(projections_for_batching)
+                        .await?;
+
+                    tracing::info!(
+                        "✅ CDC BATCHING: Successfully submitted {} AccountCreated projections to CDC Batching Service",
+                        batch_size
+                    );
+                } else {
+                    // Fallback to direct COPY if CDC Batching Service not available
+                    tracing::warn!(
+                        "⚠️ CDC BATCHING: CDC Batching Service not available, falling back to direct COPY for {} projections",
+                        batch_size
+                    );
+                    if let Some(projection_store_impl) =
+                        projection_store
+                            .as_any()
+                            .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
+                    {
+                        projection_store_impl
+                            .bulk_insert_new_accounts_with_copy(new_projections.clone())
+                            .await?;
+                    } else {
+                        projection_store
+                            .upsert_accounts_batch(new_projections.clone())
+                            .await?;
+                    }
+                }
+            } else {
+                // Use direct COPY for small batches
+                tracing::info!(
+                    "🚀 DIRECT COPY: Using direct COPY for {} AccountCreated projections (below threshold: {})",
+                    batch_size, cdc_batch_threshold
+                );
+                if let Some(projection_store_impl) =
+                    projection_store
+                        .as_any()
+                        .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
+                {
+                    projection_store_impl
+                        .bulk_insert_new_accounts_with_copy(new_projections.clone())
+                        .await?;
+                } else {
+                    projection_store
+                        .upsert_accounts_batch(new_projections.clone())
+                        .await?;
+                }
+            }
         }
 
         Ok((new_projections, processed_aggregates))
@@ -3385,188 +3495,7 @@ impl UltraOptimizedCDCEventProcessor {
         }
     }
 
-    /// Start accumulation flush task for batched database writes
-    async fn start_accumulation_flush_task(&self) -> Result<()> {
-        let mut handle_guard = self.accumulation_flush_handle.lock().await;
-
-        // Only start if not already running
-        if handle_guard.is_some() {
-            return Ok(());
-        }
-
-        let accumulated_projections = self.accumulated_projections.clone();
-        let accumulated_transactions = self.accumulated_transactions.clone();
-        let projection_store = self.projection_store.clone();
-        let metrics = self.metrics.clone();
-        let shutdown_token = self.shutdown_token.clone();
-
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(25)); // Flush every 25ms (more aggressive)
-            let flush_threshold = 1000; // Flush when we have 1000+ items (back to 1000 for better batching)
-            let max_wait_time = Duration::from_millis(75); // Max 75ms wait (much more aggressive)
-            let mut last_flush_time = std::time::Instant::now(); // Track last flush time
-
-            loop {
-                tokio::select! {
-                            _ = shutdown_token.cancelled() => {
-                                tracing::info!("Accumulation flush task: Received shutdown signal");
-                                break;
-                            }
-                            _ = interval.tick() => {
-                                                        // Check if we have enough items to flush
-                let proj_count = accumulated_projections.lock().await.len();
-                let trans_count = accumulated_transactions.lock().await.len();
-
-                // Adaptive flush logic: flush if threshold reached OR max wait time exceeded
-                let should_flush = proj_count >= flush_threshold
-                    || trans_count >= flush_threshold
-                    || last_flush_time.elapsed() >= max_wait_time;
-
-                if should_flush {
-                                    // Flush accumulated data
-                                    let mut projections_to_flush = Vec::new();
-                                    let mut transactions_to_flush = Vec::new();
-
-                                    {
-                                        let mut acc_proj = accumulated_projections.lock().await;
-                                        if !acc_proj.is_empty() {
-                                            projections_to_flush = std::mem::take(&mut *acc_proj);
-                                        }
-
-                                        let mut acc_trans = accumulated_transactions.lock().await;
-                                        if !acc_trans.is_empty() {
-                                            transactions_to_flush = std::mem::take(&mut *acc_trans);
-                                        }
-                                    }
-
-                                    // Perform batched database writes
-                                    let flush_start = std::time::Instant::now();
-
-                                    if !projections_to_flush.is_empty() {
-                                        let proj_count = projections_to_flush.len();
-
-                                        // CRITICAL OPTIMIZATION: Use direct COPY for accumulated projections
-                                        if let Some(projection_store_impl) = projection_store
-                                            .as_any()
-                                            .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
-                                        {
-                                            // Use direct COPY for accumulated projections
-                                            match projection_store_impl
-                                                .bulk_insert_new_accounts_with_copy(projections_to_flush)
-                                                .await
-                                            {
-                                                Ok(_) => {
-                                                                                        tracing::info!(
-                                        "🚀 ACCUMULATION: Successfully flushed {} accumulated projections with direct COPY in {:?}",
-                                        proj_count, flush_start.elapsed()
-                                    );
-                                    last_flush_time = std::time::Instant::now(); // Update last flush time
-                                                }
-                                                Err(e) => {
-                                                    tracing::error!("Failed to flush accumulated projections with direct COPY: {}", e);
-                                                    metrics.events_failed.fetch_add(
-                                                        proj_count as u64,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                }
-                                            }
-                                        } else {
-                                            // Fallback to standard batch insert
-                                            if let Err(e) = projection_store.upsert_accounts_batch(projections_to_flush).await {
-                                                tracing::error!("Failed to flush accumulated projections: {}", e);
-                                                metrics.events_failed.fetch_add(
-                                                    proj_count as u64,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                            } else {
-                                                tracing::debug!("Flushed {} accumulated projections in {:?}",
-                                                    proj_count, flush_start.elapsed());
-                                            }
-                                        }
-                                    }
-
-                                                                if !transactions_to_flush.is_empty() {
-                                        let trans_count = transactions_to_flush.len();
-                                        if let Err(e) = projection_store.insert_transactions_batch(transactions_to_flush).await {
-                                            tracing::error!("Failed to flush accumulated transactions: {}", e);
-                                            metrics.events_failed.fetch_add(
-                                                trans_count as u64,
-                                                std::sync::atomic::Ordering::Relaxed,
-                                            );
-                                        } else {
-                                            tracing::debug!("Flushed {} accumulated transactions in {:?}",
-                                                trans_count, flush_start.elapsed());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-            }
-
-            // Final flush on shutdown
-            let mut projections_to_flush = Vec::new();
-            let mut transactions_to_flush = Vec::new();
-
-            {
-                let mut acc_proj = accumulated_projections.lock().await;
-                if !acc_proj.is_empty() {
-                    projections_to_flush = std::mem::take(&mut *acc_proj);
-                }
-
-                let mut acc_trans = accumulated_transactions.lock().await;
-                if !acc_trans.is_empty() {
-                    transactions_to_flush = std::mem::take(&mut *acc_trans);
-                }
-            }
-
-            if !projections_to_flush.is_empty() {
-                let proj_count = projections_to_flush.len();
-
-                // CRITICAL OPTIMIZATION: Use direct COPY for final flush
-                if let Some(projection_store_impl) =
-                    projection_store
-                        .as_any()
-                        .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
-                {
-                    match projection_store_impl
-                        .bulk_insert_new_accounts_with_copy(projections_to_flush)
-                        .await
-                    {
-                        Ok(_) => {
-                            tracing::info!(
-                                "🚀 ACCUMULATION: Final flush - Successfully flushed {} accumulated projections with direct COPY",
-                                proj_count
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to final flush accumulated projections with direct COPY: {}", e);
-                        }
-                    }
-                } else {
-                    if let Err(e) = projection_store
-                        .upsert_accounts_batch(projections_to_flush)
-                        .await
-                    {
-                        tracing::error!("Failed to final flush accumulated projections: {}", e);
-                    }
-                }
-            }
-
-            if !transactions_to_flush.is_empty() {
-                if let Err(e) = projection_store
-                    .insert_transactions_batch(transactions_to_flush)
-                    .await
-                {
-                    tracing::error!("Failed to final flush accumulated transactions: {}", e);
-                }
-            }
-
-            tracing::info!("Accumulation flush task completed");
-        });
-
-        *handle_guard = Some(handle);
-        Ok(())
-    }
+    // REMOVED: Accumulation flush task - using ProjectionStore standard batching instead
 }
 
 // DLQ Recovery Configuration
@@ -5035,13 +4964,7 @@ impl UltraOptimizedCDCEventProcessor {
             }
         }
 
-        // Stop accumulation flush if running
-        let mut accumulation_guard = self.accumulation_flush_handle.lock().await;
-        if let Some(handle) = accumulation_guard.take() {
-            if !handle.is_finished() {
-                let _ = handle.await;
-            }
-        }
+        // REMOVED: Accumulation flush task - using ProjectionStore standard batching instead
 
         // Shutdown projection store
         info!("🛑 UltraOptimizedCDCEventProcessor: Shutting down projection store");
@@ -5219,3 +5142,72 @@ impl UltraOptimizedCDCEventProcessor {
 }
 
 // REMOVED: Memory pool - overhead was too high
+
+/// NEW: Static version for AccountCreated events processing (without CDC Batching Service)
+async fn process_account_created_events_direct_copy_static(
+    account_created_events: HashMap<Uuid, Vec<ProcessableEvent>>,
+    projection_store: &Arc<dyn ProjectionStoreTrait>,
+    metrics: &Arc<EnhancedCDCMetrics>,
+) -> Result<(
+    Vec<crate::infrastructure::projections::AccountProjection>,
+    Vec<Uuid>,
+)> {
+    let mut new_projections = Vec::new();
+    let mut processed_aggregates = Vec::new();
+
+    // CRITICAL OPTIMIZATION: Build projections directly from AccountCreated events
+    for (aggregate_id, events) in account_created_events {
+        // AccountCreated events should have exactly one event
+        if let Some(event) = events.first() {
+            if let Ok(domain_event) = event.get_domain_event() {
+                if let crate::domain::AccountEvent::AccountCreated {
+                    owner_name,
+                    initial_balance,
+                    ..
+                } = domain_event
+                {
+                    // Create projection directly from AccountCreated event
+                    let projection = crate::infrastructure::projections::AccountProjection {
+                        id: aggregate_id,
+                        owner_name: owner_name.clone(),
+                        balance: *initial_balance,
+                        is_active: true,
+                        created_at: event.timestamp,
+                        updated_at: event.timestamp,
+                    };
+
+                    new_projections.push(projection);
+                    processed_aggregates.push(aggregate_id);
+
+                    tracing::debug!(
+                            "🚀 OPTIMIZED: Created projection from AccountCreated - account: {}, owner: {}, balance: {}",
+                            aggregate_id, owner_name, initial_balance
+                        );
+                }
+            }
+        }
+    }
+
+    // Use direct COPY for all AccountCreated events in static context
+    if !new_projections.is_empty() {
+        let batch_size = new_projections.len();
+        tracing::info!(
+            "🚀 DIRECT COPY: Using direct COPY for {} AccountCreated projections (static context)",
+            batch_size
+        );
+        if let Some(projection_store_impl) = projection_store
+            .as_any()
+            .downcast_ref::<crate::infrastructure::projections::ProjectionStore>(
+        ) {
+            projection_store_impl
+                .bulk_insert_new_accounts_with_copy(new_projections.clone())
+                .await?;
+        } else {
+            projection_store
+                .upsert_accounts_batch(new_projections.clone())
+                .await?;
+        }
+    }
+
+    Ok((new_projections, processed_aggregates))
+}

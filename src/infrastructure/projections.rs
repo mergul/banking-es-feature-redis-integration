@@ -157,11 +157,11 @@ impl CopyOptimizationConfig {
             projection_copy_threshold: std::env::var("PROJECTION_COPY_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(50), // Use COPY for batches >= 50 accounts (optimized for large batches)
+                .unwrap_or(1000), // Use COPY for batches >= 1000 accounts (optimized for large batches)
             transaction_copy_threshold: std::env::var("TRANSACTION_COPY_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(10), // Use COPY for batches >= 10 transactions (reduced from 50 for better persistence)
+                .unwrap_or(1000), // Use COPY for batches >= 1000 transactions (optimized for large batches)
             cdc_projection_batch_size: std::env::var("CDC_PROJECTION_BATCH_SIZE")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1366,7 +1366,7 @@ impl ProjectionStore {
         let use_copy_threshold = std::env::var("PROJECTION_COPY_THRESHOLD")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(100); // Use COPY for batches >= 100 accounts
+            .unwrap_or(1000); // Use COPY for batches >= 1000 accounts (optimized for large batches)
 
         if account_count >= use_copy_threshold {
             tracing::info!(
