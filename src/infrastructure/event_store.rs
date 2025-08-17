@@ -2475,27 +2475,27 @@ impl EventStore {
             .await?;
 
         // Log version plan per aggregate for conflict diagnosis
-        {
-            let mut plans = Vec::new();
-            for (agg_id, evs, _) in &events_by_aggregate {
-                let start_v = *versions_map.get(agg_id).unwrap_or(&0) + 1;
-                let end_v = start_v + evs.len() as i64 - 1;
-                plans.push(format!(
-                    "{}:v{}->v{} ({} ev)",
-                    agg_id,
-                    start_v,
-                    end_v,
-                    evs.len()
-                ));
-            }
-            // tracing::info!(
-            //     "[VERSIONS] Planned versions per aggregate: [{}]",
-            //     plans.join(", ")
-            // );
-        }
+        // {
+        //     let mut plans = Vec::new();
+        //     for (agg_id, evs, _) in &events_by_aggregate {
+        //         let start_v = *versions_map.get(agg_id).unwrap_or(&0) + 1;
+        //         let end_v = start_v + evs.len() as i64 - 1;
+        //         plans.push(format!(
+        //             "{}:v{}->v{} ({} ev)",
+        //             agg_id,
+        //             start_v,
+        //             end_v,
+        //             evs.len()
+        //         ));
+        //     }
+        //     tracing::info!(
+        //         "[VERSIONS] Planned versions per aggregate: [{}]",
+        //         plans.join(", ")
+        //     );
+        // }
 
         // Convert to binary format in one go
-        let binary_data = Event::batch_to_binary(events_by_aggregate, &versions_map)?;
+        let binary_data = Event::batch_to_binary(events_by_aggregate.clone(), &versions_map)?;
 
         // Execute ultra-fast binary COPY
         let copy_statement = r#"
@@ -2518,21 +2518,16 @@ impl EventStore {
             .await
             .map_err(EventStoreError::DatabaseError)?;
 
-        // CRITICAL FIX: Update version cache with the new highest versions
-        // let mut max_versions = HashMap::new();
-        // for (aggregate_id, events, _) in events_by_aggregate {
-        //     if !events.is_empty() {
-        //         // Get the starting version from the map we already fetched
-        //         let start_version = versions_map.get(&aggregate_id).unwrap_or(&0);
-        //         // The new max version is the starting version plus the number of new events
-        //         let new_max_version = start_version + events.len() as i64;
-        //         max_versions.insert(aggregate_id, new_max_version);
-        //     }
-        // }
-
-        // for (aggregate_id, max_version) in max_versions {
-        //     self.version_cache.insert(aggregate_id, max_version);
-        // }
+        // Update version cache efficiently with new highest versions
+        for (aggregate_id, events, _) in &events_by_aggregate {
+            if !events.is_empty() {
+                // Get the starting version from the map we already fetched
+                let start_version = versions_map.get(aggregate_id).unwrap_or(&0);
+                // The new max version is the starting version plus the number of new events
+                let new_max_version = start_version + events.len() as i64;
+                self.version_cache.insert(*aggregate_id, new_max_version);
+            }
+        }
 
         // Update metrics
         self.metrics
@@ -2562,50 +2557,48 @@ impl EventStore {
             return Ok(HashMap::new());
         }
 
+        // First, leverage the in-process cache to avoid unnecessary DB work
         let mut result = HashMap::with_capacity(aggregate_ids.len());
         let mut uncached_aggregates = Vec::new();
-        uncached_aggregates.extend(aggregate_ids.iter().cloned());
-        // Check cache first
-        // for &aggregate_id in aggregate_ids {
-        //     if let Some(cached_version) = self.version_cache.get(&aggregate_id) {
-        //         result.insert(aggregate_id, *cached_version);
-        //     } else {
-        //         uncached_aggregates.push(aggregate_id);
-        //     }
-        // }
 
-        // if uncached_aggregates.is_empty() {
-        //     return Ok(result);
-        // }
+        for &aggregate_id in aggregate_ids {
+            if let Some(cached_version) = self.version_cache.get(&aggregate_id) {
+                result.insert(aggregate_id, *cached_version);
+                self.metrics
+                    .cache_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                uncached_aggregates.push(aggregate_id);
+                self.metrics
+                    .cache_misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
 
-        // Use optimized query with transaction for consistency
-        let query = sqlx::query!(
-            r#"
-            SELECT aggregate_id, MAX(version) as version
-            FROM events
-            WHERE aggregate_id = ANY($1)
-            GROUP BY aggregate_id
-            "#,
-            &uncached_aggregates
-        );
-
-        let rows = query
+        // Only query DB for uncached aggregates
+        if !uncached_aggregates.is_empty() {
+            let rows = sqlx::query!(
+                r#"
+                SELECT a.id as "aggregate_id!: Uuid", COALESCE(ev.version, 0) as "version!: i64"
+                FROM UNNEST($1::uuid[]) a(id)
+                LEFT JOIN LATERAL (
+                    SELECT version
+                    FROM events
+                    WHERE aggregate_id = a.id
+                    ORDER BY version DESC
+                    LIMIT 1
+                ) ev ON TRUE
+                "#,
+                &uncached_aggregates
+            )
             .fetch_all(&mut **tx)
             .await
             .map_err(EventStoreError::DatabaseError)?;
 
-        // Process results and update cache
-        for row in rows {
-            let version = row.version.unwrap_or(0);
-            result.insert(row.aggregate_id, version);
-            self.version_cache.insert(row.aggregate_id, version);
-        }
-
-        // Set version 0 for new aggregates
-        for aggregate_id in uncached_aggregates {
-            if !result.contains_key(&aggregate_id) {
-                result.insert(aggregate_id, 0);
-                self.version_cache.insert(aggregate_id, 0);
+            // Update cache and result with DB results
+            for row in rows {
+                result.insert(row.aggregate_id, row.version);
+                self.version_cache.insert(row.aggregate_id, row.version);
             }
         }
 
@@ -2902,6 +2895,67 @@ impl EventStore {
         }
 
         Ok(result)
+    }
+
+    /// ✅ Get unprocessed events (events without corresponding outbox messages)
+    /// This is used by CDC Consumer Resilience to process events directly
+    pub async fn get_unprocessed_events(
+        &self,
+        batch_size: usize,
+    ) -> Result<Vec<AccountEvent>, EventStoreError> {
+        let read_pool = self.pools.select_pool(OperationType::Read);
+
+        // Query to find events that don't have corresponding outbox messages
+        let event_rows = sqlx::query_as!(
+            EventRow,
+            r#"
+            SELECT e.id, e.aggregate_id, e.event_type, e.event_data as "event_data: Vec<u8>", e.version, e.timestamp, e.metadata as "metadata: Vec<u8>"
+            FROM events e
+            LEFT JOIN kafka_outbox_cdc o ON e.id = o.event_id
+            WHERE o.event_id IS NULL  -- No corresponding outbox message
+            AND e.timestamp > NOW() - INTERVAL '1 hour'  -- Only recent events
+            ORDER BY e.timestamp ASC
+            LIMIT $1
+            "#,
+            batch_size as i64
+        )
+        .fetch_all(read_pool)
+        .await
+        .map_err(|e| EventStoreError::DatabaseError(e))?;
+
+        // Convert EventRow to AccountEvent
+        let mut unprocessed_events = Vec::new();
+        for event_row in event_rows {
+            match Self::deserialize_event_row(event_row).await {
+                Ok(event) => {
+                    unprocessed_events.push(event);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to deserialize unprocessed event: {:?}", e);
+                    continue;
+                }
+            }
+        }
+
+        tracing::info!(
+            "Found {} unprocessed events (events without outbox messages)",
+            unprocessed_events.len()
+        );
+
+        Ok(unprocessed_events)
+    }
+
+    /// ✅ Deserialize EventRow to AccountEvent
+    async fn deserialize_event_row(event_row: EventRow) -> Result<AccountEvent, EventStoreError> {
+        let account_event: AccountEvent =
+            bincode::deserialize(&event_row.event_data).map_err(|e| {
+                EventStoreError::ValidationError(vec![format!(
+                    "Failed to deserialize event: {}",
+                    e
+                )])
+            })?;
+
+        Ok(account_event)
     }
 
     /// Get the current configuration
@@ -3342,6 +3396,13 @@ pub trait EventStoreTrait: Send + Sync + 'static {
         tx: &mut Transaction<'_, Postgres>,
         events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>, // (aggregate_id, events, partition_id)
     ) -> Result<(), EventStoreError>;
+
+    /// ✅ Get unprocessed events (events without corresponding outbox messages)
+    /// This is used by CDC Consumer Resilience to process events directly
+    async fn get_unprocessed_events(
+        &self,
+        batch_size: usize,
+    ) -> Result<Vec<AccountEvent>, EventStoreError>;
 }
 
 #[async_trait]
@@ -3471,6 +3532,13 @@ impl EventStoreTrait for EventStore {
         // Call the main implementation directly
         self.save_events_multi_aggregate_optimized(tx, events_by_aggregate)
             .await
+    }
+
+    async fn get_unprocessed_events(
+        &self,
+        batch_size: usize,
+    ) -> Result<Vec<AccountEvent>, EventStoreError> {
+        self.get_unprocessed_events(batch_size).await
     }
 }
 

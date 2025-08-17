@@ -801,10 +801,17 @@ impl CDCServiceManager {
         tracing::info!("🛑 CDCServiceManager: About to cancel shutdown_token");
         self.shutdown_token.cancel();
         tracing::info!("🛑 CDCServiceManager: shutdown_token.cancel() called");
-        info!("�� CDCServiceManager: Starting graceful shutdown of CDC Service Manager");
-        tracing::info!("🛑 CDCServiceManager: About to cancel shutdown_token");
-        self.shutdown_token.cancel();
-        tracing::info!("🛑 CDCServiceManager: shutdown_token.cancel() called");
+
+        // Shutdown CDC event processor
+        info!("🛑 CDCServiceManager: Shutting down CDC event processor");
+        if let Err(e) = self.processor.stop().await {
+            warn!(
+                "⚠️ CDCServiceManager: Failed to shutdown CDC event processor: {}",
+                e
+            );
+        } else {
+            info!("✅ CDCServiceManager: CDC event processor shutdown complete");
+        }
 
         // Wait for all tasks to complete with timeout
         let shutdown_timeout =

@@ -97,24 +97,70 @@ impl Default for KafkaConfig {
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(5 * 1024 * 1024);
+        let producer_acks = std::env::var("KAFKA_PRODUCER_ACKS")
+            .ok()
+            .and_then(|v| v.parse::<i16>().ok())
+            .unwrap_or(1);
+        let producer_retries = std::env::var("KAFKA_PRODUCER_RETRIES")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(3);
+        let consumer_max_poll_interval_ms = std::env::var("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(20000);
+        let consumer_session_timeout_ms = std::env::var("KAFKA_CONSUMER_SESSION_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(20000);
+        let consumer_heartbeat_interval_ms = std::env::var("KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(5000);
+        let consumer_max_poll_records = std::env::var("KAFKA_CONSUMER_MAX_POLL_RECORDS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(5000);
+        let fetch_max_bytes = std::env::var("KAFKA_FETCH_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(5 * 1024 * 1024);
+        let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
+            .ok()
+            .unwrap_or("127.0.0.1:9092".to_string());
+        let group_id = std::env::var("KAFKA_GROUP_ID")
+            .ok()
+            .unwrap_or("banking-es-group".to_string());
+        let topic_prefix = std::env::var("KAFKA_TOPIC_PREFIX")
+            .ok()
+            .unwrap_or("banking-es".to_string());
+        let cache_invalidation_topic = std::env::var("KAFKA_CACHE_INVALIDATION_TOPIC")
+            .ok()
+            .unwrap_or("banking-es-cache-invalidation".to_string());
+        let event_topic = std::env::var("KAFKA_EVENT_TOPIC")
+            .ok()
+            .unwrap_or("banking-es-events".to_string());
+        let auto_offset_reset = std::env::var("KAFKA_AUTO_OFFSET_RESET")
+            .ok()
+            .unwrap_or("latest".to_string());
         Self {
-            enabled: true, // Enable Kafka by default
-            bootstrap_servers: "127.0.0.1:9092".to_string(),
-            group_id: "banking-es-group".to_string(),
-            topic_prefix: "banking-es".to_string(),
-            producer_acks: 1,
-            producer_retries: 3,
-            consumer_max_poll_interval_ms: 10000,
-            consumer_session_timeout_ms: 10000,
-            consumer_heartbeat_interval_ms: 1000,
-            consumer_max_poll_records: 5000,
-            fetch_max_bytes,
+            enabled: true,
+            bootstrap_servers: bootstrap_servers,
+            group_id: group_id,
+            topic_prefix: topic_prefix,
+            producer_acks: producer_acks,
+            producer_retries: producer_retries,
+            consumer_max_poll_interval_ms: consumer_max_poll_interval_ms,
+            consumer_session_timeout_ms: consumer_session_timeout_ms,
+            consumer_heartbeat_interval_ms: consumer_heartbeat_interval_ms,
+            consumer_max_poll_records: consumer_max_poll_records,
+            fetch_max_bytes: fetch_max_bytes,
             security_protocol: "PLAINTEXT".to_string(),
             sasl_mechanism: "PLAIN".to_string(),
             ssl_ca_location: None,
-            auto_offset_reset: "latest".to_string(),
-            cache_invalidation_topic: "banking-es-cache-invalidation".to_string(),
-            event_topic: "banking-es-events".to_string(),
+            auto_offset_reset: auto_offset_reset,
+            cache_invalidation_topic: cache_invalidation_topic,
+            event_topic: event_topic,
         }
     }
 }

@@ -4,7 +4,7 @@ use crate::infrastructure::connection_pool_partitioning::{
 };
 use crate::infrastructure::event_store::DB_POOL;
 use crate::infrastructure::DiagnosticPgCopyBinaryWriter;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, OnceCell, RwLock};
 use tokio_util::bytes::BytesMut;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn, Level};
 use uuid::Uuid;
 
@@ -102,6 +103,7 @@ pub struct ProjectionStore {
     cache_version: Arc<std::sync::atomic::AtomicU64>,
     pub metrics: Arc<ProjectionMetrics>,
     config: ProjectionConfig,
+    shutdown_token: CancellationToken,
 }
 
 #[derive(Debug, Clone)]
@@ -155,15 +157,15 @@ impl CopyOptimizationConfig {
             projection_copy_threshold: std::env::var("PROJECTION_COPY_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(20), // Use COPY for batches >= 20 accounts
+                .unwrap_or(50), // Use COPY for batches >= 50 accounts (optimized for large batches)
             transaction_copy_threshold: std::env::var("TRANSACTION_COPY_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(20), // Use COPY for batches >= 20 transactions
+                .unwrap_or(10), // Use COPY for batches >= 10 transactions (reduced from 50 for better persistence)
             cdc_projection_batch_size: std::env::var("CDC_PROJECTION_BATCH_SIZE")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(10000), // Default CDC batch size
+                .unwrap_or(5000), // Optimized CDC batch size for better throughput
             enable_copy_optimization: std::env::var("ENABLE_COPY_OPTIMIZATION")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -277,6 +279,7 @@ pub trait ProjectionStoreTrait: Send + Sync {
         &self,
         transactions: Vec<TransactionProjection>,
     ) -> Result<()>;
+    async fn shutdown(&self) -> Result<()>;
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
@@ -343,6 +346,10 @@ impl ProjectionStoreTrait for ProjectionStore {
         Ok(())
     }
 
+    async fn shutdown(&self) -> Result<()> {
+        self.shutdown().await
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -403,6 +410,7 @@ impl ProjectionStore {
         let transaction_cache = Arc::new(RwLock::new(HashMap::new()));
         let cache_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let metrics = Arc::new(ProjectionMetrics::default());
+        let shutdown_token = CancellationToken::new();
 
         // Use optimized processor with COPY support
         let pools_clone = partitioned_pools.clone();
@@ -411,6 +419,7 @@ impl ProjectionStore {
         let cache_version_clone = cache_version.clone();
         let metrics_clone = metrics.clone();
         let config_clone = config.clone();
+        let shutdown_token_processor = shutdown_token.clone();
 
         tokio::spawn(async move {
             Self::update_processor_optimized(
@@ -421,6 +430,7 @@ impl ProjectionStore {
                 cache_version_clone,
                 metrics_clone,
                 config_clone,
+                shutdown_token_processor,
             )
             .await;
         });
@@ -428,13 +438,20 @@ impl ProjectionStore {
         // Start cache cleanup and metrics workers...
         let account_cache_cleanup = account_cache.clone();
         let transaction_cache_cleanup = transaction_cache.clone();
+        let shutdown_token_cleanup = shutdown_token.clone();
         tokio::spawn(async move {
-            Self::cache_cleanup_worker(account_cache_cleanup, transaction_cache_cleanup).await;
+            Self::cache_cleanup_worker(
+                account_cache_cleanup,
+                transaction_cache_cleanup,
+                shutdown_token_cleanup,
+            )
+            .await;
         });
 
         let metrics_reporter = metrics.clone();
+        let shutdown_token_metrics = shutdown_token.clone();
         tokio::spawn(async move {
-            Self::metrics_reporter(metrics_reporter).await;
+            Self::metrics_reporter(metrics_reporter, shutdown_token_metrics).await;
         });
 
         Ok(Self {
@@ -445,6 +462,7 @@ impl ProjectionStore {
             cache_version,
             metrics,
             config,
+            shutdown_token,
         })
     }
 
@@ -655,10 +673,11 @@ impl ProjectionStore {
 
     // UPDATED BULK INSERT FUNCTIONS WITH FIXED BINARY WRITER
 
-    /// Fixed bulk upsert accounts with proper binary format
+    /// Fixed bulk upsert accounts with proper binary format and unique table names
     async fn bulk_upsert_accounts_with_copy(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         accounts: &[AccountProjection],
+        pool: &PgPool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         if accounts.is_empty() {
             return Ok(());
@@ -681,21 +700,26 @@ impl ProjectionStore {
             accounts.to_vec()
         };
 
-        // Create temporary table
-        sqlx::query!(
+        // CRITICAL FIX: Use unique table name to avoid conflicts
+        let table_name = format!("temp_account_projections_{}", uuid::Uuid::new_v4().simple());
+
+        // Create TEMPORARY table inside transaction for proper isolation
+        let create_table_sql = format!(
             r#"
-        CREATE TEMP TABLE temp_account_projections (
+        CREATE TEMPORARY TABLE IF NOT EXISTS {} (
             id UUID,
             owner_name TEXT,
             balance DECIMAL,
             is_active BOOLEAN,
             created_at TIMESTAMPTZ,
-            updated_at TIMESTAMPTZ
+            updated_at TIMESTAMPTZ,
+            PRIMARY KEY (id)
         ) ON COMMIT DROP
-        "#
-        )
-        .execute(&mut **tx)
-        .await?;
+        "#,
+            table_name
+        );
+
+        sqlx::query(&create_table_sql).execute(&mut **tx).await?;
 
         // CRITICAL: Use fixed binary writer
         let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;
@@ -716,45 +740,85 @@ impl ProjectionStore {
             accounts_to_upsert.len()
         );
 
-        // Execute COPY
-        let copy_command = "COPY temp_account_projections FROM STDIN WITH (FORMAT BINARY)";
-        let mut copy_in = tx.copy_in_raw(copy_command).await?;
+        // Execute COPY with unique table name
+        let copy_command = format!("COPY {} FROM STDIN WITH (FORMAT BINARY)", table_name);
+        let mut copy_in = tx.copy_in_raw(&copy_command).await?;
         copy_in.send(binary_data.as_slice()).await?;
         let copy_result = copy_in.finish().await?;
 
         tracing::info!(
-            "[ProjectionStore] COPY BINARY inserted {} rows into temp table",
-            copy_result
+            "[ProjectionStore] COPY BINARY inserted {} rows into temp table {}",
+            copy_result,
+            table_name
         );
 
         // Upsert from temp table to main table
-        let upsert_result = sqlx::query(
+        let upsert_sql = format!(
             r#"
         INSERT INTO account_projections (id, owner_name, balance, is_active, created_at, updated_at)
         SELECT id, owner_name, balance, is_active, created_at, updated_at
-        FROM temp_account_projections
+        FROM {}
         ON CONFLICT (id) DO UPDATE SET
             owner_name = EXCLUDED.owner_name,
             balance = EXCLUDED.balance,
             is_active = EXCLUDED.is_active,
             updated_at = EXCLUDED.updated_at
         "#,
-        )
-        .execute(&mut **tx)
-        .await?;
+            table_name
+        );
+
+        let upsert_result = sqlx::query(&upsert_sql).execute(&mut **tx).await?;
 
         tracing::info!(
             "[ProjectionStore] Successfully upserted {} accounts via COPY BINARY",
             upsert_result.rows_affected()
         );
 
+        // CRITICAL FIX: Clean up UNLOGGED table with timeout and error handling
+        let drop_table_sql = format!("DROP TABLE IF EXISTS {}", table_name);
+
+        // Use timeout to prevent hanging DROP TABLE
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5), // 5 second timeout
+            sqlx::query(&drop_table_sql).execute(pool),
+        )
+        .await
+        {
+            Ok(result) => {
+                match result {
+                    Ok(_) => {
+                        tracing::debug!(
+                            "[ProjectionStore] Successfully dropped temp table {}",
+                            table_name
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[ProjectionStore] Failed to drop temp table {}: {}",
+                            table_name,
+                            e
+                        );
+                        // Don't fail the entire operation for DROP TABLE failure
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "[ProjectionStore] DROP TABLE {} timed out after 5 seconds",
+                    table_name
+                );
+                // Don't fail the entire operation for DROP TABLE timeout
+            }
+        }
+
         Ok(())
     }
 
-    /// Fixed bulk insert transactions with proper binary format
+    /// Fixed bulk insert transactions with proper binary format and unique table names
     async fn bulk_insert_transactions_with_copy(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         transactions: &[TransactionProjection],
+        pool: &PgPool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         if transactions.is_empty() {
             return Ok(());
@@ -765,20 +829,28 @@ impl ProjectionStore {
         transactions.len()
     );
 
-        // Create temporary table
-        sqlx::query!(
+        // CRITICAL FIX: Use unique table name to avoid conflicts
+        let table_name = format!(
+            "temp_transaction_projections_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+
+        // Create UNLOGGED table outside transaction for better performance
+        // Use a separate connection for table creation
+        let create_table_sql = format!(
             r#"
-        CREATE TEMP TABLE temp_transaction_projections (
+        CREATE UNLOGGED TABLE IF NOT EXISTS {} (
             id UUID,
             account_id UUID,
             transaction_type TEXT,
             amount DECIMAL,
             timestamp TIMESTAMPTZ
-        ) ON COMMIT DROP
-        "#
         )
-        .execute(&mut **tx)
-        .await?;
+        "#,
+            table_name
+        );
+
+        sqlx::query(&create_table_sql).execute(pool).await?;
 
         // CRITICAL: Use fixed binary writer
         let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;
@@ -798,33 +870,72 @@ impl ProjectionStore {
             transactions.len()
         );
 
-        // Execute COPY
-        let copy_command = "COPY temp_transaction_projections FROM STDIN WITH (FORMAT BINARY)";
-        let mut copy_in = tx.copy_in_raw(copy_command).await?;
+        // Execute COPY with unique table name
+        let copy_command = format!("COPY {} FROM STDIN WITH (FORMAT BINARY)", table_name);
+        let mut copy_in = tx.copy_in_raw(&copy_command).await?;
         copy_in.send(binary_data.as_slice()).await?;
         let copy_result = copy_in.finish().await?;
 
         tracing::info!(
-            "[ProjectionStore] COPY BINARY inserted {} rows into temp table",
-            copy_result
+            "[ProjectionStore] COPY BINARY inserted {} rows into temp table {}",
+            copy_result,
+            table_name
         );
 
         // Insert from temp table to main table
-        let insert_result = sqlx::query(
+        let insert_sql = format!(
             r#"
         INSERT INTO transaction_projections (id, account_id, transaction_type, amount, timestamp)
         SELECT id, account_id, transaction_type, amount, timestamp
-        FROM temp_transaction_projections
+        FROM {}
         ON CONFLICT (id, timestamp) DO NOTHING
         "#,
-        )
-        .execute(&mut **tx)
-        .await?;
+            table_name
+        );
+
+        let insert_result = sqlx::query(&insert_sql).execute(&mut **tx).await?;
 
         tracing::info!(
             "[ProjectionStore] Successfully inserted {} transactions via COPY BINARY",
             insert_result.rows_affected()
         );
+
+        // CRITICAL FIX: Clean up UNLOGGED table with timeout and error handling
+        let drop_table_sql = format!("DROP TABLE IF EXISTS {}", table_name);
+
+        // Use timeout to prevent hanging DROP TABLE
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5), // 5 second timeout
+            sqlx::query(&drop_table_sql).execute(pool),
+        )
+        .await
+        {
+            Ok(result) => {
+                match result {
+                    Ok(_) => {
+                        tracing::debug!(
+                            "[ProjectionStore] Successfully dropped temp table {}",
+                            table_name
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[ProjectionStore] Failed to drop temp table {}: {}",
+                            table_name,
+                            e
+                        );
+                        // Don't fail the entire operation for DROP TABLE failure
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "[ProjectionStore] DROP TABLE {} timed out after 5 seconds",
+                    table_name
+                );
+                // Don't fail the entire operation for DROP TABLE timeout
+            }
+        }
 
         // LOST EVENT LOGGING: rows_affected < transactions.len() implies conflicts or drops
         let inserted_rows: i64 = sqlx::query_scalar!(
@@ -841,34 +952,59 @@ impl ProjectionStore {
         if inserted_rows < expected {
             let lost = expected - inserted_rows;
             tracing::warn!(
-                "[ProjectionStore] LOST transactions detected: expected={}, present={}, lost={}",
-                expected,
+                "[ProjectionStore] LOST {} transactions due to conflicts or drops (inserted: {}, expected: {})",
+                lost,
                 inserted_rows,
-                lost
-            );
-
-            // Log sample of missing ids to help debugging
-            let present_ids: std::collections::HashSet<Uuid> = sqlx::query_scalar!(
-                r#"SELECT id FROM transaction_projections WHERE id = ANY($1)"#,
-                &transactions.iter().map(|t| t.id).collect::<Vec<_>>()
-            )
-            .fetch_all(&mut **tx)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-
-            let missing: Vec<Uuid> = transactions
-                .iter()
-                .map(|t| t.id)
-                .filter(|id| !present_ids.contains(id))
-                .take(50)
-                .collect();
-            tracing::warn!(
-                "[ProjectionStore] Missing transaction ids (sample up to 50): {:?}",
-                missing
+                expected
             );
         }
+
+        Ok(())
+    }
+
+    /// Direct COPY bulk insert transactions - assumes records are unique (no conflicts)
+    /// This is faster than temp table approach but will fail if conflicts occur
+    async fn bulk_insert_transactions_direct_copy(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        transactions: &[TransactionProjection],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        if transactions.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            "[ProjectionStore] bulk_insert_transactions_direct_copy: processing {} transactions (assuming unique)",
+            transactions.len()
+        );
+
+        // CRITICAL: Use fixed binary writer
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;
+        for transaction in transactions {
+            writer.write_row(5)?; // 5 fields
+            writer.write_uuid(&transaction.id)?;
+            writer.write_uuid(&transaction.account_id)?;
+            writer.write_text(&transaction.transaction_type)?;
+            writer.write_decimal(&transaction.amount, "amount")?;
+            writer.write_timestamp(&transaction.timestamp)?;
+        }
+        let binary_data = writer.finish()?;
+
+        tracing::debug!(
+            "[ProjectionStore] Generated binary data: {} bytes for {} tuples",
+            binary_data.len(),
+            transactions.len()
+        );
+
+        // Execute direct COPY to target table
+        let copy_command = "COPY transaction_projections FROM STDIN WITH (FORMAT BINARY)";
+        let mut copy_in = tx.copy_in_raw(copy_command).await?;
+        copy_in.send(binary_data.as_slice()).await?;
+        let copy_result = copy_in.finish().await?;
+
+        tracing::info!(
+            "[ProjectionStore] Direct COPY successfully inserted {} transactions",
+            copy_result
+        );
 
         Ok(())
     }
@@ -1237,9 +1373,13 @@ impl ProjectionStore {
                 "[ProjectionStore] Using COPY method for large batch of {} accounts (threshold: {})",
                 account_count, use_copy_threshold
             );
-            Self::bulk_upsert_accounts_with_copy(&mut tx, &accounts)
-                .await
-                .map_err(|e| anyhow::anyhow!("Error upserting accounts with COPY: {}", e))?;
+            Self::bulk_upsert_accounts_with_copy(
+                &mut tx,
+                &accounts,
+                &pools.select_pool(OperationType::Write),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Error upserting accounts with COPY: {}", e))?;
         } else {
             tracing::info!(
                 "[ProjectionStore] Using UNNEST method for small batch of {} accounts (threshold: {})",
@@ -1290,7 +1430,7 @@ impl ProjectionStore {
                 "[ProjectionStore] Using COPY method for large transaction batch of {} (threshold: {})",
                 transaction_count, use_copy_threshold
             );
-            Self::bulk_insert_transactions_with_copy(&mut tx, &transactions)
+            Self::bulk_insert_transactions_direct_copy(&mut tx, &transactions)
                 .await
                 .map_err(|e| anyhow::anyhow!("Error inserting transactions with COPY: {}", e))?;
         } else {
@@ -1321,10 +1461,21 @@ impl ProjectionStore {
         _cache_version: Arc<std::sync::atomic::AtomicU64>,
         metrics: Arc<ProjectionMetrics>,
         config: ProjectionConfig,
+        shutdown_token: CancellationToken,
     ) {
         let mut account_batch = Vec::with_capacity(config.batch_size);
-        let mut transaction_batch = Vec::with_capacity(config.batch_size);
-        let mut interval = tokio::time::interval(Duration::from_millis(config.batch_timeout_ms));
+
+        // CRITICAL OPTIMIZATION: Batch accumulation for transactions
+        let mut transaction_accumulator = Vec::with_capacity(config.batch_size * 2); // Larger capacity for accumulation
+        let mut last_transaction_flush = std::time::Instant::now();
+        let transaction_accumulation_timeout = Duration::from_millis(100); // 100ms accumulation window
+
+        // OPTIMIZATION: Use adaptive timeout based on batch size
+        let adaptive_timeout = Duration::from_millis(if config.batch_size >= 1000 {
+            50
+        } else {
+            config.batch_timeout_ms
+        });
 
         // CDC-specific optimizations
         let cdc_batch_size = std::env::var("CDC_PROJECTION_BATCH_SIZE")
@@ -1332,80 +1483,146 @@ impl ProjectionStore {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(config.batch_size); // Default to config batch size
 
+        // CRITICAL: Get COPY threshold for transaction accumulation
+        let copy_config = CopyOptimizationConfig::from_env();
+        let transaction_copy_threshold = copy_config.transaction_copy_threshold;
+
         tracing::info!(
-            "[ProjectionStore] update_processor_optimized started with CDC batch_size={}, timeout={}ms",
-            cdc_batch_size, config.batch_timeout_ms
+            "[ProjectionStore] update_processor_optimized started with CDC batch_size={}, adaptive_timeout={:?}, transaction_copy_threshold={}, accumulation_timeout={:?}",
+            cdc_batch_size, adaptive_timeout, transaction_copy_threshold, transaction_accumulation_timeout
         );
+
+        // OPTIMIZATION: Pre-allocate processing tasks
+        let mut processing_tasks = Vec::new();
 
         loop {
             tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    info!("🛑 ProjectionStore: update_processor_optimized received shutdown signal");
+
+                    // OPTIMIZATION: Wait for any ongoing processing tasks
+                    for task in processing_tasks {
+                        let _ = task.await;
+                    }
+
+                    // Process remaining batches before shutdown
+                    if !account_batch.is_empty() {
+                        info!("🛑 ProjectionStore: Processing final account batch of {} items before shutdown", account_batch.len());
+                        let batch_to_process = std::mem::take(&mut account_batch);
+                        let pools = pools.clone();
+                        let metrics = metrics.clone();
+                        if let Err(e) = Self::upsert_accounts_batch_parallel_optimized(&pools, &metrics, batch_to_process).await {
+                            error!("[ProjectionStore] Error upserting final account batch with COPY optimization: {}", e);
+                        }
+                    }
+
+                    if !transaction_accumulator.is_empty() {
+                        info!("🛑 ProjectionStore: Processing final accumulated transaction batch of {} items before shutdown", transaction_accumulator.len());
+                        let batch_to_process = std::mem::take(&mut transaction_accumulator);
+                        let pools = pools.clone();
+                        if let Err(e) = Self::insert_transactions_batch_parallel_optimized(&pools, batch_to_process).await {
+                            error!("[ProjectionStore] Error inserting final accumulated transaction batch with COPY optimization: {}", e);
+                        }
+                    }
+
+                    info!("✅ ProjectionStore: update_processor_optimized shutdown complete");
+                    break;
+                }
                 Some(update) = receiver.recv() => {
                     match update {
                         ProjectionUpdate::AccountBatch(accounts) => {
                             account_batch.extend(accounts);
-                            // CRITICAL OPTIMIZATION: Use CDC-specific batch size
+
+                            // OPTIMIZATION: Immediate flush for large batches
                             if account_batch.len() >= cdc_batch_size {
-                                tracing::info!(
-                                    "ProjectionStore: update_processor_optimized flushing account batch of size {}. IDs: {:?}",
-                                    account_batch.len(),
-                                    account_batch.iter().map(|a| a.id).collect::<Vec<_>>()
-                                );
                                 let batch_to_process = std::mem::take(&mut account_batch);
                                 let pools = pools.clone();
                                 let metrics = metrics.clone();
-                                tokio::spawn(async move {
+
+                                // OPTIMIZATION: Track processing tasks
+                                let task = tokio::spawn(async move {
                                     if let Err(e) = Self::upsert_accounts_batch_parallel_optimized(&pools, &metrics, batch_to_process).await {
                                         error!("[ProjectionStore] Error upserting account batch with COPY optimization: {}", e);
                                     }
                                 });
+                                processing_tasks.push(task);
                             }
                         }
                         ProjectionUpdate::TransactionBatch(transactions) => {
-                            transaction_batch.extend(transactions);
-                            // CRITICAL OPTIMIZATION: Use CDC-specific batch size for transactions
-                            if transaction_batch.len() >= cdc_batch_size {
-                                let batch_to_process = std::mem::take(&mut transaction_batch);
+                            transaction_accumulator.extend(transactions);
+
+                            // CRITICAL OPTIMIZATION: Accumulate transactions until we reach COPY threshold
+                            if transaction_accumulator.len() >= transaction_copy_threshold {
+                                tracing::info!(
+                                    "[ProjectionStore] Transaction accumulator reached threshold: {} >= {}, flushing to direct COPY",
+                                    transaction_accumulator.len(),
+                                    transaction_copy_threshold
+                                );
+
+                                let batch_to_process = std::mem::take(&mut transaction_accumulator);
                                 let pools = pools.clone();
-                                tokio::spawn(async move {
+
+                                // OPTIMIZATION: Track processing tasks
+                                let task = tokio::spawn(async move {
                                     if let Err(e) = Self::insert_transactions_batch_parallel_optimized(&pools, batch_to_process).await {
-                                        error!("[ProjectionStore] Error inserting transaction batch with COPY optimization: {}", e);
+                                        error!("[ProjectionStore] Error inserting accumulated transaction batch with COPY optimization: {}", e);
                                     }
                                 });
+                                processing_tasks.push(task);
+                                last_transaction_flush = std::time::Instant::now();
                             }
                         }
                     }
                 }
-                _ = interval.tick() => {
+                                _ = tokio::time::sleep(adaptive_timeout) => {
+                    // OPTIMIZATION: Process account batches independently
                     if !account_batch.is_empty() {
-                        tracing::info!(
-                            "ProjectionStore: update_processor_optimized timeout flush of account batch size {}. IDs: {:?}",
-                            account_batch.len(),
-                            account_batch.iter().map(|a| a.id).collect::<Vec<_>>()
-                        );
                         let batch_to_process = std::mem::take(&mut account_batch);
                         let pools = pools.clone();
                         let metrics = metrics.clone();
-                        tokio::spawn(async move {
+
+                        let task = tokio::spawn(async move {
                             if let Err(e) = Self::upsert_accounts_batch_parallel_optimized(&pools, &metrics, batch_to_process).await {
                                 error!("[ProjectionStore] Error upserting account batch (timeout) with COPY optimization: {}", e);
                             }
                         });
+                        processing_tasks.push(task);
                     }
-                    if !transaction_batch.is_empty() {
-                        let batch_to_process = std::mem::take(&mut transaction_batch);
+
+                    // CRITICAL FIX: Process transaction batches independently (don't wait for account tasks)
+                    if !transaction_accumulator.is_empty() {
+                        // CRITICAL: Check if we should flush based on accumulation timeout
+                        let should_flush_by_timeout = last_transaction_flush.elapsed() >= transaction_accumulation_timeout;
+
+                        if should_flush_by_timeout {
+                            tracing::info!(
+                                "[ProjectionStore] Transaction accumulator timeout reached: {}ms, flushing {} transactions (threshold: {})",
+                                last_transaction_flush.elapsed().as_millis(),
+                                transaction_accumulator.len(),
+                                transaction_copy_threshold
+                            );
+                        }
+
+                        let batch_to_process = std::mem::take(&mut transaction_accumulator);
                         let pools = pools.clone();
-                        tokio::spawn(async move {
+
+                        let task = tokio::spawn(async move {
                             if let Err(e) = Self::insert_transactions_batch_parallel_optimized(&pools, batch_to_process).await {
                                 error!("[ProjectionStore] Error inserting transaction batch (timeout) with COPY optimization: {}", e);
                             }
                         });
+                        processing_tasks.push(task);
+                        last_transaction_flush = std::time::Instant::now();
                     }
                 }
             }
+
+            // OPTIMIZATION: Clean up completed tasks
+            processing_tasks.retain(|task| !task.is_finished());
         }
     }
 
-    /// CDC-optimized batch processing with intelligent COPY threshold detection
+    /// CDC-optimized batch processing with true parallel processing
     pub async fn process_cdc_batch_optimized(
         &self,
         accounts: Vec<AccountProjection>,
@@ -1416,8 +1633,9 @@ impl ProjectionStore {
         let transaction_count = transactions.len();
 
         tracing::info!(
-            "[ProjectionStore] process_cdc_batch_optimized: processing {} accounts, {} transactions",
-            account_count, transaction_count
+            "🚀 OPTIMIZED: process_cdc_batch_optimized: processing {} accounts, {} transactions",
+            account_count,
+            transaction_count
         );
 
         // Get COPY optimization config
@@ -1438,53 +1656,74 @@ impl ProjectionStore {
             return Ok(());
         }
 
-        // Determine optimal processing strategy based on batch sizes
-        let use_direct_copy_accounts = account_count >= copy_config.projection_copy_threshold * 2;
+        // CRITICAL OPTIMIZATION: Use direct COPY for large batches
+        let use_direct_copy_accounts = account_count >= copy_config.projection_copy_threshold;
         let use_direct_copy_transactions =
-            transaction_count >= copy_config.transaction_copy_threshold * 2;
+            transaction_count >= copy_config.transaction_copy_threshold;
 
         if use_direct_copy_accounts || use_direct_copy_transactions {
             tracing::info!(
-                "[ProjectionStore] Using direct COPY processing for large CDC batch (accounts: {}, transactions: {})",
-                account_count, transaction_count
+                "🚀 OPTIMIZED: Using direct COPY processing for accounts: {}, transactions: {}",
+                use_direct_copy_accounts,
+                use_direct_copy_transactions
             );
 
-            // Process directly with COPY for maximum performance
-            let pool = self.pools.select_pool(OperationType::Write);
-            let mut tx = pool.begin().await?;
+            // CRITICAL: Process accounts and transactions in parallel
+            let (account_result, transaction_result) = tokio::join!(
+                async {
+                    if use_direct_copy_accounts && !accounts.is_empty() {
+                        self.upsert_accounts_direct_copy(accounts).await
+                    } else {
+                        Ok(())
+                    }
+                },
+                async {
+                    if use_direct_copy_transactions && !transactions.is_empty() {
+                        self.insert_transactions_direct_copy(transactions).await
+                    } else {
+                        Ok(())
+                    }
+                }
+            );
 
-            if use_direct_copy_accounts && !accounts.is_empty() {
-                Self::bulk_upsert_accounts_with_copy(&mut tx, &accounts)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Error upserting accounts with COPY: {}", e))?;
+            // Handle results
+            if let Err(e) = account_result {
+                tracing::error!(
+                    "🚀 OPTIMIZED: Failed to upsert accounts with direct COPY: {}",
+                    e
+                );
+                return Err(e);
             }
 
-            if use_direct_copy_transactions && !transactions.is_empty() {
-                Self::bulk_insert_transactions_with_copy(&mut tx, &transactions)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Error inserting transactions with COPY: {}", e)
-                    })?;
+            if let Err(e) = transaction_result {
+                tracing::error!(
+                    "🚀 OPTIMIZED: Failed to insert transactions with direct COPY: {}",
+                    e
+                );
+                return Err(e);
             }
 
-            tx.commit().await?;
-        } else {
-            // Use standard batching for smaller batches
+            let duration = start_time.elapsed();
             tracing::info!(
-                "[ProjectionStore] Using standard batching for CDC batch (accounts: {}, transactions: {})",
-                account_count, transaction_count
+                "🚀 OPTIMIZED: process_cdc_batch_optimized completed in {:?} (accounts: {}, transactions: {})",
+                duration, account_count, transaction_count
             );
 
-            if !accounts.is_empty() {
-                self.update_sender
-                    .send(ProjectionUpdate::AccountBatch(accounts))
-                    .map_err(|e| anyhow::anyhow!("Failed to send account batch: {}", e))?;
-            }
-            if !transactions.is_empty() {
-                self.update_sender
-                    .send(ProjectionUpdate::TransactionBatch(transactions))
-                    .map_err(|e| anyhow::anyhow!("Failed to send transaction batch: {}", e))?;
-            }
+            return Ok(());
+        }
+
+        // Fallback to standard batching for small batches
+        tracing::info!("[ProjectionStore] Using standard batching for CDC batch (accounts: {}, transactions: {})", account_count, transaction_count);
+
+        if !accounts.is_empty() {
+            self.update_sender
+                .send(ProjectionUpdate::AccountBatch(accounts))
+                .map_err(|e| anyhow::anyhow!("Failed to send account batch: {}", e))?;
+        }
+        if !transactions.is_empty() {
+            self.update_sender
+                .send(ProjectionUpdate::TransactionBatch(transactions))
+                .map_err(|e| anyhow::anyhow!("Failed to send transaction batch: {}", e))?;
         }
 
         let duration = start_time.elapsed();
@@ -1495,51 +1734,100 @@ impl ProjectionStore {
 
         Ok(())
     }
-    async fn metrics_reporter(metrics: Arc<ProjectionMetrics>) {
+
+    /// Direct COPY upsert for accounts with optimized processing
+    async fn upsert_accounts_direct_copy(&self, accounts: Vec<AccountProjection>) -> Result<()> {
+        if accounts.is_empty() {
+            return Ok(());
+        }
+
+        let pool = self.pools.select_pool(OperationType::Write);
+        let mut tx = pool.begin().await?;
+
+        // Use the optimized COPY function
+        if let Err(e) = Self::bulk_upsert_accounts_with_copy(&mut tx, &accounts, pool).await {
+            tx.rollback().await?;
+            return Err(anyhow::anyhow!("Bulk upsert accounts failed: {:?}", e));
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Direct COPY insert for transactions with optimized processing
+    async fn insert_transactions_direct_copy(
+        &self,
+        transactions: Vec<TransactionProjection>,
+    ) -> Result<()> {
+        if transactions.is_empty() {
+            return Ok(());
+        }
+
+        let pool = self.pools.select_pool(OperationType::Write);
+        let mut tx = pool.begin().await?;
+
+        // Use the optimized COPY function
+        if let Err(e) = Self::bulk_insert_transactions_with_copy(&mut tx, &transactions, pool).await
+        {
+            tx.rollback().await?;
+            return Err(anyhow::anyhow!("Bulk insert transactions failed: {:?}", e));
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn metrics_reporter(metrics: Arc<ProjectionMetrics>, shutdown_token: CancellationToken) {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    info!("🛑 ProjectionStore: metrics_reporter received shutdown signal");
+                    break;
+                }
+                _ = interval.tick() => {
+                    let hits = metrics
+                        .cache_hits
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let misses = metrics
+                        .cache_misses
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let batches = metrics
+                        .batch_updates
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let errors = metrics.errors.load(std::sync::atomic::Ordering::Relaxed);
+                    let avg_query_time = metrics
+                        .query_duration
+                        .load(std::sync::atomic::Ordering::Relaxed) as f64
+                        / 1000.0;
 
-            let hits = metrics
-                .cache_hits
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let misses = metrics
-                .cache_misses
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let batches = metrics
-                .batch_updates
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let errors = metrics.errors.load(std::sync::atomic::Ordering::Relaxed);
-            let avg_query_time = metrics
-                .query_duration
-                .load(std::sync::atomic::Ordering::Relaxed) as f64
-                / 1000.0;
+                    let hit_rate = if hits + misses > 0 {
+                        (hits as f64 / (hits + misses) as f64) * 100.0
+                    } else {
+                        0.0
+                    };
 
-            let hit_rate = if hits + misses > 0 {
-                (hits as f64 / (hits + misses) as f64) * 100.0
-            } else {
-                0.0
-            };
+                    // COPY optimization metrics
+                    let copy_success_rate = metrics.copy_metrics.get_copy_success_rate();
+                    let avg_copy_duration = metrics.copy_metrics.get_average_copy_duration();
+                    let avg_unnest_duration = metrics.copy_metrics.get_average_unnest_duration();
+                    let copy_fallbacks = metrics
+                        .copy_metrics
+                        .copy_fallback_to_unnest
+                        .load(std::sync::atomic::Ordering::Relaxed);
 
-            // COPY optimization metrics
-            let copy_success_rate = metrics.copy_metrics.get_copy_success_rate();
-            let avg_copy_duration = metrics.copy_metrics.get_average_copy_duration();
-            let avg_unnest_duration = metrics.copy_metrics.get_average_unnest_duration();
-            let copy_fallbacks = metrics
-                .copy_metrics
-                .copy_fallback_to_unnest
-                .load(std::sync::atomic::Ordering::Relaxed);
+                    info!(
+                        "Projection Metrics - Cache Hit Rate: {:.2}%, Batch Updates: {}, Errors: {}, Avg Query Time: {:.2}ms",
+                        hit_rate, batches, errors, avg_query_time
+                    );
 
-            info!(
-                "Projection Metrics - Cache Hit Rate: {:.2}%, Batch Updates: {}, Errors: {}, Avg Query Time: {:.2}ms",
-                hit_rate, batches, errors, avg_query_time
-            );
-
-            info!(
-                "COPY Optimization Metrics - Success Rate: {:.2}%, Avg COPY Duration: {:.2}ms, Avg UNNEST Duration: {:.2}ms, Fallbacks: {}",
-                copy_success_rate, avg_copy_duration, avg_unnest_duration, copy_fallbacks
-            );
+                    info!(
+                        "COPY Optimization Metrics - Success Rate: {:.2}%, Avg COPY Duration: {:.2}ms, Avg UNNEST Duration: {:.2}ms, Fallbacks: {}",
+                        copy_success_rate, avg_copy_duration, avg_unnest_duration, copy_fallbacks
+                    );
+                }
+            }
         }
     }
 
@@ -1648,9 +1936,11 @@ impl ProjectionStore {
         let (update_sender, update_receiver) = mpsc::unbounded_channel();
         let cache_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let metrics = Arc::new(ProjectionMetrics::default());
+        let shutdown_token = CancellationToken::new();
 
         let processor_cache_version = cache_version.clone();
         let processor_metrics = metrics.clone();
+        let shutdown_token_processor = shutdown_token.clone();
 
         let store = Self {
             pools: pools.clone(),
@@ -1660,6 +1950,7 @@ impl ProjectionStore {
             cache_version,
             metrics,
             config: config.clone(),
+            shutdown_token,
         };
 
         // Start optimized background processor
@@ -1676,12 +1967,14 @@ impl ProjectionStore {
                 processor_cache_version,
                 processor_metrics,
                 processor_config,
+                shutdown_token_processor,
             )
             .await;
         });
 
         let metrics = store.metrics.clone();
-        tokio::spawn(Self::metrics_reporter(metrics));
+        let shutdown_token_metrics = store.shutdown_token.clone();
+        tokio::spawn(Self::metrics_reporter(metrics, shutdown_token_metrics));
 
         store
     }
@@ -2375,24 +2668,31 @@ impl ProjectionStore {
     async fn cache_cleanup_worker(
         account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
         transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
+        shutdown_token: CancellationToken,
     ) {
         let mut interval = tokio::time::interval(Duration::from_secs(300)); // Every 5 minutes
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    info!("🛑 ProjectionStore: cache_cleanup_worker received shutdown signal");
+                    break;
+                }
+                _ = interval.tick() => {
+                    let cutoff = Instant::now() - Duration::from_secs(1800); // 30 minutes
 
-            let cutoff = Instant::now() - Duration::from_secs(1800); // 30 minutes
+                    // Clean account cache
+                    {
+                        let mut cache = account_cache.write().await;
+                        cache.retain(|_, entry| entry.last_accessed > cutoff);
+                    }
 
-            // Clean account cache
-            {
-                let mut cache = account_cache.write().await;
-                cache.retain(|_, entry| entry.last_accessed > cutoff);
-            }
-
-            // Clean transaction cache
-            {
-                let mut cache = transaction_cache.write().await;
-                cache.retain(|_, entry| entry.last_accessed > cutoff);
+                    // Clean transaction cache
+                    {
+                        let mut cache = transaction_cache.write().await;
+                        cache.retain(|_, entry| entry.last_accessed > cutoff);
+                    }
+                }
             }
         }
     }
@@ -2528,6 +2828,20 @@ impl ProjectionStore {
             );
         }
 
+        Ok(())
+    }
+
+    /// Graceful shutdown of the projection store
+    pub async fn shutdown(&self) -> Result<()> {
+        info!("🛑 ProjectionStore: Starting graceful shutdown");
+
+        // Cancel shutdown token to signal all background tasks
+        self.shutdown_token.cancel();
+
+        // Wait a bit for background tasks to complete
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        info!("✅ ProjectionStore: Graceful shutdown complete");
         Ok(())
     }
 }

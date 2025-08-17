@@ -24,27 +24,27 @@ impl Default for PoolPartitioningConfig {
                 "postgresql://postgres:Francisco1@127.0.0.1:5432/banking_es".to_string()
             }),
             write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "200".to_string())
+                .unwrap_or_else(|_| "500".to_string())
                 .parse()
-                .unwrap_or(200)
-                / 5, // Write pool gets 1/5 of total connections
+                .unwrap_or(500)
+                / 3, // Write pool gets 1/3 of total connections (increased)
             write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "100".to_string())
-                .parse()
-                .unwrap_or(100)
-                / 5, // Write pool gets 1/5 of min connections
-            read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
                 .unwrap_or_else(|_| "200".to_string())
                 .parse()
                 .unwrap_or(200)
-                * 4
-                / 5, // Read pool gets 4/5 of total connections
-            read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "100".to_string())
+                / 3, // Write pool gets 1/3 of min connections (increased)
+            read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "500".to_string())
                 .parse()
-                .unwrap_or(100)
-                * 4
-                / 5, // Read pool gets 4/5 of min connections
+                .unwrap_or(500)
+                * 2
+                / 3, // Read pool gets 2/3 of total connections
+            read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
+                .unwrap_or_else(|_| "200".to_string())
+                .parse()
+                .unwrap_or(200)
+                * 2
+                / 3, // Read pool gets 2/3 of min connections
             acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
                 .unwrap_or_else(|_| "15".to_string())
                 .parse()

@@ -1478,7 +1478,7 @@ async fn test_write_batching_multi_row_inserts() {
     // Use hash-based super batch processing
     println!("🚀 Using hash-based super batch processing...");
     let operation_ids = match batching_service
-        .submit_operations_hash_super_batch(operations, 5) // 8 super batches with locking
+        .submit_operations_hash_super_batch(operations, 8) // 8 super batches with locking
         .await
     {
         Ok(ids) => {
@@ -1602,7 +1602,7 @@ async fn test_write_batching_multi_row_inserts() {
     // Use hash-based super batch processing for write operations
     let write_start = Instant::now();
     let write_operation_ids = match batching_service_clone_phase2
-        .submit_operations_hash_super_batch(write_operations, 5) // 8 super batches with locking
+        .submit_operations_hash_super_batch(write_operations, 8) // 8 super batches with locking
         .await
     {
         Ok(ids) => {

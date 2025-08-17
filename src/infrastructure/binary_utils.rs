@@ -204,17 +204,15 @@ impl PgCopyBinaryWriter {
                 self.write_null()?;
             }
             _ => {
-                let json_str = json_value.to_string();
-
-                // Validate UTF-8 (should always be valid from serde_json)
-                if !json_str.is_ascii() && std::str::from_utf8(json_str.as_bytes()).is_err() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "JSON contains invalid UTF-8",
-                    ));
-                }
-
-                self.write_text(&json_str)?;
+                let json_bytes = serde_json::to_vec(json_value)?;
+                
+                // For JSONB, the binary format is:
+                // 1 byte: version (currently 1)
+                // N bytes: JSON data
+                let data_len = 1 + json_bytes.len();
+                self.buffer.write_i32::<BigEndian>(data_len as i32)?;
+                self.buffer.write_u8(1)?; // JSONB version
+                self.buffer.write_all(&json_bytes)?;
             }
         }
         Ok(())
@@ -230,9 +228,15 @@ impl PgCopyBinaryWriter {
                 self.write_null()?;
             }
             _ => {
-                // For binary COPY, we still send JSON as text and let PostgreSQL handle conversion
-                let json_str = json_value.to_string();
-                self.write_text(&json_str)?;
+                let json_bytes = serde_json::to_vec(json_value)?;
+
+                // For JSONB, the binary format is:
+                // 1 byte: version (currently 1)
+                // N bytes: JSON data
+                let data_len = 1 + json_bytes.len();
+                self.buffer.write_i32::<BigEndian>(data_len as i32)?;
+                self.buffer.write_u8(1)?; // JSONB version
+                self.buffer.write_all(&json_bytes)?;
             }
         }
         Ok(())

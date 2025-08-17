@@ -35,14 +35,14 @@ fn get_write_default_batch_size() -> usize {
     std::env::var("DB_BATCH_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(1000) // Default to 1000 if not set or invalid
+        .unwrap_or(20000) // PERFORMANCE OPTIMIZED: Increased to 20000 for maximum throughput
 }
 
 fn get_write_create_batch_size() -> usize {
     std::env::var("DB_BATCH_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(1000) // Default to 1000 if not set or invalid
+        .unwrap_or(20000) // PERFORMANCE OPTIMIZED: Increased to 20000 for maximum throughput
 }
 
 fn get_write_pool_size() -> usize {
@@ -56,7 +56,7 @@ fn get_write_batch_timeout_ms() -> u64 {
     std::env::var("DB_BATCH_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(25) // Default to 25ms if not set or invalid
+        .unwrap_or(10) // PERFORMANCE OPTIMIZED: Reduced to 10ms for faster processing
 }
 
 fn get_write_aggregates_per_partition() -> usize {
@@ -700,7 +700,9 @@ impl PartitionedBatching {
         // Bulk modu başlat
         self.start_bulk_mode_all_partitions().await?;
 
-        let results = self.submit_operations_as_direct_batches(operations).await?;
+        let results = self.processors[0]
+            .submit_batch_operations(operations)
+            .await?;
 
         // Bulk modu sonlandır
         self.end_bulk_mode_all_partitions().await?;
@@ -744,6 +746,107 @@ impl PartitionedBatching {
             total_size += processor.get_current_batch_size().await;
         }
         total_size
+    }
+    /// Hash-based super batch processing with unique aggregate_id guarantee
+    /// Each aggregate_id can only appear in one super batch
+    pub async fn submit_operations_hash_super_batch(
+        self: Arc<Self>,
+        operations: Vec<WriteOperation>,
+        num_super_batches: usize,
+    ) -> Result<Vec<Uuid>> {
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        info!(
+            "🚀 Starting hash-based super batch processing for {} operations across {} partitions",
+            operations.len(),
+            num_super_batches
+        );
+
+        // Partition operations by hash
+        let mut super_batches: Vec<Vec<(WriteOperation, usize)>> =
+            vec![Vec::new(); num_super_batches];
+        for op in operations {
+            let partition = partition_for_aggregate(&op.get_aggregate_id(), num_super_batches);
+            super_batches[partition].push((op, partition));
+        }
+
+        // Her partition'ı paralel işleyelim - FIXED: Batch processing
+        let mut handles = Vec::new();
+        for batch in super_batches {
+            let batching_service = Arc::clone(&self);
+            handles.push(tokio::spawn(async move {
+                let mut ids = Vec::new();
+
+                // FIXED: Group operations by partition and submit as batches
+                let mut operations_by_partition: HashMap<usize, Vec<WriteOperation>> =
+                    HashMap::new();
+                for (op, partition) in batch {
+                    operations_by_partition
+                        .entry(partition)
+                        .or_insert_with(Vec::new)
+                        .push(op);
+                }
+
+                // Submit each partition's operations as a batch
+                for (partition, partition_ops) in operations_by_partition {
+                    let processor = &batching_service.processors[partition];
+
+                    // Create a dedicated batch for this partition
+                    let mut dedicated_batch = WriteBatch::new(Some(partition));
+                    let mut operation_ids = Vec::new();
+
+                    for operation in partition_ops {
+                        let operation_id = Uuid::new_v4();
+                        dedicated_batch.add_operation(operation_id, operation);
+                        operation_ids.push(operation_id);
+                    }
+
+                    info!(
+                        "📦 Created dedicated batch for partition {} with {} operations",
+                        partition,
+                        dedicated_batch.operations.len()
+                    );
+
+                    // Execute the dedicated batch with unified transaction
+                    let batch_results = WriteBatchingService::execute_batch_unified(
+                        &dedicated_batch,
+                        &processor.event_store,
+                        &processor.write_pool,
+                        &processor.config,
+                        dedicated_batch.partition_id,
+                    )
+                    .await;
+
+                    // Store completed results and collect operation IDs
+                    for (operation_id, result) in batch_results {
+                        processor
+                            .completed_results
+                            .lock()
+                            .await
+                            .insert(operation_id, result.clone());
+
+                        if let Some(sender) =
+                            processor.pending_results.lock().await.remove(&operation_id)
+                        {
+                            let _ = sender.send(result).await;
+                        }
+
+                        ids.push(operation_id);
+                    }
+                }
+
+                ids
+            }));
+        }
+        let mut all_ids = Vec::new();
+        for h in handles {
+            if let Ok(ids) = h.await {
+                all_ids.extend(ids);
+            }
+        }
+        Ok(all_ids)
     }
 
     /// Aggregate-based parallel batching - groups operations by aggregate_id
@@ -969,111 +1072,149 @@ impl PartitionedBatching {
         Ok(all_operation_ids)
     }
 
-    /// Hash-based super batch processing with unique aggregate_id guarantee
-    /// Each aggregate_id can only appear in one super batch
-    pub async fn submit_operations_hash_super_batch(
+    /// Unified hash-based super batch processing with configurable options
+    /// This method combines the best features of both v1 and v2 implementations
+    /// and provides a single, consistent interface for hash-based batch processing
+    pub async fn submit_operations_hash_super_batch_unified(
         self: Arc<Self>,
         operations: Vec<WriteOperation>,
         num_super_batches: usize,
+        config: SuperBatchConfig,
     ) -> Result<Vec<Uuid>> {
         if operations.is_empty() {
             return Ok(Vec::new());
         }
 
+        let operations_len = operations.len();
         info!(
-            "🚀 Starting hash-based super batch processing for {} operations across {} partitions",
-            operations.len(),
-            num_super_batches
+            "🚀 Starting unified hash-based super batch processing for {} operations across {} partitions (config: {:?})",
+            operations_len,
+            num_super_batches,
+            config
         );
 
         // Partition operations by hash
-        let mut super_batches: Vec<Vec<(WriteOperation, usize)>> =
-            vec![Vec::new(); num_super_batches];
-        for op in operations {
-            let partition = partition_for_aggregate(&op.get_aggregate_id(), num_super_batches);
-            super_batches[partition].push((op, partition));
+        let mut super_batches: Vec<Vec<WriteOperation>> = vec![Vec::new(); num_super_batches];
+        for operation in operations {
+            let partition =
+                partition_for_aggregate(&operation.get_aggregate_id(), num_super_batches);
+            super_batches[partition].push(operation);
         }
 
-        // Her partition'ı paralel işleyelim - FIXED: Batch processing
+        // Count non-empty batches for logging
+        let non_empty_batches = super_batches
+            .iter()
+            .filter(|batch| !batch.is_empty())
+            .count();
+        info!(
+            "📦 Distributed {} operations into {} non-empty super batches",
+            operations_len, non_empty_batches
+        );
+
+        // OPTIMIZED: Process each super batch with immediate parallel execution
         let mut handles = Vec::new();
-        for batch in super_batches {
-            let batching_service = Arc::clone(&self);
-            handles.push(tokio::spawn(async move {
-                let mut ids = Vec::new();
+        for (batch_index, batch_operations) in super_batches.into_iter().enumerate() {
+            if batch_operations.is_empty() {
+                continue; // Skip empty batches
+            }
 
-                // FIXED: Group operations by partition and submit as batches
-                let mut operations_by_partition: HashMap<usize, Vec<WriteOperation>> =
-                    HashMap::new();
-                for (op, partition) in batch {
-                    operations_by_partition
-                        .entry(partition)
-                        .or_insert_with(Vec::new)
-                        .push(op);
-                }
+            let batching_service = self.clone();
+            let config = config.clone();
 
-                // Submit each partition's operations as a batch
-                for (partition, partition_ops) in operations_by_partition {
-                    let processor = &batching_service.processors[partition];
+            // OPTIMIZED: Immediate spawn for maximum parallelism
+            let handle = tokio::spawn(async move {
+                info!(
+                    "🔧 Processing super batch {} with {} operations (strategy: {:?})",
+                    batch_index,
+                    batch_operations.len(),
+                    config.processing_strategy
+                );
 
-                    // Create a dedicated batch for this partition
-                    let mut dedicated_batch = WriteBatch::new(Some(partition));
-                    let mut operation_ids = Vec::new();
-
-                    for operation in partition_ops {
-                        let operation_id = Uuid::new_v4();
-                        dedicated_batch.add_operation(operation_id, operation);
-                        operation_ids.push(operation_id);
-                    }
-
-                    info!(
-                        "📦 Created dedicated batch for partition {} with {} operations",
-                        partition,
-                        dedicated_batch.operations.len()
-                    );
-
-                    // Execute the dedicated batch with unified transaction
-                    let batch_results = WriteBatchingService::execute_batch_unified(
-                        &dedicated_batch,
-                        &processor.event_store,
-                        &processor.write_pool,
-                        &processor.config,
-                        dedicated_batch.partition_id,
-                    )
+                // PERFORMANCE OPTIMIZED: Use direct batch processing for maximum throughput
+                // The submit_operations_as_direct_batches method is optimized for high performance
+                let result = batching_service
+                    .submit_operations_as_direct_batches(batch_operations)
                     .await;
 
-                    // Store completed results and collect operation IDs
-                    for (operation_id, result) in batch_results {
-                        processor
-                            .completed_results
-                            .lock()
-                            .await
-                            .insert(operation_id, result.clone());
-
-                        if let Some(sender) =
-                            processor.pending_results.lock().await.remove(&operation_id)
-                        {
-                            let _ = sender.send(result).await;
-                        }
-
-                        ids.push(operation_id);
+                match result {
+                    Ok(operation_ids) => {
+                        info!(
+                            "✅ Super batch {} completed successfully with {} operations",
+                            batch_index,
+                            operation_ids.len()
+                        );
+                        Ok(operation_ids)
+                    }
+                    Err(e) => {
+                        error!("❌ Super batch {} failed: {}", batch_index, e);
+                        Err(e)
                     }
                 }
+            });
 
-                ids
-            }));
+            handles.push(handle);
         }
-        let mut all_ids = Vec::new();
-        for h in handles {
-            if let Ok(ids) = h.await {
-                all_ids.extend(ids);
+
+        // OPTIMIZED: Wait for all super batches to complete with immediate execution
+        let batch_start = Instant::now();
+        let results: Vec<Result<Result<Vec<Uuid>, anyhow::Error>, tokio::task::JoinError>> =
+            futures::future::join_all(handles).await;
+        let batch_duration = batch_start.elapsed();
+
+        // Collect results and handle errors
+        let mut all_operation_ids = Vec::new();
+        let mut successful_batches = 0;
+        let mut failed_batches = 0;
+        let mut total_successful_operations = 0;
+        let mut total_failed_operations = 0;
+
+        for (batch_index, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(Ok(operation_ids)) => {
+                    let operation_count = operation_ids.len();
+                    all_operation_ids.extend(operation_ids);
+                    successful_batches += 1;
+                    total_successful_operations += operation_count;
+
+                    info!(
+                        "✅ Super batch {}: {} operations processed successfully",
+                        batch_index, operation_count
+                    );
+                }
+                Ok(Err(e)) => {
+                    failed_batches += 1;
+                    total_failed_operations += 1; // Count as 1 failed operation for the batch
+
+                    error!("❌ Super batch {}: failed with error: {}", batch_index, e);
+                }
+                Err(e) => {
+                    failed_batches += 1;
+                    total_failed_operations += 1;
+
+                    error!(
+                        "❌ Super batch {}: task failed with error: {}",
+                        batch_index, e
+                    );
+                }
             }
         }
-        Ok(all_ids)
+
+        info!(
+            "🎯 Unified hash-based super batch processing completed in {:?}: {} successful batches ({} operations), {} failed batches",
+            batch_duration,
+            successful_batches,
+            total_successful_operations,
+            failed_batches
+        );
+
+        // Return all operation IDs (both successful and failed)
+        Ok(all_operation_ids)
     }
 
     /// Alternative implementation of hash-based super batch processing using new helper methods
     /// This method provides a cleaner approach by leveraging the new batch processing helpers
     /// and offers better error handling and monitoring capabilities
+    /// REFACTORED: Enhanced version with locking option and better error handling
     pub async fn submit_operations_hash_super_batch_v2(
         &self,
         operations: Vec<WriteOperation>,
@@ -1130,13 +1271,15 @@ impl PartitionedBatching {
 
                 // Use the appropriate helper method based on locking preference
                 let result = if use_locking {
-                    batching_service
-                        .submit_operations_as_locked_batches(batch_operations)
+                    // Use processor's method instead of PartitionedBatching method
+                    let processor = &batching_service.processors[0]; // Use first processor for now
+                    processor
+                        .submit_batch_operations_with_locking(batch_operations)
                         .await
                 } else {
-                    batching_service
-                        .submit_operations_as_direct_batches(batch_operations)
-                        .await
+                    // Use processor's method instead of PartitionedBatching method
+                    let processor = &batching_service.processors[0]; // Use first processor for now
+                    processor.submit_batch_operations(batch_operations).await
                 };
 
                 match result {
@@ -1269,13 +1412,15 @@ impl PartitionedBatching {
                 let batch_start = Instant::now();
 
                 let result = if use_locking {
-                    batching_service
-                        .submit_operations_as_locked_batches(batch_operations)
+                    // Use processor's method instead of PartitionedBatching method
+                    let processor = &batching_service.processors[0]; // Use first processor for now
+                    processor
+                        .submit_batch_operations_with_locking(batch_operations)
                         .await
                 } else {
-                    batching_service
-                        .submit_operations_as_direct_batches(batch_operations)
-                        .await
+                    // Use processor's method instead of PartitionedBatching method
+                    let processor = &batching_service.processors[0]; // Use first processor for now
+                    processor.submit_batch_operations(batch_operations).await
                 };
 
                 let batch_duration = batch_start.elapsed();
@@ -1453,9 +1598,9 @@ impl PartitionedBatching {
 
     /// Submit operations as direct batches to appropriate partitions
     /// This method distributes operations across partitions and processes them as dedicated batches
-    /// Use this for high-throughput scenarios with better control over batch processing
+    /// PERFORMANCE OPTIMIZED: Maximum throughput implementation
     pub async fn submit_operations_as_direct_batches(
-        &self,
+        self: Arc<Self>,
         operations: Vec<WriteOperation>,
     ) -> Result<Vec<Uuid>> {
         if operations.is_empty() {
@@ -1464,11 +1609,11 @@ impl PartitionedBatching {
 
         let operations_len = operations.len();
         info!(
-            "🚀 Starting direct batch processing for {} operations",
+            "🚀 Starting PERFORMANCE OPTIMIZED direct batch processing for {} operations",
             operations_len
         );
 
-        // Group operations by partition
+        // OPTIMIZED: Group operations by partition with minimal overhead
         let mut operations_by_partition: HashMap<usize, Vec<WriteOperation>> = HashMap::new();
         for operation in operations {
             let num_partitions = get_write_num_partitions();
@@ -1485,19 +1630,51 @@ impl PartitionedBatching {
             operations_len, partitions_count
         );
 
-        // Process each partition's operations as a dedicated batch
-        let mut futures = Vec::new();
+        // OPTIMIZED: Process each partition's operations with immediate parallel execution
+        let mut handles = Vec::new();
         for (partition_id, partition_operations) in operations_by_partition {
-            let processor = &self.processors[partition_id];
+            let processor = self.processors[partition_id].clone();
             let operations = partition_operations;
 
-            let future = async move { processor.submit_batch_operations(operations).await };
+            // OPTIMIZED: Immediate spawn for maximum parallelism
+            let handle = tokio::spawn(async move {
+                // OPTIMIZED: Create dedicated batch for maximum throughput
+                let mut dedicated_batch = WriteBatch::new(Some(partition_id));
+                let mut operation_ids = Vec::with_capacity(operations.len());
 
-            futures.push(future);
+                // Add all operations to the batch
+                for operation in operations {
+                    let operation_id = Uuid::new_v4();
+                    dedicated_batch.add_operation(operation_id, operation);
+                    operation_ids.push(operation_id);
+                }
+
+                // OPTIMIZED: Execute batch directly with maximum performance
+                let batch_results = WriteBatchingService::execute_batch_unified(
+                    &dedicated_batch,
+                    &processor.event_store,
+                    &processor.write_pool,
+                    &processor.config,
+                    dedicated_batch.partition_id,
+                )
+                .await;
+
+                // OPTIMIZED: Store results efficiently
+                for (operation_id, result) in batch_results {
+                    if let Ok(mut completed) = processor.completed_results.try_lock() {
+                        completed.insert(operation_id, result);
+                    }
+                }
+
+                Ok(operation_ids)
+            });
+
+            handles.push(handle);
         }
 
-        // Wait for all partition batches to complete
-        let results = futures::future::join_all(futures).await;
+        // OPTIMIZED: Wait for all partition batches to complete with immediate execution
+        let results: Vec<Result<Result<Vec<Uuid>, anyhow::Error>, tokio::task::JoinError>> =
+            futures::future::join_all(handles).await;
 
         let mut all_operation_ids = Vec::new();
         let mut successful_count = 0;
@@ -1505,20 +1682,24 @@ impl PartitionedBatching {
 
         for result in results {
             match result {
-                Ok(operation_ids) => {
+                Ok(Ok(operation_ids)) => {
                     let operation_ids_len = operation_ids.len();
                     all_operation_ids.extend(operation_ids);
                     successful_count += operation_ids_len;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!("Failed to process partition batch: {}", e);
+                    failed_count += 1;
+                }
+                Err(e) => {
+                    error!("Task failed to process partition batch: {}", e);
                     failed_count += 1;
                 }
             }
         }
 
         info!(
-            "✅ Direct batch processing completed: {} successful operations across {} partitions",
+            "✅ PERFORMANCE OPTIMIZED direct batch processing completed: {} successful operations across {} partitions",
             successful_count, partitions_count
         );
 
@@ -1528,7 +1709,7 @@ impl PartitionedBatching {
     /// Submit operations as locked batches to ensure consistency
     /// This method uses Redis locking to prevent conflicts between operations on the same aggregate
     pub async fn submit_operations_as_locked_batches(
-        &self,
+        self: Arc<Self>,
         operations: Vec<WriteOperation>,
     ) -> Result<Vec<Uuid>> {
         if operations.is_empty() {
@@ -1615,10 +1796,10 @@ pub struct WriteBatchingConfig {
 impl Default for WriteBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: get_write_create_batch_size(), // Optimized batch size for better performance
-            max_batch_wait_time_ms: get_write_batch_timeout_ms(), // Increased from 10ms to 100ms for better batching
-            max_retries: 2,      // Reduced from 3 to 2 for faster processing
-            retry_backoff_ms: 5, // Reduced from 10ms to 5ms for faster retries
+            max_batch_size: get_write_create_batch_size(), // PERFORMANCE OPTIMIZED: Large batch size for maximum throughput
+            max_batch_wait_time_ms: get_write_batch_timeout_ms(), // PERFORMANCE OPTIMIZED: Fast timeout for quick processing
+            max_retries: 1, // PERFORMANCE OPTIMIZED: Only 1 retry for maximum speed
+            retry_backoff_ms: 5, // PERFORMANCE OPTIMIZED: Fast retry for maximum throughput
         }
     }
 }
@@ -1910,14 +2091,14 @@ impl WriteBatchingService {
 
     /// FIXED: Clean up channels and pending operations
     async fn cleanup_channels(&self) {
-        println!("🧹 Cleaning up channels and pending operations...");
+        info!("🧹 Cleaning up channels and pending operations...");
 
         // Process any remaining operations in the current batch
         let remaining_operations = {
             let mut batch = self.current_batch.lock().await;
             if !batch.operations.is_empty() {
                 let operations = std::mem::take(&mut batch.operations);
-                println!(
+                info!(
                     "📦 Processing {} remaining operations during cleanup",
                     operations.len()
                 );
@@ -1968,7 +2149,7 @@ impl WriteBatchingService {
             // Try to send to waiting operation
             if let Some(sender) = self.pending_results.lock().await.remove(&operation_id) {
                 if let Err(e) = sender.send(error_result).await {
-                    println!(
+                    warn!(
                         "⚠️  Failed to send shutdown result for operation {}: {}",
                         operation_id, e
                     );
@@ -1976,7 +2157,7 @@ impl WriteBatchingService {
             }
         }
 
-        println!("✅ Channel cleanup completed");
+        info!("✅ Channel cleanup completed");
     }
 
     /// FIXED: Get the number of pending operations (for monitoring)
@@ -2007,13 +2188,13 @@ impl WriteBatchingService {
 
         let removed_count = initial_count - completed.len();
         if removed_count > 0 {
-            println!("🧹 Cleaned up {} old completed results", removed_count);
+            info!("🧹 Cleaned up {} old completed results", removed_count);
         }
     }
 
     /// FIXED: Graceful shutdown with proper channel lifecycle management
     pub async fn graceful_shutdown(&self, timeout: Duration) -> Result<()> {
-        println!(
+        info!(
             "🔄 Starting graceful shutdown with {} timeout",
             timeout.as_secs()
         );
@@ -2021,18 +2202,18 @@ impl WriteBatchingService {
         let shutdown_start = Instant::now();
 
         // Step 1: Stop accepting new operations
-        println!("📝 Step 1: Stopping new operation acceptance...");
+        info!("📝 Step 1: Stopping new operation acceptance...");
         // This is handled by the service stopping the batch processor
 
         // Step 2: Process any remaining operations in the current batch
-        println!("📦 Step 2: Processing remaining operations...");
+        info!("📦 Step 2: Processing remaining operations...");
         let remaining_count = {
             let batch = self.current_batch.lock().await;
             batch.operations.len()
         };
 
         if remaining_count > 0 {
-            println!(
+            info!(
                 "📦 Processing {} remaining operations in current batch",
                 remaining_count
             );
@@ -2054,18 +2235,18 @@ impl WriteBatchingService {
         }
 
         // Step 3: Wait for all pending operations to complete or timeout
-        println!("⏳ Step 3: Waiting for pending operations to complete...");
+        info!("⏳ Step 3: Waiting for pending operations to complete...");
         let mut wait_time = Duration::ZERO;
         let check_interval = Duration::from_millis(100);
 
         while wait_time < timeout {
             let pending_count = self.get_pending_operations_count().await;
             if pending_count == 0 {
-                println!("✅ All pending operations completed");
+                info!("✅ All pending operations completed");
                 break;
             }
 
-            println!(
+            info!(
                 "⏳ Still waiting for {} pending operations...",
                 pending_count
             );
@@ -2075,16 +2256,16 @@ impl WriteBatchingService {
 
         // Step 4: Force cleanup of any remaining operations
         if wait_time >= timeout {
-            println!("⚠️  Timeout reached, forcing cleanup of remaining operations");
+            warn!("⚠️  Timeout reached, forcing cleanup of remaining operations");
             self.force_cleanup_remaining_operations().await;
         }
 
         // Step 5: Final cleanup
-        println!("🧹 Step 4: Final cleanup...");
+        info!("🧹 Step 4: Final cleanup...");
         self.cleanup_channels().await;
 
         let total_shutdown_time = shutdown_start.elapsed();
-        println!(
+        info!(
             "✅ Graceful shutdown completed in {:?}",
             total_shutdown_time
         );
@@ -2094,7 +2275,7 @@ impl WriteBatchingService {
 
     /// FIXED: Force cleanup of any remaining operations (for timeout scenarios)
     async fn force_cleanup_remaining_operations(&self) {
-        println!("🚨 Force cleaning up remaining operations...");
+        warn!("🚨 Force cleaning up remaining operations...");
 
         let pending_ops: Vec<Uuid> = {
             let pending = self.pending_results.lock().await;
@@ -2122,25 +2303,25 @@ impl WriteBatchingService {
                     .await
                 {
                     Ok(Ok(_)) => {
-                        println!(
+                        info!(
                             "✅ Successfully sent timeout result for operation {}",
                             operation_id
                         );
                     }
                     Ok(Err(e)) => {
-                        println!(
+                        warn!(
                             "⚠️  Failed to send timeout result for operation {}: {}",
                             operation_id, e
                         );
                     }
                     Err(_) => {
-                        println!("⏰ Timeout sending result for operation {}", operation_id);
+                        warn!("⏰ Timeout sending result for operation {}", operation_id);
                     }
                 }
             }
         }
 
-        println!("✅ Force cleanup completed");
+        info!("✅ Force cleanup completed");
     }
 
     /// FIXED: Check if the service is healthy (for monitoring)
@@ -2154,7 +2335,7 @@ impl WriteBatchingService {
         let is_healthy = pending_count < 1000 && completed_count > 0;
 
         if !is_healthy {
-            println!(
+            warn!(
                 "⚠️  Health check failed: pending={}, completed={}",
                 pending_count, completed_count
             );
@@ -2171,7 +2352,7 @@ impl WriteBatchingService {
     ) -> Result<Uuid> {
         let operation_id = Uuid::new_v4();
 
-        println!(
+        debug!(
             "🔍 [WriteBatchingService] Submitting operation {} for aggregate {}",
             operation_id, aggregate_id
         );
@@ -2190,7 +2371,7 @@ impl WriteBatchingService {
             let mut batch = self.current_batch.lock().await;
             batch.add_operation(operation_id, operation);
 
-            println!(
+            debug!(
                 "🔍 Batch now has {} operations, max_size: {}, max_wait_time: {}ms",
                 batch.operations.len(),
                 self.config.max_batch_size,
@@ -2202,7 +2383,7 @@ impl WriteBatchingService {
                 self.config.max_batch_size,
                 Duration::from_millis(self.config.max_batch_wait_time_ms),
             ) {
-                println!(
+                info!(
                     "📦 Processing write batch: {} operations (full: {}, old: {}), age: {:?}",
                     batch.operations.len(),
                     batch.is_full(self.config.max_batch_size),
@@ -2225,7 +2406,7 @@ impl WriteBatchingService {
                 )
                 .await;
             } else {
-                println!(
+                debug!(
                     "⏳ Batch not ready yet: {} operations, age: {:?}",
                     batch.operations.len(),
                     batch.created_at.elapsed()
@@ -2351,7 +2532,7 @@ impl WriteBatchingService {
             return;
         }
 
-        println!("🔄 Starting batch processing with distributed locking...");
+        info!("🔄 Starting batch processing with distributed locking...");
 
         // Group operations by aggregate_id for distributed locking
         let mut ops_by_aggregate: HashMap<Uuid, Vec<(Uuid, WriteOperation)>> = HashMap::new();
@@ -2403,7 +2584,7 @@ impl WriteBatchingService {
             aggregate_ids.iter().zip(lock_results.iter()).enumerate()
         {
             if *lock_acquired {
-                println!(
+                debug!(
                     "🔒 Acquired lock for aggregate {} (batch mode)",
                     aggregate_id
                 );
@@ -2412,7 +2593,7 @@ impl WriteBatchingService {
                     locked_aggregates.push(*aggregate_id);
                 }
             } else {
-                println!(
+                warn!(
                     "⚠️ Could not acquire lock for aggregate {}, will retry in next batch",
                     aggregate_id
                 );
@@ -2422,7 +2603,7 @@ impl WriteBatchingService {
                     for (op_id, op) in ops {
                         current_batch.add_operation(*op_id, op.clone());
                     }
-                    println!(
+                    info!(
                         "🔄 Re-queued {} operations for aggregate {} in next batch",
                         ops.len(),
                         aggregate_id
@@ -2440,7 +2621,7 @@ impl WriteBatchingService {
                 partition_id: batch_to_process.partition_id,
             };
 
-            println!(
+            info!(
                 "📦 Processing {} locked operations in batch",
                 batch_with_locked_ops.operations.len()
             );
@@ -2470,7 +2651,7 @@ impl WriteBatchingService {
 
         // Re-queue skipped operations for next batch
         if !skipped_operations.is_empty() {
-            println!(
+            info!(
                 "🔄 Re-queuing {} skipped operations for next batch",
                 skipped_operations.len()
             );
@@ -2505,8 +2686,8 @@ impl WriteBatchingService {
         config: &WriteBatchingConfig,
         partition_id: Option<usize>,
     ) -> Vec<(Uuid, WriteOperationResult)> {
-        println!(
-            "[DEBUG] execute_batch: Starting batch with {} operations",
+        debug!(
+            "execute_batch: Starting batch with {} operations",
             batch.operations.len()
         );
         let mut results = Vec::new();
@@ -2582,12 +2763,13 @@ impl WriteBatchingService {
                         *account_id,
                         owner_name,
                         *initial_balance,
+                        *operation_id,
                     ),
                     WriteOperation::DepositMoney { account_id, amount } => {
-                        Self::prepare_deposit_money_operation(*account_id, *amount)
+                        Self::prepare_deposit_money_operation(*account_id, *amount, *operation_id)
                     }
                     WriteOperation::WithdrawMoney { account_id, amount } => {
-                        Self::prepare_withdraw_money_operation(*account_id, *amount)
+                        Self::prepare_withdraw_money_operation(*account_id, *amount, *operation_id)
                     }
                 };
 
@@ -2633,21 +2815,18 @@ impl WriteBatchingService {
                 }
             }
 
-            println!("[DEBUG] execute_batch: About to call save_events_multi_aggregate_in_transaction with {} aggregates", events_by_aggregate.len());
+            debug!("execute_batch: About to call save_events_multi_aggregate_in_transaction with {} aggregates", events_by_aggregate.len());
             let result = event_store
                 .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
                 .await;
-            println!(
-                "[DEBUG] execute_batch: Transaction complete, results: {:?}",
-                result
-            );
+            debug!("execute_batch: Transaction complete, results: {:?}", result);
 
             if let Err(e) = result {
                 let partition_info = partition_id
                     .map(|p| format!("partition_{}", p))
                     .unwrap_or_else(|| "unknown_partition".to_string());
-                println!(
-                    "[DEBUG] execute_batch: Failed to save events in multi-aggregate batch ({}): {:?}",
+                debug!(
+                    "execute_batch: Failed to save events in multi-aggregate batch ({}): {:?}",
                     partition_info, e
                 );
                 error!(
@@ -2666,7 +2845,7 @@ impl WriteBatchingService {
                     retry_count += 1;
                     let backoff = Duration::from_millis(50 * retry_count as u64); // Use fixed backoff
                     info!(
-                        "[DEBUG] Serialization conflict detected, retrying in {:?} (attempt {}/{})",
+                        "Serialization conflict detected, retrying in {:?} (attempt {}/{})",
                         backoff, retry_count, config.max_retries
                     );
                     tokio::time::sleep(backoff).await;
@@ -2784,8 +2963,8 @@ impl WriteBatchingService {
                 ));
             }
 
-            println!(
-                "[DEBUG] execute_batch: Finished batch with {} results",
+            debug!(
+                "execute_batch: Finished batch with {} results",
                 results.len()
             );
 
@@ -2809,8 +2988,8 @@ impl WriteBatchingService {
         }
 
         // If we get here, all retries failed
-        println!(
-            "[DEBUG] execute_batch: All retries failed, returning {} failure results",
+        warn!(
+            "execute_batch: All retries failed, returning {} failure results",
             batch.operations.len()
         );
         results
@@ -2821,6 +3000,7 @@ impl WriteBatchingService {
         account_id: Uuid,
         owner_name: &str,
         initial_balance: Decimal,
+        operation_id: Uuid,
     ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
         let event = AccountEvent::AccountCreated {
             account_id,
@@ -2828,9 +3008,19 @@ impl WriteBatchingService {
             initial_balance,
         };
 
+        // Use deterministic event ID based on account_id, operation_id, timestamp and event content
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let event_id = Self::generate_deterministic_event_id(&format!(
+            "AccountCreated:{}:{}:{}",
+            account_id, operation_id, timestamp
+        ));
+
         let outbox_message = OutboxMessage {
             aggregate_id: account_id,
-            event_id: Uuid::new_v4(),
+            event_id,
             event_type: "AccountCreated".to_string(),
             payload: bincode::serialize(&event).unwrap_or_default(),
             topic: "banking-es.public.kafka_outbox_cdc".to_string(), // FIXED: Use correct CDC topic format
@@ -2845,16 +3035,32 @@ impl WriteBatchingService {
     fn prepare_deposit_money_operation(
         account_id: Uuid,
         amount: Decimal,
+        operation_id: Uuid,
     ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
+        // Use deterministic transaction_id based on account_id, amount, operation_id and timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let transaction_id = Self::generate_deterministic_event_id(&format!(
+            "DepositTransaction:{}:{}:{}:{}",
+            account_id, amount, operation_id, timestamp
+        ));
         let event = AccountEvent::MoneyDeposited {
             account_id,
             amount,
-            transaction_id: Uuid::new_v4(),
+            transaction_id,
         };
+
+        // Use deterministic event ID based on account_id, amount, operation_id, timestamp and event type
+        let event_id = Self::generate_deterministic_event_id(&format!(
+            "MoneyDeposited:{}:{}:{}:{}",
+            account_id, amount, operation_id, timestamp
+        ));
 
         let outbox_message = OutboxMessage {
             aggregate_id: account_id,
-            event_id: Uuid::new_v4(),
+            event_id,
             event_type: "MoneyDeposited".to_string(),
             payload: bincode::serialize(&event).unwrap_or_default(),
             topic: "banking-es.public.kafka_outbox_cdc".to_string(), // FIXED: Use correct CDC topic format
@@ -2869,16 +3075,32 @@ impl WriteBatchingService {
     fn prepare_withdraw_money_operation(
         account_id: Uuid,
         amount: Decimal,
+        operation_id: Uuid,
     ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
+        // Use deterministic transaction_id based on account_id, amount, operation_id and timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let transaction_id = Self::generate_deterministic_event_id(&format!(
+            "WithdrawTransaction:{}:{}:{}:{}",
+            account_id, amount, operation_id, timestamp
+        ));
         let event = AccountEvent::MoneyWithdrawn {
             account_id,
             amount,
-            transaction_id: Uuid::new_v4(),
+            transaction_id,
         };
+
+        // Use deterministic event ID based on account_id, amount, operation_id, timestamp and event type
+        let event_id = Self::generate_deterministic_event_id(&format!(
+            "MoneyWithdrawn:{}:{}:{}:{}",
+            account_id, amount, operation_id, timestamp
+        ));
 
         let outbox_message = OutboxMessage {
             aggregate_id: account_id,
-            event_id: Uuid::new_v4(),
+            event_id,
             event_type: "MoneyWithdrawn".to_string(),
             payload: bincode::serialize(&event).unwrap_or_default(),
             topic: "banking-es.public.kafka_outbox_cdc".to_string(), // FIXED: Use correct CDC topic format
@@ -2888,6 +3110,124 @@ impl WriteBatchingService {
         };
 
         (vec![event], vec![outbox_message], account_id)
+    }
+
+    /// Generate deterministic event ID from string content
+    fn generate_deterministic_event_id(content: &str) -> Uuid {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        // Convert hash to UUID (using first 16 bytes)
+        let bytes = hash.to_le_bytes();
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes[..8].copy_from_slice(&bytes[..8]);
+        uuid_bytes[8..].copy_from_slice(&bytes[..8]); // Repeat for simplicity
+
+        Uuid::from_bytes(uuid_bytes)
+    }
+
+    /// ✅ Schedule orphaned cleanup for outbox messages when events fail
+    async fn schedule_orphaned_cleanup(
+        write_pool: Arc<PgPool>,
+        outbox_messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
+    ) -> Result<()> {
+        // Create cleanup service
+        let cleanup_config =
+            crate::infrastructure::outbox_cleanup_service::CleanupConfig::default();
+        let cleaner = crate::infrastructure::outbox_cleanup_service::OutboxCleaner::new(
+            (*write_pool).clone(),
+            cleanup_config,
+        );
+
+        // Run orphaned cleanup
+        let metrics = cleaner.cleanup_orphaned_messages().await?;
+
+        info!(
+            "Orphaned cleanup completed - marked: {}, deleted: {}, duration: {}ms",
+            metrics.marked_for_deletion, metrics.physically_deleted, metrics.cleanup_duration_ms
+        );
+
+        Ok(())
+    }
+
+    /// ✅ Retry outbox only when events already succeeded
+    async fn retry_outbox_only(
+        write_pool: Arc<PgPool>,
+        outbox_messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
+    ) -> Result<()> {
+        let max_retries = 3;
+        let mut retry_count = 0;
+
+        while retry_count < max_retries {
+            let mut transaction = write_pool.begin().await?;
+
+            let cdc_repo = crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(Arc::new(
+                crate::infrastructure::PartitionedPools {
+                    write_pool: (*write_pool).clone(),
+                    read_pool: (*write_pool).clone(),
+                    config: crate::infrastructure::PoolPartitioningConfig::default(),
+                },
+            ));
+
+            match cdc_repo
+                .add_pending_messages_copy_direct(&mut transaction, outbox_messages.clone())
+                .await
+            {
+                Ok(_) => {
+                    transaction.commit().await?;
+                    info!(
+                        "Successfully retried outbox after {} attempts",
+                        retry_count + 1
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    transaction.rollback().await?;
+                    retry_count += 1;
+
+                    if retry_count < max_retries {
+                        warn!("Outbox retry {} failed: {}, retrying...", retry_count, e);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            100 * retry_count as u64,
+                        ))
+                        .await;
+                    } else {
+                        error!("Outbox retry failed after {} attempts: {}", max_retries, e);
+                        return Err(anyhow::anyhow!("Outbox retry failed: {}", e));
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("Outbox retry exhausted"))
+    }
+
+    /// ✅ Helper function for async events saving
+    async fn save_events_async(
+        event_store: &Arc<dyn EventStoreTrait>,
+        transaction: &mut Transaction<'_, Postgres>,
+        events_by_aggregate: Vec<(Uuid, Vec<AccountEvent>, Option<usize>)>,
+    ) -> Result<(), String> {
+        event_store
+            .save_events_multi_aggregate_in_transaction(transaction, events_by_aggregate)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// ✅ Helper function for async outbox saving
+    async fn save_outbox_async(
+        cdc_repo: &crate::infrastructure::cdc_debezium::CDCOutboxRepository,
+        transaction: &mut Transaction<'_, Postgres>,
+        all_outbox_messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
+    ) -> Result<(), String> {
+        cdc_repo
+            .add_pending_messages_copy_direct(transaction, all_outbox_messages)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Get service statistics with channel lifecycle monitoring
@@ -3134,7 +3474,7 @@ impl WriteBatchingService {
         ));
 
         if let Err(e) = cdc_repo
-            .add_pending_messages_copy(&mut transaction, messages)
+            .add_pending_messages_copy_direct(&mut transaction, messages)
             .await
         {
             error!("Failed to bulk insert outbox messages directly: {}", e);
@@ -3254,12 +3594,13 @@ impl WriteBatchingService {
                     *account_id,
                     owner_name,
                     *initial_balance,
+                    *operation_id,
                 ),
                 WriteOperation::DepositMoney { account_id, amount } => {
-                    Self::prepare_deposit_money_operation(*account_id, *amount)
+                    Self::prepare_deposit_money_operation(*account_id, *amount, *operation_id)
                 }
                 WriteOperation::WithdrawMoney { account_id, amount } => {
-                    Self::prepare_withdraw_money_operation(*account_id, *amount)
+                    Self::prepare_withdraw_money_operation(*account_id, *amount, *operation_id)
                 }
             };
 
@@ -3304,21 +3645,6 @@ impl WriteBatchingService {
             }
         }
 
-        {
-            let mut agg_summaries = Vec::new();
-            for (agg_id, evs, part) in &events_by_aggregate {
-                agg_summaries.push(format!("{}:{}ev@p{:?}", agg_id, evs.len(), part));
-            }
-            // println!(
-            //     "[DEBUG] execute_batch_unified: About to execute parallel operations with {} aggregates and {} outbox messages | batch_id={} | partition_id={:?} | aggregates=[{}]",
-            //     events_by_aggregate.len(),
-            //     all_outbox_messages.len(),
-            //     batch.batch_id,
-            //     partition_id,
-            //     agg_summaries.join(",")
-            // );
-        }
-
         let final_result: Result<(), String> = if all_outbox_messages.is_empty() {
             // If no outbox messages, only execute events operation
             event_store
@@ -3326,33 +3652,97 @@ impl WriteBatchingService {
                 .await
                 .map_err(|e| e.to_string())
         } else {
-            // Execute events and outbox operations sequentially within the same transaction
-            let events_res = event_store
-                .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
-                .await
-                .map_err(|e| e.to_string());
+            // ✅ Option 2: Structured Async Function approach
+            let cdc_repo = crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(Arc::new(
+                crate::infrastructure::PartitionedPools {
+                    write_pool: (**write_pool).clone(),
+                    read_pool: (**write_pool).clone(),
+                    config: crate::infrastructure::PoolPartitioningConfig::default(),
+                },
+            ));
 
-            let outbox_res = if events_res.is_ok() {
-                let cdc_repo = crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
-                    Arc::new(crate::infrastructure::PartitionedPools {
-                        write_pool: (**write_pool).clone(),
-                        read_pool: (**write_pool).clone(),
-                        config: crate::infrastructure::PoolPartitioningConfig::default(),
-                    }),
-                );
-                cdc_repo
-                    .add_pending_messages_copy(&mut transaction, all_outbox_messages.clone())
-                    .await
-                    .map_err(|e| e.to_string())
-            } else {
-                Err("Events operation failed, skipping outbox".to_string())
-            };
+            // ✅ Parallel execution using separate transactions
+            let (events_res, outbox_res) = tokio::join!(
+                async {
+                    event_store
+                        .save_events_multi_aggregate_in_transaction(
+                            &mut transaction,
+                            events_by_aggregate,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                async {
+                    // Create separate transaction for outbox
+                    let mut outbox_tx = write_pool.begin().await.map_err(|e| e.to_string())?;
+                    let result = cdc_repo
+                        .add_pending_messages_copy_direct(
+                            &mut outbox_tx,
+                            all_outbox_messages.clone(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string());
 
-            // Handle results - fail if either fails
+                    // Commit outbox transaction if successful
+                    if result.is_ok() {
+                        outbox_tx.commit().await.map_err(|e| e.to_string())?;
+                    } else {
+                        outbox_tx.rollback().await.map_err(|e| e.to_string())?;
+                    }
+
+                    result
+                }
+            );
+
+            // ✅ Handle results with orphaned cleanup
             match (events_res, outbox_res) {
                 (Ok(_), Ok(_)) => Ok(()),
-                (Err(e), _) => Err(e),
-                (_, Err(e)) => Err(e),
+                (Err(e), Ok(_)) => {
+                    // ✅ Events failed but outbox succeeded - schedule orphaned cleanup
+                    warn!("Events failed but outbox succeeded - scheduling orphaned cleanup for {} messages", all_outbox_messages.len());
+
+                    // Schedule orphaned cleanup in background
+                    let outbox_messages = all_outbox_messages.clone();
+                    let write_pool = write_pool.clone();
+                    tokio::spawn(async move {
+                        if let Err(cleanup_err) =
+                            Self::schedule_orphaned_cleanup(write_pool, outbox_messages).await
+                        {
+                            error!("Failed to schedule orphaned cleanup: {}", cleanup_err);
+                        }
+                    });
+
+                    Err(e)
+                }
+                (Ok(_), Err(e)) => {
+                    // ✅ Events succeeded but outbox failed - retry outbox only
+                    warn!(
+                        "Events succeeded but outbox failed - retrying outbox for {} messages",
+                        all_outbox_messages.len()
+                    );
+
+                    // Retry outbox in background (events already saved)
+                    let outbox_messages = all_outbox_messages.clone();
+                    let write_pool = write_pool.clone();
+                    tokio::spawn(async move {
+                        if let Err(retry_err) =
+                            Self::retry_outbox_only(write_pool, outbox_messages).await
+                        {
+                            error!(
+                                "Failed to retry outbox after events succeeded: {}",
+                                retry_err
+                            );
+                            // Log warning but don't fail the operation (eventual consistency)
+                            warn!("Events saved but outbox failed after retry - eventual consistency mode");
+                        } else {
+                            info!("Successfully retried outbox after events succeeded");
+                        }
+                    });
+
+                    // Don't fail the operation - events are already saved
+                    Ok(())
+                }
+                (Err(e), Err(_)) => Err(e),
             }
         };
 
@@ -3362,10 +3752,10 @@ impl WriteBatchingService {
                 transaction.commit().await.map_err(|e| e.to_string())?;
                 // println!("[DEBUG] execute_batch_unified: Successfully completed operations and committed transaction");
                 info!(
-            "[DEBUG] execute_batch_unified: Completed successfully - {} operations, {} outbox messages in unified transaction",
-            batch.operations.len(),
-            all_outbox_messages.len()
-        );
+                    "execute_batch_unified: Completed successfully - {} operations, {} outbox messages in unified transaction",
+                    batch.operations.len(),
+                    all_outbox_messages.len()
+                );
 
                 // Create success results
                 let final_op_results = operation_results
@@ -3389,11 +3779,9 @@ impl WriteBatchingService {
             Err(e) => {
                 let msg = format!("execute_batch_unified_inner failed: {}", e);
                 if let Err(re) = transaction.rollback().await.map_err(|e| e.to_string()) {
-                    eprintln!("[DEBUG] execute_batch_unified: rollback error: {}", re);
+                    error!("execute_batch_unified: rollback error: {}", re);
                 }
-                println!(
-                    "[DEBUG] execute_batch_unified: Operations failed, rolled back transaction"
-                );
+                warn!("execute_batch_unified: Operations failed, rolled back transaction");
                 return Err(msg);
             }
         }
@@ -3409,15 +3797,10 @@ impl WriteBatchingService {
         let mut results = Vec::new();
         let mut retry_count = 0;
 
-        // BULK MODE: Batch size is large, start bulk mode
-        let should_use_bulk_mode = batch.operations.len() >= 3;
-        let mut bulk_config_manager = if should_use_bulk_mode {
-            Some(BulkInsertConfigManager::new())
-        } else {
-            None
-        };
+        // PERFORMANCE OPTIMIZED: Always use bulk mode for maximum throughput
+        let mut bulk_config_manager = Some(BulkInsertConfigManager::new());
 
-        // BULK MODE: Start bulk mode if it will be used
+        // OPTIMIZED: Start bulk mode immediately for maximum performance
         if let Some(ref mut config_manager) = bulk_config_manager {
             if let Err(e) = config_manager
                 .start_bulk_mode_event_store(event_store)
@@ -3427,7 +3810,7 @@ impl WriteBatchingService {
                 // Continue in normal mode even if bulk mode fails to start
             } else {
                 info!(
-                    "🚀 Bulk mode activated for unified batch with {} operations",
+                    "🚀 PERFORMANCE OPTIMIZED: Bulk mode activated for unified batch with {} operations",
                     batch.operations.len()
                 );
             }
@@ -3447,8 +3830,8 @@ impl WriteBatchingService {
                 Ok(op_results) => {
                     // Success path
                     results = op_results;
-                    println!(
-                        "[DEBUG] execute_batch_unified: Finished unified batch with {} results",
+                    debug!(
+                        "execute_batch_unified: Finished unified batch with {} results",
                         results.len()
                     );
 
@@ -3469,21 +3852,21 @@ impl WriteBatchingService {
                     let is_duplicate_key_error =
                         error_msg.contains("duplicate key value violates unique constraint");
 
-                    if (is_serialization_conflict || is_duplicate_key_error)
-                        && retry_count < config.max_retries as usize - 1
+                    // PERFORMANCE OPTIMIZED: Reduced retry logic for maximum throughput
+                    if (is_serialization_conflict || is_duplicate_key_error) && retry_count < 1
+                    // OPTIMIZED: Only retry once for maximum performance
                     {
                         retry_count += 1;
-                        let backoff = Duration::from_millis(100 * retry_count as u64);
+                        let backoff = Duration::from_millis(50); // OPTIMIZED: Fixed short backoff
                         info!(
-                            "[DEBUG] {} detected, retrying in {:?} (attempt {}/{})",
+                            "{} detected, retrying in {:?} (attempt {}/1)",
                             if is_duplicate_key_error {
                                 "Duplicate key error"
                             } else {
                                 "Serialization conflict"
                             },
                             backoff,
-                            retry_count,
-                            config.max_retries
+                            retry_count
                         );
                         tokio::time::sleep(backoff).await;
                         continue; // Continue the loop for a retry
@@ -3500,8 +3883,8 @@ impl WriteBatchingService {
                             }
                         }
 
-                        println!(
-                        "[DEBUG] execute_batch_unified: All retries failed, returning {} failure results",
+                        warn!(
+                        "execute_batch_unified: All retries failed, returning {} failure results",
                         batch.operations.len()
                     );
 
@@ -3555,7 +3938,7 @@ pub async fn save_events_with_retry(
             Ok(_) => return Ok(()),
             Err(e) if is_version_conflict(&e) && retries < max_retries => {
                 retries += 1;
-                println!("[DEBUG] Version conflict for aggregate_id={:?}, retrying (attempt {}/{}), current_version={}", 
+                debug!("Version conflict for aggregate_id={:?}, retrying (attempt {}/{}), current_version={}", 
                     aggregate_id, retries, max_retries, current_version);
                 let jitter = rand::thread_rng().gen_range(0..50);
                 tokio::time::sleep(std::time::Duration::from_millis(backoff + jitter)).await;
@@ -3654,7 +4037,7 @@ mod tests {
             );
         }
 
-        println!("✅ Sequential partitioning logic test passed!");
+        info!("✅ Sequential partitioning logic test passed!");
     }
 }
 
@@ -3899,4 +4282,31 @@ impl Default for BulkInsertConfigManager {
             is_bulk_mode: false,
         }
     }
+}
+
+/// Configuration for super batch processing
+#[derive(Debug, Clone)]
+pub struct SuperBatchConfig {
+    pub processing_strategy: SuperBatchProcessingStrategy,
+    pub adaptive_config: AdaptiveBatchConfig,
+}
+
+impl Default for SuperBatchConfig {
+    fn default() -> Self {
+        Self {
+            processing_strategy: SuperBatchProcessingStrategy::Direct,
+            adaptive_config: AdaptiveBatchConfig::default(),
+        }
+    }
+}
+
+/// Processing strategy for super batch operations
+#[derive(Debug, Clone)]
+pub enum SuperBatchProcessingStrategy {
+    /// Direct processing without locking (fastest)
+    Direct,
+    /// Processing with Redis locking for consistency
+    Locked,
+    /// Adaptive processing based on operation analysis
+    Adaptive,
 }

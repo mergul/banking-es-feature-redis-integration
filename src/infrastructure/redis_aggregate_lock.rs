@@ -411,8 +411,8 @@ impl RedisAggregateLock {
 
         // Handle write operations that need locks
         if !write_aggregates.is_empty() {
-            // Split large batches into smaller chunks for better success rate
-            let chunk_size = self.config.max_batch_size.min(10); // Max 10 per batch (daha küçük)
+            // Split large batches into optimal chunks for better success rate
+            let chunk_size = self.config.max_batch_size.min(500); // Max 500 per batch (optimized)
             let mut all_batch_results = Vec::new();
 
             for chunk in write_aggregates.chunks(chunk_size) {
@@ -498,8 +498,8 @@ impl RedisAggregateLock {
             self.operation_type_cache.remove(&aggregate_id);
         }
 
-        // Split into smaller chunks for better performance
-        let chunk_size = 10;
+        // Split into optimal chunks for better performance
+        let chunk_size = 500;
         let mut total_released = 0;
 
         for chunk in aggregate_ids.chunks(chunk_size) {

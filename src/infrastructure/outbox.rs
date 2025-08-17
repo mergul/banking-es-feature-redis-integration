@@ -59,6 +59,15 @@ pub trait OutboxRepositoryTrait: Send + Sync {
         messages: Vec<OutboxMessage>,
     ) -> Result<()>;
 
+    /// Optimized direct COPY to final table without temp table.
+    /// This method uses PostgreSQL's COPY command directly to the final table.
+    /// Should be used for maximum performance with large batches.
+    async fn add_pending_messages_copy_direct(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        messages: Vec<OutboxMessage>,
+    ) -> Result<()>;
+
     /// Fetches a batch of pending messages for the poller to process.
     /// This method should ideally implement a way to lock the fetched rows
     /// (e.g., SELECT ... FOR UPDATE SKIP LOCKED) or update their status to 'PROCESSING'
@@ -170,6 +179,20 @@ impl OutboxRepositoryTrait for PostgresOutboxRepository {
 
         // For PostgresOutboxRepository, fall back to regular add_pending_messages
         // since it doesn't support COPY operations
+        self.add_pending_messages(tx, messages).await
+    }
+
+    async fn add_pending_messages_copy_direct(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        messages: Vec<OutboxMessage>,
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        // For PostgresOutboxRepository, fall back to regular add_pending_messages
+        // since it doesn't support direct COPY operations
         self.add_pending_messages(tx, messages).await
     }
 
