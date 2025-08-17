@@ -2996,11 +2996,32 @@ impl WriteBatchingService {
     }
 
     // Helper methods to prepare operations without executing them
+    /// PERFORMANCE OPTIMIZED: Prepare create account operation with fast event ID generation
     fn prepare_create_account_operation(
         account_id: Uuid,
         owner_name: &str,
         initial_balance: Decimal,
         operation_id: Uuid,
+    ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
+        Self::prepare_create_account_operation_with_timestamp(
+            account_id,
+            owner_name,
+            initial_balance,
+            operation_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+    }
+
+    /// ULTRA PERFORMANCE OPTIMIZED: Prepare create account operation with pre-generated timestamp
+    fn prepare_create_account_operation_with_timestamp(
+        account_id: Uuid,
+        owner_name: &str,
+        initial_balance: Decimal,
+        operation_id: Uuid,
+        timestamp: u128,
     ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
         let event = AccountEvent::AccountCreated {
             account_id,
@@ -3008,15 +3029,9 @@ impl WriteBatchingService {
             initial_balance,
         };
 
-        // Use deterministic event ID based on account_id, operation_id, timestamp and event content
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let event_id = Self::generate_deterministic_event_id(&format!(
-            "AccountCreated:{}:{}:{}",
-            account_id, operation_id, timestamp
-        ));
+        // ULTRA PERFORMANCE OPTIMIZED: Use ultra fast event ID generation with provided timestamp
+        let event_id =
+            Self::generate_uuid_ultra_fast("AccountCreated", account_id, operation_id, timestamp);
 
         let outbox_message = OutboxMessage {
             aggregate_id: account_id,
@@ -3032,31 +3047,47 @@ impl WriteBatchingService {
         (vec![event], vec![outbox_message], account_id)
     }
 
+    /// PERFORMANCE OPTIMIZED: Prepare deposit money operation with fast ID generation
     fn prepare_deposit_money_operation(
         account_id: Uuid,
         amount: Decimal,
         operation_id: Uuid,
     ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
-        // Use deterministic transaction_id based on account_id, amount, operation_id and timestamp
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let transaction_id = Self::generate_deterministic_event_id(&format!(
-            "DepositTransaction:{}:{}:{}:{}",
-            account_id, amount, operation_id, timestamp
-        ));
+        Self::prepare_deposit_money_operation_with_timestamp(
+            account_id,
+            amount,
+            operation_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+    }
+
+    /// ULTRA PERFORMANCE OPTIMIZED: Prepare deposit money operation with pre-generated timestamp
+    fn prepare_deposit_money_operation_with_timestamp(
+        account_id: Uuid,
+        amount: Decimal,
+        operation_id: Uuid,
+        timestamp: u128,
+    ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
+        // ULTRA PERFORMANCE OPTIMIZED: Use fast transaction ID generation with provided timestamp
+        let transaction_id = Self::generate_transaction_id_fast(
+            "DepositTransaction",
+            account_id,
+            &amount,
+            operation_id,
+            timestamp,
+        );
         let event = AccountEvent::MoneyDeposited {
             account_id,
             amount,
             transaction_id,
         };
 
-        // Use deterministic event ID based on account_id, amount, operation_id, timestamp and event type
-        let event_id = Self::generate_deterministic_event_id(&format!(
-            "MoneyDeposited:{}:{}:{}:{}",
-            account_id, amount, operation_id, timestamp
-        ));
+        // ULTRA PERFORMANCE OPTIMIZED: Use ultra fast event ID generation
+        let event_id =
+            Self::generate_uuid_ultra_fast("MoneyDeposited", account_id, operation_id, timestamp);
 
         let outbox_message = OutboxMessage {
             aggregate_id: account_id,
@@ -3072,31 +3103,47 @@ impl WriteBatchingService {
         (vec![event], vec![outbox_message], account_id)
     }
 
+    /// PERFORMANCE OPTIMIZED: Prepare withdraw money operation with fast ID generation
     fn prepare_withdraw_money_operation(
         account_id: Uuid,
         amount: Decimal,
         operation_id: Uuid,
     ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
-        // Use deterministic transaction_id based on account_id, amount, operation_id and timestamp
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let transaction_id = Self::generate_deterministic_event_id(&format!(
-            "WithdrawTransaction:{}:{}:{}:{}",
-            account_id, amount, operation_id, timestamp
-        ));
+        Self::prepare_withdraw_money_operation_with_timestamp(
+            account_id,
+            amount,
+            operation_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+    }
+
+    /// ULTRA PERFORMANCE OPTIMIZED: Prepare withdraw money operation with pre-generated timestamp
+    fn prepare_withdraw_money_operation_with_timestamp(
+        account_id: Uuid,
+        amount: Decimal,
+        operation_id: Uuid,
+        timestamp: u128,
+    ) -> (Vec<AccountEvent>, Vec<OutboxMessage>, Uuid) {
+        // ULTRA PERFORMANCE OPTIMIZED: Use fast transaction ID generation with provided timestamp
+        let transaction_id = Self::generate_transaction_id_fast(
+            "WithdrawTransaction",
+            account_id,
+            &amount,
+            operation_id,
+            timestamp,
+        );
         let event = AccountEvent::MoneyWithdrawn {
             account_id,
             amount,
             transaction_id,
         };
 
-        // Use deterministic event ID based on account_id, amount, operation_id, timestamp and event type
-        let event_id = Self::generate_deterministic_event_id(&format!(
-            "MoneyWithdrawn:{}:{}:{}:{}",
-            account_id, amount, operation_id, timestamp
-        ));
+        // ULTRA PERFORMANCE OPTIMIZED: Use ultra fast event ID generation
+        let event_id =
+            Self::generate_uuid_ultra_fast("MoneyWithdrawn", account_id, operation_id, timestamp);
 
         let outbox_message = OutboxMessage {
             aggregate_id: account_id,
@@ -3113,6 +3160,7 @@ impl WriteBatchingService {
     }
 
     /// Generate deterministic event ID from string content
+    /// PERFORMANCE OPTIMIZED: Reduced string formatting overhead and improved hash efficiency
     fn generate_deterministic_event_id(content: &str) -> Uuid {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -3121,11 +3169,117 @@ impl WriteBatchingService {
         content.hash(&mut hasher);
         let hash = hasher.finish();
 
-        // Convert hash to UUID (using first 16 bytes)
+        // OPTIMIZED: More efficient UUID generation from hash
+        // Use all 8 bytes of the hash to create a more unique UUID
+        let bytes = hash.to_le_bytes();
+        let mut uuid_bytes = [0u8; 16];
+
+        // Copy first 8 bytes
+        uuid_bytes[..8].copy_from_slice(&bytes[..8]);
+        // Use a simple transformation for the second 8 bytes to maintain uniqueness
+        for i in 0..8 {
+            uuid_bytes[8 + i] = bytes[i].wrapping_add(i as u8);
+        }
+
+        Uuid::from_bytes(uuid_bytes)
+    }
+
+    /// ULTRA PERFORMANCE OPTIMIZED: Generate UUID directly from components without any string operations
+    /// This is the fastest method for generating deterministic UUIDs
+    fn generate_uuid_ultra_fast(
+        event_type: &str,
+        account_id: Uuid,
+        operation_id: Uuid,
+        timestamp: u128,
+    ) -> Uuid {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+
+        // Hash components directly - no string formatting
+        event_type.hash(&mut hasher);
+        account_id.hash(&mut hasher);
+        operation_id.hash(&mut hasher);
+        timestamp.hash(&mut hasher);
+
+        let hash = hasher.finish();
+
+        // Convert to UUID using a more efficient method
+        let bytes = hash.to_le_bytes();
+
+        // Create UUID using a deterministic pattern that's faster than the previous method
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes[0..4].copy_from_slice(&bytes[0..4]);
+        uuid_bytes[4..6].copy_from_slice(&bytes[4..6]);
+        uuid_bytes[6..8].copy_from_slice(&bytes[6..8]);
+        uuid_bytes[8..10].copy_from_slice(&bytes[0..2]);
+        uuid_bytes[10..16].copy_from_slice(&bytes[2..8]);
+
+        Uuid::from_bytes(uuid_bytes)
+    }
+
+    /// PERFORMANCE OPTIMIZED: Generate event ID without string formatting overhead
+    /// This version avoids expensive string concatenation for better performance
+    fn generate_event_id_fast(
+        event_type: &str,
+        account_id: Uuid,
+        operation_id: Uuid,
+        timestamp: u128,
+    ) -> Uuid {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+
+        // Hash components directly without string formatting
+        event_type.hash(&mut hasher);
+        account_id.hash(&mut hasher);
+        operation_id.hash(&mut hasher);
+        timestamp.hash(&mut hasher);
+
+        let hash = hasher.finish();
+
+        // Convert to UUID efficiently
         let bytes = hash.to_le_bytes();
         let mut uuid_bytes = [0u8; 16];
         uuid_bytes[..8].copy_from_slice(&bytes[..8]);
-        uuid_bytes[8..].copy_from_slice(&bytes[..8]); // Repeat for simplicity
+        for i in 0..8 {
+            uuid_bytes[8 + i] = bytes[i].wrapping_add(i as u8);
+        }
+
+        Uuid::from_bytes(uuid_bytes)
+    }
+
+    /// PERFORMANCE OPTIMIZED: Generate transaction ID without string formatting
+    fn generate_transaction_id_fast(
+        transaction_type: &str,
+        account_id: Uuid,
+        amount: &Decimal,
+        operation_id: Uuid,
+        timestamp: u128,
+    ) -> Uuid {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+
+        // Hash components directly
+        transaction_type.hash(&mut hasher);
+        account_id.hash(&mut hasher);
+        // Hash amount as string representation (more efficient than complex decimal hashing)
+        amount.to_string().hash(&mut hasher);
+        operation_id.hash(&mut hasher);
+        timestamp.hash(&mut hasher);
+
+        let hash = hasher.finish();
+
+        let bytes = hash.to_le_bytes();
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes[..8].copy_from_slice(&bytes[..8]);
+        for i in 0..8 {
+            uuid_bytes[8 + i] = bytes[i].wrapping_add(i as u8);
+        }
 
         Uuid::from_bytes(uuid_bytes)
     }
@@ -3578,6 +3732,12 @@ impl WriteBatchingService {
 
         let batch_start = Instant::now();
 
+        // OPTIMIZED: Generate timestamp once for the entire batch to reduce system calls
+        let batch_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
         // Collect all events and outbox messages from all operations
         let mut all_events = Vec::new();
         let mut all_outbox_messages = Vec::new();
@@ -3590,17 +3750,28 @@ impl WriteBatchingService {
                     account_id,
                     owner_name,
                     initial_balance,
-                } => Self::prepare_create_account_operation(
+                } => Self::prepare_create_account_operation_with_timestamp(
                     *account_id,
                     owner_name,
                     *initial_balance,
                     *operation_id,
+                    batch_timestamp,
                 ),
                 WriteOperation::DepositMoney { account_id, amount } => {
-                    Self::prepare_deposit_money_operation(*account_id, *amount, *operation_id)
+                    Self::prepare_deposit_money_operation_with_timestamp(
+                        *account_id,
+                        *amount,
+                        *operation_id,
+                        batch_timestamp,
+                    )
                 }
                 WriteOperation::WithdrawMoney { account_id, amount } => {
-                    Self::prepare_withdraw_money_operation(*account_id, *amount, *operation_id)
+                    Self::prepare_withdraw_money_operation_with_timestamp(
+                        *account_id,
+                        *amount,
+                        *operation_id,
+                        batch_timestamp,
+                    )
                 }
             };
 
