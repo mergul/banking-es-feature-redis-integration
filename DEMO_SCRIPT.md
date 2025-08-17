@@ -161,23 +161,23 @@ code src/infrastructure/cdc_event_processor.rs
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    LIVE PERFORMANCE METRICS                │
+│                    LIVE PERFORMANCE METRICS                 │
 ├─────────────────────────────────────────────────────────────┤
-│  Current TPS: 100,247    │  Average Latency: 2ms          │
-│  Error Rate: 0.001%      │  Memory Usage: 2.1GB            │
-│  CPU Usage: 25%         │  Active Connections: 789        │
+│  Current TPS: 100,247    │  Average Latency: 2ms            │
+│  Error Rate: 0.001%      │  Memory Usage: 2.1GB             │
+│  CPU Usage: 25%          │  Active Connections: 789         │
 ├─────────────────────────────────────────────────────────────┤
-│  CDC Pipeline:                                            │
-│  • Events Processed: 10.2M/min                             │
-│  • Batch Size: 1,247 avg                                  │
-│  • COPY Operations: 98% success rate                      │
-│  • Kafka Lag: 0.02ms avg                                   │
+│  CDC Pipeline:                                              │
+│  • Events Processed: 10.2M/min                              │
+│  • Batch Size: 1,247 avg                                    │
+│  • COPY Operations: 98% success rate                        │
+│  • Kafka Lag: 0.02ms avg                                    │
 ├─────────────────────────────────────────────────────────────┤
-│  Mobile App:                                              │
-│  • Active Users: 1,234                                    │
-│  • Response Time: 2ms avg                                │
-│  • Cache Hit Rate: 94%                                    │
-│  • Offline Transactions: 0                                │
+│  Mobile App:                                                │
+│  • Active Users: 1,234                                      │
+│  • Response Time: 2ms avg                                   │
+│  • Cache Hit Rate: 94%                                      │
+│  • Offline Transactions: 0                                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 

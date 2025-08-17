@@ -59,14 +59,14 @@
 └─────────────────┘    └─────────────────┘
          │                       │
          ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐
-│  EVENT STORE    │    │  PROJECTIONS    │
-│                 │    │                 │
-│ • AccountCreated│    │ • AccountView   │
+┌─────────────────┐    ┌────────────────-─┐
+│  EVENT STORE    │    │  PROJECTIONS     │
+│                 │    │                  │
+│ • AccountCreated│    │ • AccountView    │
 │ • MoneyDeposited│    │ • TransactionView│
-│ • MoneyWithdrawn│    │ • AnalyticsView │
-│ • AccountClosed │    │ • Cache Layer   │
-└─────────────────┘    └─────────────────┘
+│ • MoneyWithdrawn│    │ • AnalyticsView  │
+│ • AccountClosed │    │ • Cache Layer    │
+└─────────────────┘    └─────────────────-┘
 ```
 
 ### **Event Sourcing Avantajları**
@@ -231,20 +231,20 @@
 ┌─────────────────────────────────────────────────────────────┐
 │                    SYSTEM METRICS                           │
 ├─────────────────────────────────────────────────────────────┤
-│  Throughput: 100,247 TPS    │  Latency: 2ms avg            │
+│  Throughput: 100,247 TPS    │  Latency: 2ms avg             │
 │  Error Rate: 0.001%         │  Memory Usage: 2.1GB          │
-│  CPU Usage: 25%            │  Disk I/O: 850MB/s            │
+│  CPU Usage: 25%             │  Disk I/O: 850MB/s            │
 ├─────────────────────────────────────────────────────────────┤
-│  CDC Pipeline:                                            │
-│  • Events Processed: 1.2M/min                             │
-│  • Batch Size: 1,247 avg                                  │
-│  • COPY Operations: 98% success rate                      │
-│  • Fallback to UNNEST: 2%                                │
+│  CDC Pipeline:                                              │
+│  • Events Processed: 1.2M/min                               │
+│  • Batch Size: 1,247 avg                                    │
+│  • COPY Operations: 98% success rate                        │
+│  • Fallback to UNNEST: 2%                                   │
 ├─────────────────────────────────────────────────────────────┤
-│  Kafka Metrics:                                           │
-│  • Messages/sec: 115,432                                   │
+│  Kafka Metrics:                                             │
+│  • Messages/sec: 115,432                                    │
 │  • Lag: 0.002ms avg                                         │
-│  • Partition Distribution: Balanced                        │
+│  • Partition Distribution: Balanced                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 

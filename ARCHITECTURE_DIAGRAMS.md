@@ -4,29 +4,29 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    MODERN BANKING PLATFORM                     │
+│                    MODERN BANKING PLATFORM                      │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │   FLUTTER   │    │   KAFKA     │    │ POSTGRESQL  │        │
-│  │   MOBILE    │    │   EVENT     │    │  DATABASE   │        │
-│  │    APP      │◄──►│  STREAM     │◄──►│             │        │
-│  │             │    │             │    │ • Event Store│        │
-│  │ • Account   │    │ • account-  │    │ • Projections│        │
-│  │ • Transact  │    │   events    │    │ • CDC       │        │
-│  │ • Dashboard │    │ • transaction│    │   Pipeline  │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
-│           │                   │                   │            │
-│           ▼                   ▼                   ▼            │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │   RUST      │    │  DEBEZIUM   │    │   REDIS     │        │
-│  │  BACKEND    │    │     CDC     │    │   CACHE     │        │
-│  │             │    │  CONNECTOR  │    │             │        │
-│  │ • Command   │    │ • 5ms Poll  │    │ • Query     │        │
-│  │ • Query     │    │ • Binary Log│    │   Cache     │        │
-│  │ • Event     │    │ • WAL Stream│    │ • Session   │        │
-│  │   Handler   │    │ • Real-time │    │   Store     │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │   FLUTTER   │    │   KAFKA     │    │ POSTGRESQL  │          │
+│  │   MOBILE    │    │   EVENT     │    │  DATABASE   │          │
+│  │    APP      │◄──►│  STREAM     │◄──►│             │          │
+│  │             │    │             │    │ • Event Stor│          │
+│  │ • Account   │    │ • account-  │    │ • Projection│          │
+│  │ • Transact  │    │   events    │    │ • CDC       │          │
+│  │ • Dashboard │    │ • transactio│    │   Pipeline  │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
+│           │                   │                   │             │
+│           ▼                   ▼                   ▼             │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │   RUST      │    │  DEBEZIUM   │    │   REDIS     │          │
+│  │  BACKEND    │    │     CDC     │    │   CACHE     │          │
+│  │             │    │  CONNECTOR  │    │             │          │
+│  │ • Command   │    │ • 5ms Poll  │    │ • Query     │          │
+│  │ • Query     │    │ • Binary Log│    │   Cache     │          │
+│  │ • Event     │    │ • WAL Stream│    │ • Session   │          │
+│  │   Handler   │    │ • Real-time │    │   Store     │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -35,56 +35,56 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    CQRS + EVENT SOURCING FLOW                  │
+│                    CQRS + EVENT SOURCING FLOW                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │  COMMAND    │    │  AGGREGATE  │    │ EVENT STORE │        │
-│  │    SIDE     │    │   HANDLER   │    │             │        │
-│  │             │    │             │    │             │        │
-│  │ • Create    │───▶│ • Account   │───▶│ • Account   │        │
-│  │   Account   │    │ • Validation│    │   Created   │        │
-│  │ • Deposit   │    │ • Business  │    │ • Money     │        │
-│  │   Money     │    │   Rules     │    │   Deposited │        │
-│  │ • Withdraw  │    │             │    │ • Money     │        │
-│  │   Money     │    │             │    │   Withdrawn │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │  COMMAND    │    │  AGGREGATE  │    │ EVENT STORE │          │
+│  │    SIDE     │    │   HANDLER   │    │             │          │
+│  │             │    │             │    │             │          │
+│  │ • Create    │───▶│ • Account   │───▶│ • Account   │          │
+│  │   Account   │    │ • Validation│    │   Created   │          │
+│  │ • Deposit   │    │ • Business  │    │ • Money     │          │
+│  │   Money     │    │   Rules     │    │   Deposited │          │
+│  │ • Withdraw  │    │             │    │ • Money     │          │
+│  │   Money     │    │             │    │   Withdrawn │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │   KAFKA     │        │
 │           │                   │          │   TOPICS    │        │
 │           │                   │          │             │        │
 │           │                   │          │ • account-  │        │
 │           │                   │          │   events    │        │
-│           │                   │          │ • transaction│        │
+│           │                   │          │ • transactio│        │
 │           │                   │          │   events    │        │
 │           │                   │          │ • audit-    │        │
 │           │                   │          │   events    │        │
 │           │                   │          └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │ PROJECTION  │        │
 │           │                   │          │  HANDLERS   │        │
 │           │                   │          │             │        │
 │           │                   │          │ • Account   │        │
 │           │                   │          │   View      │        │
-│           │                   │          │ • Transaction│        │
+│           │                   │          │ • Transactio│        │
 │           │                   │          │   View      │        │
 │           │                   │          │ • Analytics │        │
 │           │                   │          │   View      │        │
 │           │                   │          └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │  QUERY      │        │
 │           │                   │          │   SIDE      │        │
 │           │                   │          │             │        │
 │           │                   │          │ • GetBalance│        │
 │           │                   │          │ • GetHistory│        │
-│           │                   │          │ • GetAccounts│        │
-│           │                   │          │ • GetAnalytics│        │
+│           │                   │          │ • GetAccount│        │
+│           │                   │          │ • GetAnalyti│        │
 │           └───────────────────┴──────────┴─────────────┘        │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -94,23 +94,23 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    KAFKA EVENT STREAMING                       │
+│                    KAFKA EVENT STREAMING                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │ PRODUCERS   │    │   KAFKA     │    │ CONSUMERS   │        │
-│  │             │    │  CLUSTER    │    │             │        │
-│  │             │    │             │    │             │        │
-│  │ • Command   │───▶│ • Broker 1  │───▶│ • CDC       │        │
-│  │   API       │    │ • Broker 2  │    │   Consumer  │        │
-│  │ • Event     │    │ • Broker 3  │    │ • Analytics │        │
-│  │   Handler   │    │             │    │ • Notifications│        │
-│  │ • Debezium  │    │             │    │ • Reporting │        │
-│  │ • Audit     │    │             │    │             │        │
-│  │   Logger    │    │             │    │             │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│  ┌─────────────┐    ┌─────────────┐    ┌────────────-─┐         │
+│  │ PRODUCERS   │    │   KAFKA     │    │ CONSUMERS    │         │
+│  │             │    │  CLUSTER    │    │              │         │
+│  │             │    │             │    │              │         │
+│  │ • Command   │───▶│ • Broker 1  │───▶│ • CDC        │         │
+│  │   API       │    │ • Broker 2  │    │   Consumer   │         │
+│  │ • Event     │    │ • Broker 3  │    │ • Analytics  │         │
+│  │   Handler   │    │             │    │ • Notificatio│         │
+│  │ • Debezium  │    │             │    │ • Reporting  │         │
+│  │ • Audit     │    │             │    │              │         │
+│  │   Logger    │    │             │    │              │         │
+│  └─────────────┘    └─────────────┘    └─────────────-┘         │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │   TOPICS    │        │
 │           │                   │          │             │        │
@@ -127,14 +127,14 @@
 │           │                   │          │ │3x repl  │ │        │
 │           │                   │          │ └─────────┘ │        │
 │           │                   │          │ ┌─────────┐ │        │
-│           │                   │          │ │audit-  │ │        │
-│           │                   │          │ │events  │ │        │
-│           │                   │          │ │4 parts │ │        │
-│           │                   │          │ │3x repl │ │        │
+│           │                   │          │ │audit-   │ │        │
+│           │                   │          │ │events   │ │        │
+│           │                   │          │ │4 parts  │ │        │
+│           │                   │          │ │3x repl  │ │        │
 │           │                   │          │ └─────────┘ │        │
 │           │                   │          └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │  ZOOKEEPER  │        │
 │           │                   │          │             │        │
@@ -153,24 +153,24 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    CDC PIPELINE DETAILED FLOW                  │
+│                    CDC PIPELINE DETAILED FLOW                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │ POSTGRESQL  │    │  DEBEZIUM   │    │   KAFKA     │        │
-│  │  DATABASE   │    │     CDC     │    │     CDC     │        │
-│  │             │    │  CONNECTOR  │    │   TOPICS    │        │
-│  │             │    │             │    │             │        │
-│  │ • Event     │───▶│ • 5ms Poll  │───▶│ • cdc.      │        │
-│  │   Store     │    │ • Binary    │    │   accounts  │        │
-│  │ • Outbox    │    │   Log       │    │ • cdc.      │        │
-│  │   Table     │    │ • WAL       │    │   transact  │        │
-│  │ • Projections│    │   Stream    │    │ • cdc.outbox│        │
-│  │ • Audit Log │    │ • Change    │    │ • cdc.audit │        │
-│  │             │    │   Capture   │    │             │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │ POSTGRESQL  │    │  DEBEZIUM   │    │   KAFKA     │          │
+│  │  DATABASE   │    │     CDC     │    │     CDC     │          │
+│  │             │    │  CONNECTOR  │    │   TOPICS    │          │
+│  │             │    │             │    │             │          │
+│  │ • Event     │───▶│ • 5ms Poll  │───▶│ • cdc.      │          │
+│  │   Store     │    │ • Binary    │    │   accounts  │          │
+│  │ • Outbox    │    │   Log       │    │ • cdc.      │          │
+│  │   Table     │    │ • WAL       │    │   transact  │          │
+│  │ •Projections│    │   Stream    │    │ • cdc.outbox│          │
+│  │ • Audit Log │    │ • Change    │    │ • cdc.audit │          │
+│  │             │    │   Capture   │    │             │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │   CDC       │        │
 │           │                   │          │ CONSUMER    │        │
@@ -184,8 +184,8 @@
 │           │                   │          │ • Business  │        │
 │           │                   │          │   Logic     │        │
 │           │                   │          └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │   EVENT     │        │
 │           │                   │          │ SEPARATION  │        │
@@ -198,8 +198,8 @@
 │           │                   │          │   COPY      │        │
 │           │                   │          │ • UPSERT    │        │
 │           │                   │          └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │   CDC       │        │
 │           │                   │          │ BATCHING    │        │
@@ -212,14 +212,14 @@
 │           │                   │          │ • 8         │        │
 │           │                   │          │   partitions│        │
 │           │                   │          └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │ PROJECTION  │        │
 │           │                   │          │   STORE     │        │
 │           │                   │          │             │        │
 │           │                   │          │ • COPY      │        │
-│           │                   │          │   Optimization│        │
+│           │                   │          │ Optimization│        │
 │           │                   │          │ • Connection│        │
 │           │                   │          │   Pooling   │        │
 │           │                   │          │ • Caching   │        │
@@ -235,19 +235,19 @@
 │                    FLUTTER MOBILE ARCHITECTURE                  │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │   UI LAYER  │    │   STATE     │    │   API LAYER │        │
-│  │             │    │ MANAGEMENT  │    │             │        │
-│  │             │    │             │    │             │        │
-│  │ • Account   │◄──►│ • Riverpod  │◄──►│ • REST API  │        │
-│  │   Screen    │    │ • Bloc      │    │ • WebSocket │        │
-│  │ • Transaction│    │   Pattern   │    │ • GraphQL   │        │
-│  │   Screen    │    │ • State     │    │ • Real-time │        │
-│  │ • Dashboard │    │   Notifier  │    │ • Push      │        │
-│  │ • Settings  │    │ • Caching   │    │   Notif.    │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │   UI LAYER  │    │   STATE     │    │   API LAYER │          │
+│  │             │    │ MANAGEMENT  │    │             │          │
+│  │             │    │             │    │             │          │
+│  │ • Account   │◄──►│ • Riverpod  │◄──►│ • REST API  │          │
+│  │   Screen    │    │ • Bloc      │    │ • WebSocket │          │
+│  │ •Transaction│    │   Pattern   │    │ • GraphQL   │          │
+│  │   Screen    │    │ • State     │    │ • Real-time │          │
+│  │ • Dashboard │    │   Notifier  │    │ • Push      │          │
+│  │ • Settings  │    │ • Caching   │    │   Notif.    │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │   BACKEND   │        │
 │           │                   │          │  SERVICES   │        │
@@ -258,8 +258,8 @@
 │           │                   │          │ • Auth      │        │
 │           │                   │          │ • Analytics │        │
 │           │                   │          └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │   SECURITY  │        │
 │           │                   │          │   LAYER     │        │
@@ -272,19 +272,19 @@
 │           │                   │          │ • SSL/TLS   │        │
 │           │                   │          └─────────────┘        │
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │  FEATURES   │    │ PERFORMANCE │    │ MONITORING  │        │
-│  │             │    │             │    │             │        │
-│  │ • Real-time │    │ • 60fps UI  │    │ • Crashlytics│        │
-│  │   Updates   │    │ • Lazy      │    │ • Performance│        │
-│  │ • Offline   │    │   Loading   │    │   Monitoring│        │
-│  │   Mode      │    │ • Image     │    │ • User      │        │
-│  │ • Push      │    │   Caching   │    │   Analytics │        │
-│  │   Notif.    │    │ • Memory    │    │ • Error     │        │
-│  │ • Biometric │    │   Optimization│    │   Tracking  │        │
-│  │   Auth      │    │ • Network   │    │ • A/B       │        │
-│  │ • Dark Mode │    │   Optimization│    │   Testing   │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │  FEATURES   │    │ PERFORMANCE │    │ MONITORING  │          │
+│  │             │    │             │    │             │          │
+│  │ • Real-time │    │ • 60fps UI  │    │ •Crashlytics│          │
+│  │   Updates   │    │ • Lazy      │    │ •Performance│          │
+│  │ • Offline   │    │   Loading   │    │   Monitoring│          │
+│  │   Mode      │    │ • Image     │    │ • User      │          │
+│  │ • Push      │    │   Caching   │    │   Analytics │          │
+│  │   Notif.    │    │ • Memory    │    │ • Error     │          │
+│  │ • Biometric │    │ Optimization│    │   Tracking  │          │
+│  │   Auth      │    │ • Network   │    │ • A/B       │          │
+│  │ • Dark Mode │    │ Optimization│    │   Testing   │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -296,21 +296,21 @@
 │                    PERFORMANCE OPTIMIZATION                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │ CONNECTION  │    │  BATCHING   │    │   CACHING   │        │
-│  │   POOLING   │    │  SERVICE    │    │   LAYER     │        │
-│  │             │    │             │    │             │        │
-│  │ • Write Pool│    │ • CDC       │    │ • Redis     │        │
-│  │   400 conns │    │   Batching  │    │   Cache     │        │
-│  │ • Read Pool │    │ • 1000 batch│    │ • Projection│        │
-│  │   400 conns │    │   size      │    │   Cache     │        │
-│  │ • Load      │    │ • 25ms      │    │ • Event     │        │
-│  │   Balance   │    │   timeout   │    │   Cache     │        │
-│  │ • Failover  │    │ • 8         │    │ • Query     │        │
-│  │             │    │   partitions│    │   Cache     │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │ CONNECTION  │    │  BATCHING   │    │   CACHING   │          │
+│  │   POOLING   │    │  SERVICE    │    │   LAYER     │          │
+│  │             │    │             │    │             │          │
+│  │ • Write Pool│    │ • CDC       │    │ • Redis     │          │
+│  │   400 conns │    │   Batching  │    │   Cache     │          │
+│  │ • Read Pool │    │ • 1000 batch│    │ • Projection│          │
+│  │   400 conns │    │   size      │    │   Cache     │          │
+│  │ • Load      │    │ • 25ms      │    │ • Event     │          │
+│  │   Balance   │    │   timeout   │    │   Cache     │          │
+│  │ • Failover  │    │ • 8         │    │ • Query     │          │
+│  │             │    │   partitions│    │   Cache     │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │   COPY      │        │
 │           │                   │          │ OPTIMIZATION│        │
@@ -325,8 +325,8 @@
 │           │                   │          │ • Batch Size│        │
 │           │                   │          │   1000+     │        │
 │           │                   │          └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │ MONITORING  │        │
 │           │                   │          │ & METRICS   │        │
@@ -338,22 +338,22 @@
 │           │                   │          │ • Alerting  │        │
 │           │                   │          └─────────────┘        │
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │   METRICS   │    │   TARGETS   │    │ ACHIEVEMENTS│        │
-│  │             │    │             │    │             │        │
-│  │ • 100,000+  │    │ • <5ms      │    │ • 100,247   │        │
-│  │   TPS       │    │   Latency   │    │   TPS       │        │
-│  │ • <5ms      │    │ • 99.99%    │    │ • 2ms Avg   │        │
-│  │   Latency   │    │   Uptime    │    │ • 99.99%    │        │
-│  │ • 99.99%    │    │ • 0.001%    │    │   Uptime    │        │
-│  │   Uptime    │    │   Error     │    │ • 0.001%    │        │
-│  │ • 0.001%    │    │ • 1000+     │    │   Error     │        │
-│  │   Error     │    │   Batch     │    │ • 1,247     │        │
-│  │ • 1000+     │    │ • 8         │    │   Batch     │        │
-│  │   Batch     │    │   Partitions│    │ • 8         │        │
-│  │ • 8         │    │ • 400       │    │   Partitions│        │
-│  │   Partitions│    │   Connections│    │             │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │   METRICS   │    │   TARGETS   │    │ ACHIEVEMENTS│          │
+│  │             │    │             │    │             │          │
+│  │ • 100,000+  │    │ • <5ms      │    │ • 100,247   │          │
+│  │   TPS       │    │   Latency   │    │   TPS       │          │
+│  │ • <5ms      │    │ • 99.99%    │    │ • 2ms Avg   │          │
+│  │   Latency   │    │   Uptime    │    │ • 99.99%    │          │
+│  │ • 99.99%    │    │ • 0.001%    │    │   Uptime    │          │
+│  │   Uptime    │    │   Error     │    │ • 0.001%    │          │
+│  │ • 0.001%    │    │ • 1000+     │    │   Error     │          │
+│  │   Error     │    │   Batch     │    │ • 1,247     │          │
+│  │ • 1000+     │    │ • 8         │    │   Batch     │          │
+│  │   Batch     │    │   Partitions│    │ • 8         │          │
+│  │ • 8         │    │ • 400       │    │   Partitions│          │
+│  │   Partitions│    │  Connections│    │             │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -365,18 +365,18 @@
 │                    TECHNOLOGY STACK SUMMARY                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │  BACKEND    │    │  DATABASE   │    │  MESSAGING  │        │
-│  │             │    │             │    │             │        │
-│  │ • Rust      │    │ • PostgreSQL│    │ • Apache    │        │
-│  │ • Actix Web │    │ • Redis     │    │   Kafka     │        │
-│  │ • SQLx      │    │ • Connection│    │ • Debezium  │        │
-│  │ • Serde     │    │   Pooling   │    │ • Zookeeper │        │
-│  │ • Tokio     │    │ • CDC       │    │ • Event     │        │
-│  │             │    │   Pipeline  │    │   Streaming │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │  BACKEND    │    │  DATABASE   │    │  MESSAGING  │          │
+│  │             │    │             │    │             │          │
+│  │ • Rust      │    │ • PostgreSQL│    │ • Apache    │          │
+│  │ • Actix Web │    │ • Redis     │    │   Kafka     │          │
+│  │ • SQLx      │    │ • Connection│    │ • Debezium  │          │
+│  │ • Serde     │    │   Pooling   │    │ • Zookeeper │          │
+│  │ • Tokio     │    │ • CDC       │    │ • Event     │          │
+│  │             │    │   Pipeline  │    │   Streaming │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
 │           │                   │          ┌─────────────┐        │
 │           │                   │          │  FRONTEND   │        │
 │           │                   │          │             │        │
@@ -386,30 +386,30 @@
 │           │                   │          │ • Riverpod  │        │
 │           │                   │          │ • WebSocket │        │
 │           │                   │          └─────────────┘        │
-│           │                   │                   │            │
-│           │                   │                   ▼            │
-│           │                   │          ┌─────────────┐        │
-│           │                   │          │INFRASTRUCTURE│        │
-│           │                   │          │             │        │
-│           │                   │          │ • Kubernetes│        │
-│           │                   │          │ • Docker    │        │
-│           │                   │          │ • Helm      │        │
-│           │                   │          │   Charts    │        │
-│           │                   │          │ • Terraform │        │
-│           │                   │          │ • AWS/GCP/  │        │
-│           │                   │          │   Azure     │        │
-│           │                   │          └─────────────┘        │
+│           │                   │                   │             │
+│           │                   │                   ▼             │
+│           │                   │          ┌─────────────-┐       │
+│           │                   │          │INFRASTRUCTURE│       │
+│           │                   │          │              │       │
+│           │                   │          │ • Kubernetes │       │
+│           │                   │          │ • Docker     │       │
+│           │                   │          │ • Helm       │       │
+│           │                   │          │   Charts     │       │
+│           │                   │          │ • Terraform  │       │
+│           │                   │          │ • AWS/GCP/   │       │
+│           │                   │          │   Azure      │       │
+│           │                   │          └─────────────-┘       │
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
-│  │ MONITORING  │    │  SECURITY   │    │ DEVELOPMENT │        │
-│  │             │    │             │    │             │        │
-│  │ • Prometheus│    │ • JWT       │    │ • Git       │        │
-│  │ • Grafana   │    │   Tokens    │    │ • GitHub    │        │
-│  │ • Jaeger    │    │ • OAuth 2.0 │    │ • CI/CD     │        │
-│  │ • ELK Stack │    │ • SSL/TLS   │    │ • Testing   │        │
-│  │ • Alerting  │    │ • Encryption│    │ • Code      │        │
-│  │             │    │ • RBAC      │    │   Quality   │        │
-│  └─────────────┘    └─────────────┘    └─────────────┘        │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │ MONITORING  │    │  SECURITY   │    │ DEVELOPMENT │          │
+│  │             │    │             │    │             │          │
+│  │ • Prometheus│    │ • JWT       │    │ • Git       │          │
+│  │ • Grafana   │    │   Tokens    │    │ • GitHub    │          │
+│  │ • Jaeger    │    │ • OAuth 2.0 │    │ • CI/CD     │          │
+│  │ • ELK Stack │    │ • SSL/TLS   │    │ • Testing   │          │
+│  │ • Alerting  │    │ • Encryption│    │ • Code      │          │
+│  │             │    │ • RBAC      │    │   Quality   │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
