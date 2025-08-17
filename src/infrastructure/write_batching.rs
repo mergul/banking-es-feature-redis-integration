@@ -3205,42 +3205,7 @@ impl WriteBatchingService {
 
         let hash = hasher.finish();
 
-        // Convert to UUID using a more efficient method
-        let bytes = hash.to_le_bytes();
-
-        // Create UUID using a deterministic pattern that's faster than the previous method
-        let mut uuid_bytes = [0u8; 16];
-        uuid_bytes[0..4].copy_from_slice(&bytes[0..4]);
-        uuid_bytes[4..6].copy_from_slice(&bytes[4..6]);
-        uuid_bytes[6..8].copy_from_slice(&bytes[6..8]);
-        uuid_bytes[8..10].copy_from_slice(&bytes[0..2]);
-        uuid_bytes[10..16].copy_from_slice(&bytes[2..8]);
-
-        Uuid::from_bytes(uuid_bytes)
-    }
-
-    /// PERFORMANCE OPTIMIZED: Generate event ID without string formatting overhead
-    /// This version avoids expensive string concatenation for better performance
-    fn generate_event_id_fast(
-        event_type: &str,
-        account_id: Uuid,
-        operation_id: Uuid,
-        timestamp: u128,
-    ) -> Uuid {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-
-        // Hash components directly without string formatting
-        event_type.hash(&mut hasher);
-        account_id.hash(&mut hasher);
-        operation_id.hash(&mut hasher);
-        timestamp.hash(&mut hasher);
-
-        let hash = hasher.finish();
-
-        // Convert to UUID efficiently
+        // OPTIMIZED: Use the faster UUID generation method (same as generate_transaction_id_fast)
         let bytes = hash.to_le_bytes();
         let mut uuid_bytes = [0u8; 16];
         uuid_bytes[..8].copy_from_slice(&bytes[..8]);
