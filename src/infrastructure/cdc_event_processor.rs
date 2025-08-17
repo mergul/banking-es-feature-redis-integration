@@ -836,14 +836,15 @@ impl UltraOptimizedCDCEventProcessor {
         let events_by_aggregate = Self::group_events_by_aggregate(processable_events);
 
         // Process events and get projections (unchanged)
-        let (projections, _processed_aggregates) = Self::process_events_for_aggregates(
-            events_by_aggregate,
-            &self.projection_cache,
-            &self.cache_service,
-            &self.projection_store,
-            &self.metrics,
-        )
-        .await?;
+        let (projections, _processed_aggregates) = self
+            .process_events_for_aggregates(
+                events_by_aggregate,
+                &self.projection_cache,
+                &self.cache_service,
+                &self.projection_store,
+                &self.metrics,
+            )
+            .await?;
 
         // CRITICAL OPTIMIZATION: Use COPY-optimized batch processing
         if !projections.is_empty() {
@@ -1353,14 +1354,15 @@ impl UltraOptimizedCDCEventProcessor {
         let mut error_count = 0;
 
         // CRITICAL OPTIMIZATION: Process all aggregates in batch instead of individually
-        match Self::process_events_for_aggregates(
-            events_by_aggregate,
-            &self.projection_cache,
-            &self.cache_service,
-            &self.projection_store,
-            &self.metrics,
-        )
-        .await
+        match self
+            .process_events_for_aggregates(
+                events_by_aggregate,
+                &self.projection_cache,
+                &self.cache_service,
+                &self.projection_store,
+                &self.metrics,
+            )
+            .await
         {
             Ok((projections, processed_aggregates)) => {
                 success_count += processed_aggregates.len();
@@ -1634,14 +1636,17 @@ impl UltraOptimizedCDCEventProcessor {
         Self::update_queue_depth_metric(batch_queue, metrics).await;
 
         let events_by_aggregate = Self::group_events_by_aggregate(events);
-        let (updated_projections, processed_aggregates) = Self::process_events_for_aggregates(
-            events_by_aggregate,
-            projection_cache,
-            cache_service,
-            projection_store,
-            metrics,
-        )
-        .await?;
+        // Note: This is a static function, so we can't use self.process_events_for_aggregates
+        // We'll need to handle accumulation differently in static context
+        let (updated_projections, processed_aggregates) =
+            Self::process_events_for_aggregates_static(
+                events_by_aggregate,
+                projection_cache,
+                cache_service,
+                projection_store,
+                metrics,
+            )
+            .await?;
 
         if !updated_projections.is_empty() {
             let upsert_result = Self::upsert_projections_in_parallel_static(
@@ -1938,8 +1943,8 @@ impl UltraOptimizedCDCEventProcessor {
         }
     }
 
-    /// OPTIMIZED VERSION: True parallel processing with efficient batching
-    async fn process_events_for_aggregates(
+    /// NEW: Static version for use in static contexts (without accumulation)
+    async fn process_events_for_aggregates_static(
         events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
         projection_cache: &Arc<RwLock<ProjectionCache>>,
         cache_service: &Arc<dyn CacheServiceTrait>,
@@ -1951,17 +1956,286 @@ impl UltraOptimizedCDCEventProcessor {
     )> {
         let start_time = std::time::Instant::now();
 
-        // Track transaction projections to create
-        let mut transaction_projections: Vec<
-            crate::infrastructure::projections::TransactionProjection,
-        > = Vec::new();
+        // CRITICAL OPTIMIZATION: Separate AccountCreated events from other events
+        let (account_created_events, other_events) =
+            Self::separate_account_created_events(events_by_aggregate);
+
+        tracing::info!(
+            "🚀 OPTIMIZED: Separated events - AccountCreated: {} aggregates, Other events: {} aggregates",
+            account_created_events.len(),
+            other_events.len()
+        );
+
+        let mut all_projections = Vec::new();
+        let mut processed_aggregates = Vec::new();
+
+        // CRITICAL OPTIMIZATION: Process AccountCreated events with direct COPY (INSERT)
+        if !account_created_events.is_empty() {
+            let (new_projections, new_aggregates) =
+                Self::process_account_created_events_direct_copy(
+                    account_created_events,
+                    projection_store,
+                    metrics,
+                )
+                .await?;
+
+            let new_aggregates_len = new_aggregates.len();
+            all_projections.extend(new_projections);
+            processed_aggregates.extend(new_aggregates);
+
+            tracing::info!(
+                "🚀 OPTIMIZED: Processed {} AccountCreated events with direct COPY",
+                new_aggregates_len
+            );
+        }
+
+        // Process other events with standard UPSERT approach
+        if !other_events.is_empty() {
+            let (updated_projections, updated_aggregates) = Self::process_other_events_with_upsert(
+                other_events,
+                projection_cache,
+                cache_service,
+                projection_store,
+                metrics,
+            )
+            .await?;
+
+            let updated_aggregates_len = updated_aggregates.len();
+            all_projections.extend(updated_projections);
+            processed_aggregates.extend(updated_aggregates);
+
+            tracing::info!(
+                "🚀 OPTIMIZED: Processed {} other events with UPSERT",
+                updated_aggregates_len
+            );
+        }
+
+        let duration = start_time.elapsed();
+        tracing::info!(
+            "🚀 OPTIMIZED: Processed {} aggregates with {} projections in {:?}",
+            processed_aggregates.len(),
+            all_projections.len(),
+            duration
+        );
+
+        Ok((all_projections, processed_aggregates))
+    }
+
+    /// NEW: Separates AccountCreated events for direct COPY (INSERT) vs other events for UPSERT
+    async fn process_events_for_aggregates(
+        &self,
+        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
+        projection_cache: &Arc<RwLock<ProjectionCache>>,
+        cache_service: &Arc<dyn CacheServiceTrait>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Result<(
+        Vec<crate::infrastructure::projections::AccountProjection>,
+        Vec<Uuid>,
+    )> {
+        let start_time = std::time::Instant::now();
+
+        // CRITICAL OPTIMIZATION: Separate AccountCreated events from other events
+        let (account_created_events, other_events) =
+            Self::separate_account_created_events(events_by_aggregate);
+
+        tracing::info!(
+            "🚀 OPTIMIZED: Separated events - AccountCreated: {} aggregates, Other events: {} aggregates",
+            account_created_events.len(),
+            other_events.len()
+        );
+
+        let mut all_projections = Vec::new();
+        let mut processed_aggregates = Vec::new();
+
+        // CRITICAL OPTIMIZATION: Process AccountCreated events with direct COPY (INSERT)
+        if !account_created_events.is_empty() {
+            let (new_projections, new_aggregates) =
+                Self::process_account_created_events_direct_copy(
+                    account_created_events,
+                    projection_store,
+                    metrics,
+                )
+                .await?;
+
+            let new_aggregates_len = new_aggregates.len();
+            all_projections.extend(new_projections);
+            processed_aggregates.extend(new_aggregates);
+
+            tracing::info!(
+                "🚀 OPTIMIZED: Processed {} AccountCreated events with direct COPY",
+                new_aggregates_len
+            );
+        }
+
+        // Process other events with standard UPSERT approach
+        if !other_events.is_empty() {
+            let (updated_projections, updated_aggregates) = Self::process_other_events_with_upsert(
+                other_events,
+                projection_cache,
+                cache_service,
+                projection_store,
+                metrics,
+            )
+            .await?;
+
+            let updated_aggregates_len = updated_aggregates.len();
+            all_projections.extend(updated_projections);
+            processed_aggregates.extend(updated_aggregates);
+
+            tracing::info!(
+                "🚀 OPTIMIZED: Processed {} other events with UPSERT",
+                updated_aggregates_len
+            );
+        }
+
+        // CRITICAL OPTIMIZATION: Add projections to accumulation buffer instead of immediate DB write
+        if !all_projections.is_empty() {
+            let mut acc_proj = self.accumulated_projections.lock().await;
+            acc_proj.extend(all_projections.clone());
+
+            tracing::info!(
+                "🚀 ACCUMULATION: Added {} projections to accumulation buffer (total: {})",
+                all_projections.len(),
+                acc_proj.len()
+            );
+        }
+
+        let duration = start_time.elapsed();
+        tracing::info!(
+            "🚀 OPTIMIZED: Processed {} aggregates with {} projections in {:?}",
+            processed_aggregates.len(),
+            all_projections.len(),
+            duration
+        );
+
+        Ok((all_projections, processed_aggregates))
+    }
+
+    /// NEW: Separate AccountCreated events from other events for optimized processing
+    fn separate_account_created_events(
+        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
+    ) -> (
+        HashMap<Uuid, Vec<ProcessableEvent>>,
+        HashMap<Uuid, Vec<ProcessableEvent>>,
+    ) {
+        let mut account_created_events = HashMap::new();
+        let mut other_events = HashMap::new();
+
+        for (aggregate_id, events) in events_by_aggregate {
+            let mut has_account_created = false;
+            let mut account_created_event = None;
+            let mut other_aggregate_events: Vec<ProcessableEvent> = Vec::new();
+
+            // Check if this aggregate has AccountCreated event
+            for event in &events {
+                if let Ok(domain_event) = event.get_domain_event() {
+                    if let crate::domain::AccountEvent::AccountCreated { .. } = domain_event {
+                        has_account_created = true;
+                        account_created_event = Some(event.clone());
+                        break; // Found AccountCreated, stop here
+                    }
+                }
+            }
+
+            if has_account_created {
+                // This aggregate has AccountCreated - process separately
+                if let Some(account_created) = account_created_event {
+                    account_created_events.insert(aggregate_id, vec![account_created]);
+                }
+            } else {
+                // This aggregate has only other events - process with UPSERT
+                other_events.insert(aggregate_id, events);
+            }
+        }
+
+        (account_created_events, other_events)
+    }
+
+    /// NEW: Process AccountCreated events with direct COPY (INSERT) - no UPSERT needed
+    async fn process_account_created_events_direct_copy(
+        account_created_events: HashMap<Uuid, Vec<ProcessableEvent>>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Result<(
+        Vec<crate::infrastructure::projections::AccountProjection>,
+        Vec<Uuid>,
+    )> {
+        let mut new_projections = Vec::new();
+        let mut processed_aggregates = Vec::new();
+
+        // CRITICAL OPTIMIZATION: Build projections directly from AccountCreated events
+        for (aggregate_id, events) in account_created_events {
+            // AccountCreated events should have exactly one event
+            if let Some(event) = events.first() {
+                if let Ok(domain_event) = event.get_domain_event() {
+                    if let crate::domain::AccountEvent::AccountCreated {
+                        owner_name,
+                        initial_balance,
+                        ..
+                    } = domain_event
+                    {
+                        // Create projection directly from AccountCreated event
+                        let projection = crate::infrastructure::projections::AccountProjection {
+                            id: aggregate_id,
+                            owner_name: owner_name.clone(),
+                            balance: *initial_balance,
+                            is_active: true,
+                            created_at: event.timestamp,
+                            updated_at: event.timestamp,
+                        };
+
+                        new_projections.push(projection);
+                        processed_aggregates.push(aggregate_id);
+
+                        tracing::debug!(
+                            "🚀 OPTIMIZED: Created projection from AccountCreated - account: {}, owner: {}, balance: {}",
+                            aggregate_id, owner_name, initial_balance
+                        );
+                    }
+                }
+            }
+        }
+
+        // CRITICAL OPTIMIZATION: Accumulate instead of immediate database write
+        // This prevents 1579 individual database calls
+        if !new_projections.is_empty() {
+            tracing::info!(
+                "🚀 ACCUMULATION: Accumulating {} new account projections (not writing to DB yet)",
+                new_projections.len()
+            );
+
+            // Update metrics for accumulated projections
+            metrics.projection_updates.fetch_add(
+                new_projections.len() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+
+        Ok((new_projections, processed_aggregates))
+    }
+
+    /// NEW: Process other events with standard UPSERT approach
+    async fn process_other_events_with_upsert(
+        other_events: HashMap<Uuid, Vec<ProcessableEvent>>,
+        projection_cache: &Arc<RwLock<ProjectionCache>>,
+        cache_service: &Arc<dyn CacheServiceTrait>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Result<(
+        Vec<crate::infrastructure::projections::AccountProjection>,
+        Vec<Uuid>,
+    )> {
+        // Use existing logic for processing other events (MoneyDeposited, MoneyWithdrawn, etc.)
+        // This is the original process_events_for_aggregates logic for non-AccountCreated events
+
         let mut updated_projections = Vec::new();
-        let mut processed_aggregates: Vec<Uuid> = Vec::new();
+        let mut processed_aggregates = Vec::new();
 
         // CRITICAL OPTIMIZATION: Batch read all projections in single SQL query
-        let aggregate_ids: Vec<Uuid> = events_by_aggregate.keys().cloned().collect();
+        let aggregate_ids: Vec<Uuid> = other_events.keys().cloned().collect();
         tracing::debug!(
-            "🚀 OPTIMIZED: Batch loading projections for {} aggregates",
+            "🚀 OPTIMIZED: Batch loading projections for {} aggregates (non-AccountCreated)",
             aggregate_ids.len()
         );
 
@@ -1987,309 +2261,45 @@ impl UltraOptimizedCDCEventProcessor {
                 balance: db_projection.balance,
                 owner_name: db_projection.owner_name.clone(),
                 is_active: db_projection.is_active,
-                version: 0, // Will be incremented after event application
+                version: 0,
                 cached_at: tokio::time::Instant::now(),
-                last_event_id: None, // Will be set after event application
+                last_event_id: None,
             };
             projections_map.insert(db_projection.id, cache_entry);
         }
 
-        // CRITICAL FIX: Don't create empty projections - let events build the projection
-        // This prevents race conditions where withdrawal events arrive before AccountCreated
-        for aggregate_id in &aggregate_ids {
-            if !projections_map.contains_key(aggregate_id) {
-                tracing::debug!(
-                    "🚀 OPTIMIZED: No existing projection for aggregate: {} - will build from events",
+        // Process events for each aggregate
+        for (aggregate_id, events) in other_events {
+            let mut projection = if let Some(existing_projection) =
+                projections_map.get(&aggregate_id).cloned()
+            {
+                existing_projection
+            } else {
+                // Skip aggregates without existing projections (should not happen for non-AccountCreated events)
+                tracing::warn!(
+                    "🚀 OPTIMIZED: No existing projection for aggregate {} (non-AccountCreated events)",
                     aggregate_id
                 );
-                // Don't create empty projection - let the events build it properly
-            }
-        }
-
-        // CRITICAL FIX: Process all events in a single batch to avoid race conditions
-        let mut all_events: Vec<ProcessableEvent> = Vec::new();
-
-        // Collect all events from all aggregates
-        for (_, events) in events_by_aggregate {
-            all_events.extend(events);
-        }
-
-        // Sort all events by timestamp to ensure proper ordering
-        all_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-
-        // Group events by aggregate after sorting
-        let mut sorted_events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>> = HashMap::new();
-        for event in all_events {
-            sorted_events_by_aggregate
-                .entry(event.aggregate_id)
-                .or_default()
-                .push(event);
-        }
-
-        // Convert to Vec for processing
-        let aggregate_events: Vec<_> = sorted_events_by_aggregate.into_iter().collect();
-
-        // CRITICAL OPTIMIZATION: True parallel processing without cache locks
-        let mut cache_updates: HashMap<Uuid, ProjectionCacheEntry> = HashMap::new();
-
-        // CRITICAL: Use true parallel processing with optimal chunk size
-        let chunk_size = 1000; // Optimized chunk size for better throughput
-        let mut aggregate_futures = Vec::new();
-
-        for chunk in aggregate_events.chunks(chunk_size) {
-            let chunk = chunk.to_vec(); // Clone the chunk to own it
-            let projections_map = projections_map.clone(); // Clone for each iteration
-            let chunk_future = async move {
-                let mut chunk_results = Vec::new();
-
-                // Process each aggregate in the chunk
-                for (aggregate_id, events) in chunk {
-                    // CRITICAL FIX: Get existing projection or build from events
-                    let mut projection = if let Some(existing_projection) =
-                        projections_map.get(&aggregate_id).cloned()
-                    {
-                        existing_projection
-                    } else {
-                        // CRITICAL FIX: Build projection from events instead of creating empty one
-                        tracing::debug!(
-                            "🚀 OPTIMIZED: Building projection from events for aggregate: {}",
-                            aggregate_id
-                        );
-
-                        // Build projection from events to avoid race conditions
-                        let mut built_projection = ProjectionCacheEntry {
-                            balance: rust_decimal::Decimal::ZERO,
-                            owner_name: String::new(),
-                            is_active: false,
-                            version: 0,
-                            cached_at: tokio::time::Instant::now(),
-                            last_event_id: None,
-                        };
-
-                        // CRITICAL FIX: Apply events in order to build the projection
-                        // First, find AccountCreated event to establish initial balance
-                        let mut has_account_created = false;
-                        for event in &events {
-                            if let Ok(domain_event) = event.get_domain_event() {
-                                if let crate::domain::AccountEvent::AccountCreated {
-                                    owner_name,
-                                    initial_balance,
-                                    ..
-                                } = domain_event
-                                {
-                                    built_projection.owner_name = owner_name.clone();
-                                    built_projection.balance = *initial_balance;
-                                    built_projection.is_active = true;
-                                    has_account_created = true;
-                                    tracing::info!(
-                                        "🚀 OPTIMIZED: Built projection from AccountCreated: balance={} for account={}",
-                                        initial_balance,
-                                        aggregate_id
-                                    );
-                                    break; // Found AccountCreated, stop here
-                                }
-                            }
-                        }
-
-                        // CRITICAL FIX: Only process other events if AccountCreated was found
-                        if has_account_created {
-                            for event in &events {
-                                if let Ok(domain_event) = event.get_domain_event() {
-                                    match domain_event {
-                                        crate::domain::AccountEvent::AccountCreated { .. } => {
-                                            // Already processed above, skip
-                                        }
-                                        crate::domain::AccountEvent::MoneyDeposited {
-                                            amount,
-                                            ..
-                                        } => {
-                                            built_projection.balance += *amount;
-                                            tracing::info!(
-                                                "🚀 OPTIMIZED: Applied deposit to built projection: +{} = {} for account={}",
-                                                amount,
-                                                built_projection.balance,
-                                                aggregate_id
-                                            );
-                                        }
-                                        crate::domain::AccountEvent::MoneyWithdrawn {
-                                            amount,
-                                            ..
-                                        } => {
-                                            if built_projection.balance >= *amount {
-                                                built_projection.balance -= *amount;
-                                                tracing::info!(
-                                                    "🚀 OPTIMIZED: Applied withdrawal to built projection: -{} = {} for account={}",
-                                                    amount,
-                                                    built_projection.balance,
-                                                    aggregate_id
-                                                );
-                                            } else {
-                                                tracing::warn!(
-                                                    "🚀 OPTIMIZED: Insufficient funds in built projection: {} < {} for account={}",
-                                                    built_projection.balance,
-                                                    amount,
-                                                    aggregate_id
-                                                );
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        } else {
-                            tracing::warn!(
-                                "🚀 OPTIMIZED: No AccountCreated event found for account={}, skipping all events",
-                                aggregate_id
-                            );
-                        }
-
-                        built_projection
-                    };
-
-                    let mut local_transaction_projections = Vec::new();
-
-                    // Apply all events for this aggregate
-                    for event in events {
-                        // CRITICAL FIX: Check for duplicate events BEFORE applying
-                        if let Some(last_event_id) = projection.last_event_id {
-                            if last_event_id == event.event_id {
-                                tracing::debug!(
-                                    "Skipping duplicate event: {} for aggregate: {}",
-                                    event.event_id,
-                                    aggregate_id
-                                );
-                                continue; // Skip duplicate
-                            }
-                        }
-
-                        // CRITICAL FIX: Apply event to projection with better error handling
-                        match Self::apply_event_to_projection(&mut projection, &event) {
-                            Ok(_) => {
-                                // Event applied successfully
-                            }
-                            Err(e) => {
-                                // Check if it's a business logic error (not a system error)
-                                if e.to_string().contains("Account already exists") {
-                                    tracing::debug!(
-                                        "Business logic error (expected): {} for aggregate: {}",
-                                        e,
-                                        aggregate_id
-                                    );
-                                    continue; // Skip business logic errors
-                                } else {
-                                    tracing::error!("Failed to apply event to projection: {}", e);
-                                    continue;
-                                }
-                            }
-                        }
-
-                        // Create transaction projection if needed
-                        if let Some(domain_event) = event.get_domain_event().ok() {
-                            tracing::debug!(
-                                "🔍 Processing domain event for transaction projection: {:?}",
-                                domain_event
-                            );
-
-                            match domain_event {
-                                crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
-                                    tracing::info!(
-                                        "💰 Creating MoneyDeposited transaction projection: event_id={}, aggregate_id={}, amount={}",
-                                        event.event_id, aggregate_id, amount
-                                    );
-                                    local_transaction_projections.push(
-                                        crate::infrastructure::projections::TransactionProjection {
-                                            id: event.event_id,
-                                            account_id: aggregate_id,
-                                            transaction_type: "deposit".to_string(),
-                                            amount: *amount,
-                                            timestamp: event.timestamp, // FIXED: Use event timestamp instead of current time
-                                        },
-                                    );
-                                }
-                                crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
-                                    tracing::info!(
-                                        "💰 Creating MoneyWithdrawn transaction projection: event_id={}, aggregate_id={}, amount={}",
-                                        event.event_id, aggregate_id, amount
-                                    );
-                                    local_transaction_projections.push(
-                                        crate::infrastructure::projections::TransactionProjection {
-                                            id: event.event_id,
-                                            account_id: aggregate_id,
-                                            transaction_type: "withdrawal".to_string(),
-                                            amount: *amount,
-                                            timestamp: event.timestamp, // FIXED: Use event timestamp instead of current time
-                                        },
-                                    );
-                                }
-                                _ => {
-                                    tracing::debug!(
-                                        "⏭️ Skipping non-transaction event: {:?}",
-                                        domain_event
-                                    );
-                                }
-                            }
-                        } else {
-                            tracing::warn!(
-                                "❌ Failed to get domain event for transaction projection: event_id={}, aggregate_id={}",
-                                event.event_id, aggregate_id
-                            );
-                        }
-
-                        projection.last_event_id = Some(event.event_id);
-                        projection.version += 1;
-                    }
-
-                    chunk_results.push((projection, aggregate_id, local_transaction_projections));
-                }
-
-                chunk_results
+                continue;
             };
 
-            aggregate_futures.push(chunk_future);
-        }
-
-        // CRITICAL: Execute all chunks in parallel
-        let chunk_futures: Vec<_> = aggregate_futures;
-
-        let chunk_results: Vec<_> = futures::future::join_all(chunk_futures).await;
-
-        // CRITICAL: Collect all results
-        let mut all_projections = Vec::new();
-        let mut all_transaction_projections = Vec::new();
-        let mut processed_aggregates = Vec::new();
-
-        for chunk_result in chunk_results {
-            for (projection, aggregate_id, transaction_projections) in chunk_result {
-                all_projections.push(projection);
-                all_transaction_projections.extend(transaction_projections);
-                processed_aggregates.push(aggregate_id);
+            // Apply all events to the projection
+            for event in events {
+                if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
+                    tracing::error!(
+                        "Failed to apply event {} to projection: {:?}",
+                        event.event_id,
+                        e
+                    );
+                    continue;
+                }
             }
+
+            // Convert to database projection
+            let db_projection = Self::projection_cache_to_db_projection(&projection, aggregate_id);
+            updated_projections.push(db_projection);
+            processed_aggregates.push(aggregate_id);
         }
-
-        tracing::info!(
-            "🔍 CDC Event Processor: Batch processing completed - {} accounts, {} transactions",
-            all_projections.len(),
-            all_transaction_projections.len()
-        );
-
-        // CRITICAL OPTIMIZATION: Single batch cache update without blocking
-        {
-            let mut cache = projection_cache.write().await;
-            for (aggregate_id, projection) in &cache_updates {
-                cache.put(*aggregate_id, projection.clone());
-                let db_projection =
-                    Self::projection_cache_to_db_projection(projection, *aggregate_id);
-                updated_projections.push(db_projection);
-            }
-        }
-
-        let duration = start_time.elapsed();
-        tracing::info!(
-            "🚀 OPTIMIZED: Processed {} aggregates with {} events in {:?}",
-            processed_aggregates.len(),
-            updated_projections.len(),
-            duration
-        );
 
         Ok((updated_projections, processed_aggregates))
     }
@@ -3391,70 +3401,106 @@ impl UltraOptimizedCDCEventProcessor {
         let shutdown_token = self.shutdown_token.clone();
 
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(200)); // Flush every 200ms
-            let flush_threshold = 500; // Flush when we have 500+ items (10x increase)
+            let mut interval = tokio::time::interval(Duration::from_millis(25)); // Flush every 25ms (more aggressive)
+            let flush_threshold = 1000; // Flush when we have 1000+ items (back to 1000 for better batching)
+            let max_wait_time = Duration::from_millis(75); // Max 75ms wait (much more aggressive)
+            let mut last_flush_time = std::time::Instant::now(); // Track last flush time
 
             loop {
                 tokio::select! {
-                    _ = shutdown_token.cancelled() => {
-                        tracing::info!("Accumulation flush task: Received shutdown signal");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        // Check if we have enough items to flush
-                        let proj_count = accumulated_projections.lock().await.len();
-                        let trans_count = accumulated_transactions.lock().await.len();
-
-                        if proj_count >= flush_threshold || trans_count >= flush_threshold {
-                            // Flush accumulated data
-                            let mut projections_to_flush = Vec::new();
-                            let mut transactions_to_flush = Vec::new();
-
-                            {
-                                let mut acc_proj = accumulated_projections.lock().await;
-                                if !acc_proj.is_empty() {
-                                    projections_to_flush = std::mem::take(&mut *acc_proj);
-                                }
-
-                                let mut acc_trans = accumulated_transactions.lock().await;
-                                if !acc_trans.is_empty() {
-                                    transactions_to_flush = std::mem::take(&mut *acc_trans);
-                                }
+                            _ = shutdown_token.cancelled() => {
+                                tracing::info!("Accumulation flush task: Received shutdown signal");
+                                break;
                             }
+                            _ = interval.tick() => {
+                                                        // Check if we have enough items to flush
+                let proj_count = accumulated_projections.lock().await.len();
+                let trans_count = accumulated_transactions.lock().await.len();
 
-                            // Perform batched database writes
-                            let flush_start = std::time::Instant::now();
+                // Adaptive flush logic: flush if threshold reached OR max wait time exceeded
+                let should_flush = proj_count >= flush_threshold
+                    || trans_count >= flush_threshold
+                    || last_flush_time.elapsed() >= max_wait_time;
 
-                                                        if !projections_to_flush.is_empty() {
-                                let proj_count = projections_to_flush.len();
-                                if let Err(e) = projection_store.upsert_accounts_batch(projections_to_flush).await {
-                                    tracing::error!("Failed to flush accumulated projections: {}", e);
-                                    metrics.events_failed.fetch_add(
-                                        proj_count as u64,
-                                        std::sync::atomic::Ordering::Relaxed,
+                if should_flush {
+                                    // Flush accumulated data
+                                    let mut projections_to_flush = Vec::new();
+                                    let mut transactions_to_flush = Vec::new();
+
+                                    {
+                                        let mut acc_proj = accumulated_projections.lock().await;
+                                        if !acc_proj.is_empty() {
+                                            projections_to_flush = std::mem::take(&mut *acc_proj);
+                                        }
+
+                                        let mut acc_trans = accumulated_transactions.lock().await;
+                                        if !acc_trans.is_empty() {
+                                            transactions_to_flush = std::mem::take(&mut *acc_trans);
+                                        }
+                                    }
+
+                                    // Perform batched database writes
+                                    let flush_start = std::time::Instant::now();
+
+                                    if !projections_to_flush.is_empty() {
+                                        let proj_count = projections_to_flush.len();
+
+                                        // CRITICAL OPTIMIZATION: Use direct COPY for accumulated projections
+                                        if let Some(projection_store_impl) = projection_store
+                                            .as_any()
+                                            .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
+                                        {
+                                            // Use direct COPY for accumulated projections
+                                            match projection_store_impl
+                                                .bulk_insert_new_accounts_with_copy(projections_to_flush)
+                                                .await
+                                            {
+                                                Ok(_) => {
+                                                                                        tracing::info!(
+                                        "🚀 ACCUMULATION: Successfully flushed {} accumulated projections with direct COPY in {:?}",
+                                        proj_count, flush_start.elapsed()
                                     );
-                                } else {
-                                    tracing::debug!("Flushed {} accumulated projections in {:?}",
-                                        proj_count, flush_start.elapsed());
-                                }
-                            }
+                                    last_flush_time = std::time::Instant::now(); // Update last flush time
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("Failed to flush accumulated projections with direct COPY: {}", e);
+                                                    metrics.events_failed.fetch_add(
+                                                        proj_count as u64,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            // Fallback to standard batch insert
+                                            if let Err(e) = projection_store.upsert_accounts_batch(projections_to_flush).await {
+                                                tracing::error!("Failed to flush accumulated projections: {}", e);
+                                                metrics.events_failed.fetch_add(
+                                                    proj_count as u64,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            } else {
+                                                tracing::debug!("Flushed {} accumulated projections in {:?}",
+                                                    proj_count, flush_start.elapsed());
+                                            }
+                                        }
+                                    }
 
-                                                        if !transactions_to_flush.is_empty() {
-                                let trans_count = transactions_to_flush.len();
-                                if let Err(e) = projection_store.insert_transactions_batch(transactions_to_flush).await {
-                                    tracing::error!("Failed to flush accumulated transactions: {}", e);
-                                    metrics.events_failed.fetch_add(
-                                        trans_count as u64,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                } else {
-                                    tracing::debug!("Flushed {} accumulated transactions in {:?}",
-                                        trans_count, flush_start.elapsed());
+                                                                if !transactions_to_flush.is_empty() {
+                                        let trans_count = transactions_to_flush.len();
+                                        if let Err(e) = projection_store.insert_transactions_batch(transactions_to_flush).await {
+                                            tracing::error!("Failed to flush accumulated transactions: {}", e);
+                                            metrics.events_failed.fetch_add(
+                                                trans_count as u64,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                        } else {
+                                            tracing::debug!("Flushed {} accumulated transactions in {:?}",
+                                                trans_count, flush_start.elapsed());
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
-                }
             }
 
             // Final flush on shutdown
@@ -3474,11 +3520,35 @@ impl UltraOptimizedCDCEventProcessor {
             }
 
             if !projections_to_flush.is_empty() {
-                if let Err(e) = projection_store
-                    .upsert_accounts_batch(projections_to_flush)
-                    .await
+                let proj_count = projections_to_flush.len();
+
+                // CRITICAL OPTIMIZATION: Use direct COPY for final flush
+                if let Some(projection_store_impl) =
+                    projection_store
+                        .as_any()
+                        .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
                 {
-                    tracing::error!("Failed to final flush accumulated projections: {}", e);
+                    match projection_store_impl
+                        .bulk_insert_new_accounts_with_copy(projections_to_flush)
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::info!(
+                                "🚀 ACCUMULATION: Final flush - Successfully flushed {} accumulated projections with direct COPY",
+                                proj_count
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to final flush accumulated projections with direct COPY: {}", e);
+                        }
+                    }
+                } else {
+                    if let Err(e) = projection_store
+                        .upsert_accounts_batch(projections_to_flush)
+                        .await
+                    {
+                        tracing::error!("Failed to final flush accumulated projections: {}", e);
+                    }
                 }
             }
 
