@@ -1026,6 +1026,23 @@ impl CDCConsumer {
             kafka_config.bootstrap_servers
         );
 
+        // Resolve CDC topic if empty or set to "auto"
+        let topic_to_subscribe = {
+            let configured = self.cdc_topic.trim().to_string();
+            if !configured.is_empty() && configured.to_lowercase() != "auto" {
+                configured
+            } else if let Ok(env_topic) = std::env::var("CDC_TOPIC") {
+                env_topic
+            } else {
+                let cfg = self.kafka_consumer.get_config();
+                if !cfg.topic_prefix.is_empty() {
+                    format!("{}.public.kafka_outbox_cdc", cfg.topic_prefix)
+                } else {
+                    "banking-es.public.kafka_outbox_cdc".to_string()
+                }
+            }
+        };
+        self.cdc_topic = topic_to_subscribe.clone();
         // Subscribe to CDC topic with retry logic
         tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
         let max_subscription_retries = 5; // Increased retries
@@ -1043,40 +1060,65 @@ impl CDCConsumer {
                         "CDCConsumer: ✅ Successfully subscribed to topic: {}",
                         self.cdc_topic
                     );
-
-                    // Wait a moment for the consumer to join the group
-                    tracing::info!("CDCConsumer: Waiting for consumer to join group...");
-                    tokio::time::sleep(Duration::from_secs(30)).await; // 5'ten 30'a çıkarıldı
-
-                    // Log consumer group status
-                    tracing::info!("CDCConsumer: Consumer group join completed");
+                    // Force consumer group join by polling a few times
+                    tracing::info!("CDCConsumer: Forcing consumer group join by polling...");
+                    let mut join_attempts = 0;
+                    let max_join_attempts = 10;
+                    let mut join_stream = self.kafka_consumer.stream();
+                    use futures::StreamExt;
+                    while join_attempts < max_join_attempts {
+                        match join_stream.next().await {
+                            Some(Ok(_)) => {
+                                tracing::info!(
+                                    "CDCConsumer: ✅ Consumer group join successful after {} attempts",
+                                    join_attempts + 1
+                                );
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    "CDCConsumer: Poll error during join attempt {}: {:?}",
+                                    join_attempts + 1,
+                                    e
+                                );
+                            }
+                            None => {
+                                tracing::debug!(
+                                    "CDCConsumer: No message during join attempt {}",
+                                    join_attempts + 1
+                                );
+                            }
+                        }
+                        join_attempts += 1;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    if join_attempts >= max_join_attempts {
+                        tracing::warn!(
+                            "CDCConsumer: Consumer group join may not be complete after {} attempts",
+                            max_join_attempts
+                        );
+                    } else {
+                        tracing::info!("CDCConsumer: Consumer group join completed");
+                    }
                     break;
                 }
                 Err(e) => {
                     subscription_retries += 1;
                     tracing::error!(
-                        "CDCConsumer: ❌ Failed to subscribe to topic: {} (attempt {}/{}): {}",
+                        "CDCConsumer: ❌ Failed to subscribe to topic: {} (attempt {}/{}) : {}",
                         self.cdc_topic,
                         subscription_retries,
                         max_subscription_retries,
                         e
                     );
-
                     if subscription_retries >= max_subscription_retries {
-                        tracing::error!(
-                            "CDCConsumer: Failed to subscribe to CDC topic after {} attempts: {}",
-                            max_subscription_retries,
-                            e
-                        );
                         return Err(anyhow::anyhow!(
                             "Failed to subscribe to CDC topic after {} attempts: {}",
                             max_subscription_retries,
                             e
                         ));
                     }
-
-                    // Wait before retry
-                    tokio::time::sleep(Duration::from_secs(30)).await; // 5'ten 30'a çıkarıldı
+                    tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             }
         }

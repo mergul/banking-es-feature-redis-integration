@@ -2475,7 +2475,7 @@ impl EventStore {
             .await?;
 
         // Convert to binary format in one go
-        let binary_data = Event::batch_to_binary(events_by_aggregate, &versions_map)?;
+        let binary_data = Event::batch_to_binary(events_by_aggregate.clone(), &versions_map)?;
 
         // Execute ultra-fast binary COPY
         let copy_statement = r#"
@@ -2498,8 +2498,16 @@ impl EventStore {
             .await
             .map_err(EventStoreError::DatabaseError)?;
 
-        // Update version cache efficiently
-        // Event::update_version_cache_from_binary_data(&binary_data).await?;
+        // Update version cache efficiently with new highest versions
+        for (aggregate_id, events, _) in &events_by_aggregate {
+            if !events.is_empty() {
+                // Get the starting version from the map we already fetched
+                let start_version = versions_map.get(aggregate_id).unwrap_or(&0);
+                // The new max version is the starting version plus the number of new events
+                let new_max_version = start_version + events.len() as i64;
+                self.version_cache.insert(*aggregate_id, new_max_version);
+            }
+        }
 
         // Update metrics
         self.metrics
@@ -2529,50 +2537,48 @@ impl EventStore {
             return Ok(HashMap::new());
         }
 
+        // First, leverage the in-process cache to avoid unnecessary DB work
         let mut result = HashMap::with_capacity(aggregate_ids.len());
         let mut uncached_aggregates = Vec::new();
 
-        // Check cache first
         for &aggregate_id in aggregate_ids {
             if let Some(cached_version) = self.version_cache.get(&aggregate_id) {
                 result.insert(aggregate_id, *cached_version);
+                self.metrics
+                    .cache_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             } else {
                 uncached_aggregates.push(aggregate_id);
+                self.metrics
+                    .cache_misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
-        if uncached_aggregates.is_empty() {
-            return Ok(result);
-        }
-
-        // Use optimized query with transaction for consistency
-        let query = sqlx::query!(
-            r#"
-            SELECT aggregate_id, MAX(version) as version
-            FROM events
-            WHERE aggregate_id = ANY($1)
-            GROUP BY aggregate_id
-            "#,
-            &uncached_aggregates
-        );
-
-        let rows = query
+        // Only query DB for uncached aggregates
+        if !uncached_aggregates.is_empty() {
+            let rows = sqlx::query!(
+                r#"
+                SELECT a.id as "aggregate_id!: Uuid", COALESCE(ev.version, 0) as "version!: i64"
+                FROM UNNEST($1::uuid[]) a(id)
+                LEFT JOIN LATERAL (
+                    SELECT version
+                    FROM events
+                    WHERE aggregate_id = a.id
+                    ORDER BY version DESC
+                    LIMIT 1
+                ) ev ON TRUE
+                "#,
+                &uncached_aggregates
+            )
             .fetch_all(&mut **tx)
             .await
             .map_err(EventStoreError::DatabaseError)?;
 
-        // Process results and update cache
-        for row in rows {
-            let version = row.version.unwrap_or(0);
-            result.insert(row.aggregate_id, version);
-            self.version_cache.insert(row.aggregate_id, version);
-        }
-
-        // Set version 0 for new aggregates
-        for aggregate_id in uncached_aggregates {
-            if !result.contains_key(&aggregate_id) {
-                result.insert(aggregate_id, 0);
-                self.version_cache.insert(aggregate_id, 0);
+            // Update cache and result with DB results
+            for row in rows {
+                result.insert(row.aggregate_id, row.version);
+                self.version_cache.insert(row.aggregate_id, row.version);
             }
         }
 

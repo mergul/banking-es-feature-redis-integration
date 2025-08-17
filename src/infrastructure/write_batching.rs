@@ -23,8 +23,8 @@ use crate::infrastructure::redis_aggregate_lock::{
 use rand::Rng;
 
 const NUM_PARTITIONS: usize = 8; // Increased from 4 to 8 to reduce partition conflicts
-const DEFAULT_BATCH_SIZE: usize = 1000;
-const CREATE_BATCH_SIZE: usize = 1000; // Optimized batch size for create operations
+const DEFAULT_BATCH_SIZE: usize = 2000;
+const CREATE_BATCH_SIZE: usize = 2000; // Optimized batch size for create operations
 const CREATE_PARTITION_ID: usize = 0; // Dedicated partition for create operations
 const WRITE_POOL_SIZE: usize = 400; // Optimized write pool size for single pool usage
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 25;
@@ -2327,8 +2327,8 @@ impl WriteBatchingService {
         config: &WriteBatchingConfig,
         partition_id: Option<usize>,
     ) -> Vec<(Uuid, WriteOperationResult)> {
-        println!(
-            "[DEBUG] execute_batch: Starting batch with {} operations",
+        debug!(
+            "execute_batch: Starting batch with {} operations",
             batch.operations.len()
         );
         let mut results = Vec::new();
@@ -2351,8 +2351,8 @@ impl WriteBatchingService {
                 error!("Failed to start bulk mode: {}", e);
                 // Bulk mode başarısız olsa bile normal modda devam et
             } else {
-                info!(
-                    "🚀 Bulk mode activated for batch with {} operations",
+                debug!(
+                    "Bulk mode activated for batch with {} operations",
                     batch.operations.len()
                 );
             }
@@ -2704,6 +2704,81 @@ impl WriteBatchingService {
         };
 
         (vec![event], vec![outbox_message], account_id)
+    }
+    /// ✅ Schedule orphaned cleanup for outbox messages when events fail
+    async fn schedule_orphaned_cleanup(
+        write_pool: Arc<PgPool>,
+        outbox_messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
+    ) -> Result<()> {
+        // Create cleanup service
+        let cleanup_config =
+            crate::infrastructure::outbox_cleanup_service::CleanupConfig::default();
+        let cleaner = crate::infrastructure::outbox_cleanup_service::OutboxCleaner::new(
+            (*write_pool).clone(),
+            cleanup_config,
+        );
+
+        // Run orphaned cleanup
+        let metrics = cleaner.cleanup_orphaned_messages().await?;
+
+        info!(
+            "Orphaned cleanup completed - marked: {}, deleted: {}, duration: {}ms",
+            metrics.marked_for_deletion, metrics.physically_deleted, metrics.cleanup_duration_ms
+        );
+
+        Ok(())
+    }
+
+    /// ✅ Retry outbox only when events already succeeded
+    async fn retry_outbox_only(
+        write_pool: Arc<PgPool>,
+        outbox_messages: Vec<crate::infrastructure::outbox::OutboxMessage>,
+    ) -> Result<()> {
+        let max_retries = 3;
+        let mut retry_count = 0;
+
+        while retry_count < max_retries {
+            let mut transaction = write_pool.begin().await?;
+
+            let cdc_repo = crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(Arc::new(
+                crate::infrastructure::PartitionedPools {
+                    write_pool: (*write_pool).clone(),
+                    read_pool: (*write_pool).clone(),
+                    config: crate::infrastructure::PoolPartitioningConfig::default(),
+                },
+            ));
+
+            match cdc_repo
+                .add_pending_messages_copy(&mut transaction, outbox_messages.clone())
+                .await
+            {
+                Ok(_) => {
+                    transaction.commit().await?;
+                    info!(
+                        "Successfully retried outbox after {} attempts",
+                        retry_count + 1
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    transaction.rollback().await?;
+                    retry_count += 1;
+
+                    if retry_count < max_retries {
+                        warn!("Outbox retry {} failed: {}, retrying...", retry_count, e);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            100 * retry_count as u64,
+                        ))
+                        .await;
+                    } else {
+                        error!("Outbox retry failed after {} attempts: {}", max_retries, e);
+                        return Err(anyhow::anyhow!("Outbox retry failed: {}", e));
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("Outbox retry exhausted"))
     }
 
     /// Get service statistics with channel lifecycle monitoring
@@ -3085,8 +3160,8 @@ impl WriteBatchingService {
             operation_results.push((*operation_id, result_id, op_start.elapsed()));
         }
 
-        info!(
-            "[DEBUG] execute_batch_unified: Prepared {} events and {} outbox messages",
+        debug!(
+            "execute_batch_unified: Prepared {} events and {} outbox messages",
             all_events.len(),
             all_outbox_messages.len()
         );
@@ -3120,7 +3195,11 @@ impl WriteBatchingService {
             }
         }
 
-        println!("[DEBUG] execute_batch_unified: About to execute parallel operations with {} aggregates and {} outbox messages", events_by_aggregate.len(), all_outbox_messages.len());
+        debug!(
+            "execute_batch_unified: About to execute parallel operations with {} aggregates and {} outbox messages",
+            events_by_aggregate.len(),
+            all_outbox_messages.len()
+        );
 
         let final_result: Result<(), String> = if all_outbox_messages.is_empty() {
             // If no outbox messages, only execute events operation
@@ -3162,15 +3241,15 @@ impl WriteBatchingService {
         // Commit or rollback based on final_result
         if final_result.is_ok() {
             transaction.commit().await.map_err(|e| e.to_string())?;
-            println!("[DEBUG] execute_batch_unified: Successfully completed operations and committed transaction");
+            debug!("execute_batch_unified: Successfully completed operations and committed transaction");
             info!(
-            "[DEBUG] execute_batch_unified: Completed successfully - {} operations, {} outbox messages in unified transaction",
-            batch.operations.len(),
-            all_outbox_messages.len()
-        );
+                "execute_batch_unified: Completed successfully - {} operations, {} outbox messages in unified transaction",
+                batch.operations.len(),
+                all_outbox_messages.len()
+            );
         } else {
             transaction.rollback().await.map_err(|e| e.to_string())?;
-            println!("[DEBUG] execute_batch_unified: Operations failed, rolled back transaction");
+            warn!("execute_batch_unified: Operations failed, rolled back transaction");
         }
 
         // Create success/failure results based on final_result
@@ -3233,8 +3312,8 @@ impl WriteBatchingService {
                 error!("Failed to start bulk mode: {}", e);
                 // Continue in normal mode even if bulk mode fails to start
             } else {
-                info!(
-                    "🚀 Bulk mode activated for unified batch with {} operations",
+                debug!(
+                    "Bulk mode activated for unified batch with {} operations",
                     batch.operations.len()
                 );
             }
@@ -3254,8 +3333,8 @@ impl WriteBatchingService {
                 Ok(op_results) => {
                     // Success path
                     results = op_results;
-                    println!(
-                        "[DEBUG] execute_batch_unified: Finished unified batch with {} results",
+                    debug!(
+                        "execute_batch_unified: Finished unified batch with {} results",
                         results.len()
                     );
 
@@ -3307,10 +3386,10 @@ impl WriteBatchingService {
                             }
                         }
 
-                        println!(
-                        "[DEBUG] execute_batch_unified: All retries failed, returning {} failure results",
-                        batch.operations.len()
-                    );
+                        warn!(
+                            "execute_batch_unified: All retries failed, returning {} failure results",
+                            batch.operations.len()
+                        );
 
                         for (operation_id, _) in &batch.operations {
                             results.push((
@@ -3562,7 +3641,7 @@ impl BulkInsertConfigManager {
                 (*event_store_mut).apply_bulk_config_with_postgres().await
             };
 
-            info!("📊 Event store bulk config uygulandı: batch_size=5000, processors=16, synchronous_commit=off (full_page_writes requires server restart)");
+            debug!("Event store bulk config applied: batch_size=5000, processors=16, synchronous_commit=off (full_page_writes requires server restart)");
         }
 
         Ok(())

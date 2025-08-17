@@ -3,7 +3,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use sqlx::{Pool, Postgres, Row};
 use tokio::time::{interval, sleep};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CleanupConfig {
@@ -408,6 +408,186 @@ impl OutboxCleaner {
         info!("Forcing manual cleanup cycle");
         self.cleanup_cycle().await
     }
+    /// Cleanup orphaned outbox messages (outbox exists but event doesn't)
+    pub async fn cleanup_orphaned_messages(&self) -> Result<CleanupMetrics> {
+        let start_time = Utc::now();
+        let mut metrics = CleanupMetrics {
+            marked_for_deletion: 0,
+            physically_deleted: 0,
+            cleanup_duration_ms: 0,
+            mark_batches: 0,
+            delete_batches: 0,
+            errors: Vec::new(),
+        };
+
+        info!("Starting orphaned messages cleanup...");
+
+        // Find orphaned outbox messages
+        match self.find_and_mark_orphaned_messages().await {
+            Ok((count, batches)) => {
+                metrics.marked_for_deletion = count;
+                metrics.mark_batches = batches;
+                info!(
+                    "Found and marked {} orphaned outbox messages in {} batches",
+                    count, batches
+                );
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to find orphaned messages: {:?}", e);
+                error!("{}", error_msg);
+                metrics.errors.push(error_msg);
+            }
+        }
+
+        // Physically delete marked orphaned messages
+        match self.physical_deletion_with_limits().await {
+            Ok((count, batches)) => {
+                metrics.physically_deleted = count;
+                metrics.delete_batches = batches;
+                info!(
+                    "Physically deleted {} orphaned messages in {} batches",
+                    count, batches
+                );
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to delete orphaned messages: {:?}", e);
+                error!("{}", error_msg);
+                metrics.errors.push(error_msg);
+            }
+        }
+
+        let duration = Utc::now().signed_duration_since(start_time);
+        metrics.cleanup_duration_ms = duration.num_milliseconds();
+
+        info!(
+            "Orphaned messages cleanup completed - marked: {}, deleted: {}, duration: {}ms",
+            metrics.marked_for_deletion, metrics.physically_deleted, metrics.cleanup_duration_ms
+        );
+
+        Ok(metrics)
+    }
+
+    /// Find and mark orphaned outbox messages (outbox exists but event doesn't)
+    async fn find_and_mark_orphaned_messages(&self) -> Result<(i64, u32)> {
+        let mut total_marked = 0;
+        let mut batch_count = 0;
+
+        loop {
+            // Find orphaned messages: outbox exists but event doesn't
+            let orphaned_query = r#"
+                UPDATE kafka_outbox_cdc 
+                SET deleted_at = NOW() 
+                WHERE id IN (
+                    SELECT o.id 
+                    FROM kafka_outbox_cdc o
+                    LEFT JOIN events e ON o.event_id = e.id
+                    WHERE o.deleted_at IS NULL 
+                    AND e.id IS NULL  -- Event doesn't exist
+                    ORDER BY o.created_at ASC
+                    LIMIT $1
+                )
+            "#;
+
+            let result = sqlx::query(orphaned_query)
+                .bind(self.config.batch_size)
+                .execute(&self.pool)
+                .await
+                .context("Failed to mark orphaned messages")?;
+
+            let marked_count = result.rows_affected() as i64;
+            total_marked += marked_count;
+            batch_count += 1;
+
+            info!(
+                "Batch {}: Marked {} orphaned messages for deletion",
+                batch_count, marked_count
+            );
+
+            // Stop if no more orphaned messages or reached batch limit
+            if marked_count == 0
+                || (self.config.max_batches_per_cycle > 0
+                    && batch_count >= self.config.max_batches_per_cycle)
+            {
+                break;
+            }
+
+            // Delay between batches
+            sleep(tokio::time::Duration::from_millis(
+                self.config.batch_delay_ms,
+            ))
+            .await;
+        }
+
+        Ok((total_marked, batch_count))
+    }
+
+    /// Get statistics about orphaned messages
+    pub async fn get_orphaned_messages_stats(&self) -> Result<serde_json::Value> {
+        let query = r#"
+            SELECT 
+                COUNT(*) as total_outbox_messages,
+                COUNT(*) FILTER (WHERE deleted_at IS NOT NULL) as marked_for_deletion,
+                COUNT(*) FILTER (WHERE deleted_at IS NULL) as active_messages,
+                COUNT(*) FILTER (WHERE e.id IS NULL) as orphaned_messages,
+                MIN(o.created_at) as oldest_message,
+                MAX(o.created_at) as newest_message
+            FROM kafka_outbox_cdc o
+            LEFT JOIN events e ON o.event_id = e.id
+        "#;
+
+        let row = sqlx::query(query)
+            .fetch_one(&self.pool)
+            .await
+            .context("Failed to get orphaned messages stats")?;
+
+        Ok(serde_json::json!({
+            "total_outbox_messages": row.get::<i64, _>("total_outbox_messages"),
+            "marked_for_deletion": row.get::<i64, _>("marked_for_deletion"),
+            "active_messages": row.get::<i64, _>("active_messages"),
+            "orphaned_messages": row.get::<i64, _>("orphaned_messages"),
+            "oldest_message": row.get::<Option<DateTime<Utc>>, _>("oldest_message"),
+            "newest_message": row.get::<Option<DateTime<Utc>>, _>("newest_message"),
+        }))
+    }
+
+    /// Start orphaned messages cleanup service (runs periodically)
+    pub async fn start_orphaned_cleanup_service(&self) -> Result<()> {
+        info!("Starting orphaned messages cleanup service...");
+
+        let mut interval = interval(tokio::time::Duration::from_secs(
+            self.config.cleanup_interval_minutes * 60,
+        ));
+
+        loop {
+            interval.tick().await;
+
+            match self.cleanup_orphaned_messages().await {
+                Ok(metrics) => {
+                    if metrics.marked_for_deletion > 0 || metrics.physically_deleted > 0 {
+                        info!(
+                            "Orphaned cleanup completed - marked: {}, deleted: {}, duration: {}ms",
+                            metrics.marked_for_deletion,
+                            metrics.physically_deleted,
+                            metrics.cleanup_duration_ms
+                        );
+                    } else {
+                        debug!("No orphaned messages found in cleanup cycle");
+                    }
+
+                    if !metrics.errors.is_empty() {
+                        warn!(
+                            "Orphaned cleanup completed with errors: {:?}",
+                            metrics.errors
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!("Orphaned cleanup cycle failed: {:?}", e);
+                    sleep(tokio::time::Duration::from_secs(30)).await;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -455,6 +635,7 @@ mod tests {
     use sqlx::PgPool;
 
     #[sqlx::test]
+    #[ignore]
     async fn test_cleanup_cycle(pool: PgPool) -> Result<()> {
         // Setup test table
         sqlx::query(

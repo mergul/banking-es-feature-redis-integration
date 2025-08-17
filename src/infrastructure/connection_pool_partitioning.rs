@@ -29,9 +29,9 @@ impl Default for PoolPartitioningConfig {
                 .unwrap_or(200)
                 / 5, // Write pool gets 1/5 of total connections
             write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "100".to_string())
+                .unwrap_or_else(|_| "10".to_string())
                 .parse()
-                .unwrap_or(100)
+                .unwrap_or(10)
                 / 5, // Write pool gets 1/5 of min connections
             read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
                 .unwrap_or_else(|_| "200".to_string())
@@ -40,9 +40,9 @@ impl Default for PoolPartitioningConfig {
                 * 4
                 / 5, // Read pool gets 4/5 of total connections
             read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "100".to_string())
+                .unwrap_or_else(|_| "10".to_string())
                 .parse()
-                .unwrap_or(100)
+                .unwrap_or(10)
                 * 4
                 / 5, // Read pool gets 4/5 of min connections
             acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
