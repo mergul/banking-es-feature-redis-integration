@@ -4,16 +4,32 @@ import '../models/account.dart';
 import '../models/transaction.dart';
 import '../models/deposit_request.dart';
 import '../models/withdraw_request.dart';
+import '../models/login_response.dart';
 
 class AccountProvider with ChangeNotifier {
   final AccountService _accountService = AccountService();
   Account? _account;
   List<Transaction> _transactions = [];
   bool _isLoading = false;
+  AccountInfo? _selectedAccount;
 
   Account? get account => _account;
   List<Transaction> get transactions => _transactions;
   bool get isLoading => _isLoading;
+  AccountInfo? get selectedAccount => _selectedAccount;
+
+  void setSelectedAccount(AccountInfo account) {
+    _selectedAccount = account;
+    notifyListeners();
+  }
+
+  void setAccountsFromLoginResponse(LoginResponse loginResponse) {
+    // Bu metod AuthProvider'dan gelen veriyi AccountProvider'a senkronize eder
+    if (loginResponse.accounts.isNotEmpty) {
+      _selectedAccount = loginResponse.accounts.first;
+      notifyListeners();
+    }
+  }
 
   Future<void> fetchAccountData(String token, String accountId) async {
     _isLoading = true;
@@ -24,7 +40,7 @@ class AccountProvider with ChangeNotifier {
       _transactions = await _accountService.getAccountTransactions(token, accountId);
     } catch (e) {
       // Handle error
-      print(e);
+      print('❌ Error fetching account data: $e');
     }
 
     _isLoading = false;
@@ -46,10 +62,27 @@ class AccountProvider with ChangeNotifier {
       await fetchAccountData(token, fromAccountId);
     } catch (e) {
       // Handle error
-      print(e);
+      print('❌ Error during transfer: $e');
+      rethrow;
     }
 
     _isLoading = false;
+    notifyListeners();
+  }
+
+  Future<void> refreshTransactions(String token, String accountId) async {
+    try {
+      _transactions = await _accountService.getAccountTransactions(token, accountId);
+      notifyListeners();
+    } catch (e) {
+      print('❌ Error refreshing transactions: $e');
+    }
+  }
+
+  void clearData() {
+    _account = null;
+    _transactions = [];
+    _selectedAccount = null;
     notifyListeners();
   }
 }

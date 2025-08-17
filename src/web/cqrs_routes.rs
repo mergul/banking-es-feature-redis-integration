@@ -21,6 +21,12 @@ async fn auth_middleware(
     request: Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Result<Response, StatusCode> {
+    // Skip auth for health and metrics endpoints
+    let path = request.uri().path();
+    if path == "/api/cqrs/health" || path == "/api/cqrs/metrics" {
+        return Ok(next.run(request).await);
+    }
+
     // Extract token from Authorization header
     let auth_header = request
         .headers()
@@ -30,19 +36,23 @@ async fn auth_middleware(
 
     match auth_header {
         Some(token) => {
+            eprintln!("🔐 Validating token for path: {}", path);
             // Validate token
             match auth_service.validate_token(token, TokenType::Access).await {
-                Ok(_claims) => {
+                Ok(claims) => {
+                    eprintln!("✅ Token validated successfully for user: {}", claims.sub);
                     // Token is valid, proceed with request
                     Ok(next.run(request).await)
                 }
-                Err(_) => {
+                Err(e) => {
+                    eprintln!("❌ Token validation failed: {:?}", e);
                     // Token is invalid
                     Err(StatusCode::UNAUTHORIZED)
                 }
             }
         }
         None => {
+            eprintln!("❌ No Authorization header found for path: {}", path);
             // No Authorization header
             Err(StatusCode::UNAUTHORIZED)
         }

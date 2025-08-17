@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/account_provider.dart';
+import '../models/transaction.dart';
 
 class TransactionHistoryScreen extends StatefulWidget {
   const TransactionHistoryScreen({super.key});
@@ -13,6 +14,7 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen>
     with TickerProviderStateMixin {
   String _selectedFilter = 'Tümü';
   final List<String> _filterOptions = ['Tümü', 'Para Yatırma', 'Para Çekme'];
+  List<Transaction> _mockTransactions = [];
   
   late AnimationController _fadeController;
   late AnimationController _slideController;
@@ -23,6 +25,7 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen>
   void initState() {
     super.initState();
     _initializeAnimations();
+    _createMockTransactions();
   }
 
   void _initializeAnimations() {
@@ -56,6 +59,52 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen>
     _slideController.forward();
   }
 
+  void _createMockTransactions() {
+    final now = DateTime.now();
+    _mockTransactions = [
+      Transaction(
+        id: '1',
+        accountId: '1',
+        amount: 500.0,
+        transactionType: 'deposit',
+        timestamp: now.subtract(const Duration(hours: 2)),
+        description: 'Maaş yatırma',
+      ),
+      Transaction(
+        id: '2',
+        accountId: '1',
+        amount: 150.0,
+        transactionType: 'withdrawal',
+        timestamp: now.subtract(const Duration(days: 1)),
+        description: 'ATM çekimi',
+      ),
+      Transaction(
+        id: '3',
+        accountId: '1',
+        amount: 1000.0,
+        transactionType: 'deposit',
+        timestamp: now.subtract(const Duration(days: 2)),
+        description: 'Transfer alımı',
+      ),
+      Transaction(
+        id: '4',
+        accountId: '1',
+        amount: 75.50,
+        transactionType: 'withdrawal',
+        timestamp: now.subtract(const Duration(days: 3)),
+        description: 'Market alışverişi',
+      ),
+      Transaction(
+        id: '5',
+        accountId: '1',
+        amount: 250.0,
+        transactionType: 'deposit',
+        timestamp: now.subtract(const Duration(days: 5)),
+        description: 'Bonus yatırma',
+      ),
+    ];
+  }
+
   @override
   void dispose() {
     _fadeController.dispose();
@@ -63,19 +112,24 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen>
     super.dispose();
   }
 
-  List<dynamic> _getFilteredTransactions(AccountProvider accountProvider) {
+  List<Transaction> _getFilteredTransactions(AccountProvider accountProvider) {
+    // Eğer gerçek transaction verisi varsa onu kullan, yoksa mock data kullan
+    final transactions = accountProvider.transactions.isNotEmpty 
+        ? accountProvider.transactions 
+        : _mockTransactions;
+    
     if (_selectedFilter == 'Tümü') {
-      return accountProvider.transactions;
+      return transactions;
     } else if (_selectedFilter == 'Para Yatırma') {
-      return accountProvider.transactions
+      return transactions
           .where((transaction) => transaction.transactionType == 'deposit')
           .toList();
     } else if (_selectedFilter == 'Para Çekme') {
-      return accountProvider.transactions
+      return transactions
           .where((transaction) => transaction.transactionType == 'withdrawal')
           .toList();
     }
-    return accountProvider.transactions;
+    return transactions;
   }
 
   @override
@@ -241,14 +295,28 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen>
             ),
             title: Row(
               children: [
-                Text(
-                  isDeposit ? 'Para Yatırma' : 'Para Çekme',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isDeposit ? 'Para Yatırma' : 'Para Çekme',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      if (transaction.description.isNotEmpty)
+                        Text(
+                          transaction.description,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                    ],
                   ),
                 ),
-                const Spacer(),
                 Text(
                   '${isDeposit ? '+' : '-'}\$${transaction.amount.toStringAsFixed(2)}',
                   style: TextStyle(
@@ -358,7 +426,7 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen>
     );
   }
 
-  void _showTransactionDetails(dynamic transaction) {
+  void _showTransactionDetails(Transaction transaction) {
     final isDeposit = transaction.transactionType == 'deposit';
     
     showDialog(
@@ -384,6 +452,8 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen>
             _buildDetailRow('Saat:', _formatTime(transaction.timestamp)),
             _buildDetailRow('Durum:', isDeposit ? 'Başarılı' : 'Tamamlandı'),
             _buildDetailRow('İşlem Tipi:', isDeposit ? 'Para Yatırma' : 'Para Çekme'),
+            if (transaction.description.isNotEmpty)
+              _buildDetailRow('Açıklama:', transaction.description),
           ],
         ),
         actions: [

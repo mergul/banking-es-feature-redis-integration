@@ -514,6 +514,10 @@ impl AuthService {
         token: &str,
         expected_type: TokenType,
     ) -> Result<Claims, AuthError> {
+        eprintln!("🔍 validate_token called with token: {}...", &token[..20]);
+        eprintln!("🔍 Expected token type: {:?}", expected_type);
+        eprintln!("🔍 JWT secret length: {}", self.config.jwt_secret.len());
+
         // Check if token is blacklisted
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
         let is_blacklisted: bool = conn
@@ -522,6 +526,7 @@ impl AuthService {
             .unwrap_or(false);
 
         if is_blacklisted {
+            eprintln!("❌ Token is blacklisted");
             return Err(AuthError::TokenBlacklisted);
         }
 
@@ -533,17 +538,35 @@ impl AuthService {
             TokenType::Refresh => &self.config.refresh_token_secret,
         };
 
+        eprintln!("🔍 Using secret: {}...", &secret[..10]);
+
         let token_data = decode::<Claims>(
             token,
             &DecodingKey::from_secret(secret.as_bytes()),
             &validation,
-        )?;
+        );
 
-        if token_data.claims.token_type != expected_type {
-            return Err(AuthError::InvalidToken);
+        match token_data {
+            Ok(data) => {
+                eprintln!("✅ Token decoded successfully");
+                eprintln!("✅ Token type: {:?}", data.claims.token_type);
+                eprintln!("✅ User: {}", data.claims.sub);
+
+                if data.claims.token_type != expected_type {
+                    eprintln!(
+                        "❌ Token type mismatch: expected {:?}, got {:?}",
+                        expected_type, data.claims.token_type
+                    );
+                    return Err(AuthError::InvalidToken);
+                }
+
+                Ok(data.claims)
+            }
+            Err(e) => {
+                eprintln!("❌ Token decode failed: {:?}", e);
+                Err(AuthError::JwtError(e))
+            }
         }
-
-        Ok(token_data.claims)
     }
 
     pub async fn blacklist_token(&self, token: &str) -> Result<(), AuthError> {
