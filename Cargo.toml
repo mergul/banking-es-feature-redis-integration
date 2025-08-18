@@ -105,3 +105,7 @@ warnings = "allow"
 [[bin]]
 name = "banking-es"
 path = "src/main.rs"
+
+# [[bin]]
+# name = "reading_batch"
+# path = "read_batching_perf.rs"
