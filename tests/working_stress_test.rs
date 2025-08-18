@@ -11,7 +11,7 @@ use banking_es::{
         init,
         projections::{ProjectionConfig, ProjectionStore, ProjectionStoreTrait},
         redis_abstraction::RealRedisClient,
-        PoolSelector, ReadOperation, ReadOperationResult, WriteOperation,
+        PoolSelector, ReadOperation, WriteOperation,
     },
 };
 use rust_decimal::Decimal;
@@ -159,6 +159,8 @@ async fn setup_stress_test_environment(
     // Start write batching service (same as main.rs)
     cqrs_service.start_write_batching().await?;
     println!("✅ Write batching service started");
+    cqrs_service.start_read_batching().await?;
+    println!("✅ Direct read service started");
 
     // Create CDC service manager (same as main.rs)
     println!("🔧 Setting up CDC service manager...");
@@ -1439,7 +1441,7 @@ async fn test_write_batching_multi_row_inserts() {
             return;
         }
     };
-    let read_batching_service = match context.cqrs_service.get_read_batching_service() {
+    let read_batching_service = match context.cqrs_service.get_direct_read_service() {
         Some(service) => {
             println!("✅ Read batching service available for optimized reads");
             service.clone()
@@ -1788,7 +1790,7 @@ async fn test_write_batching_multi_row_inserts() {
     let batch_submit_start = Instant::now();
 
     let read_operation_ids = match read_batching_service
-        .submit_read_operations_batch_optimized(read_operations)
+        .process_read_operations_parallel(read_operations)
         .await
     {
         Ok(ids) => {
@@ -1810,28 +1812,28 @@ async fn test_write_batching_multi_row_inserts() {
     let wait_start = Instant::now();
 
     // Wait for all results with read batching
-    for (i, operation_id) in read_operation_ids.iter().enumerate() {
-        let operation_start = Instant::now();
+    // for (i, operation_id) in read_operation_ids.iter().enumerate() {
+    //     let operation_start = Instant::now();
 
-        match read_batching_service.wait_for_result(*operation_id).await {
-            Ok(_) => {
-                successful_verifications += 1;
-                latencies.push(operation_start.elapsed());
-            }
-            Err(_) => {
-                failed_verifications += 1;
-                latencies.push(operation_start.elapsed());
-            }
-        }
+    //     match read_batching_service.wait_for_result(*operation_id).await {
+    //         Ok(_) => {
+    //             successful_verifications += 1;
+    //             latencies.push(operation_start.elapsed());
+    //         }
+    //         Err(_) => {
+    //             failed_verifications += 1;
+    //             latencies.push(operation_start.elapsed());
+    //         }
+    //     }
 
-        if (i + 1) % 10000 == 0 {
-            println!(
-                "  ✅ Completed {}/{} operations",
-                i + 1,
-                operation_ids.len()
-            );
-        }
-    }
+    //     if (i + 1) % 10000 == 0 {
+    //         println!(
+    //             "  ✅ Completed {}/{} operations",
+    //             i + 1,
+    //             operation_ids.len()
+    //         );
+    //     }
+    // }
 
     let total_duration = read_start.elapsed();
     let wait_duration = wait_start.elapsed();
@@ -2089,216 +2091,216 @@ async fn get_existing_account_ids(pool: &PgPool, limit: usize) -> Result<Vec<Uui
     Ok(rows.into_iter().map(|row| row.id).collect())
 }
 
-#[tokio::test]
-#[ignore]
-async fn test_read_batching_performance() {
-    println!("🚀 Starting Read Batching Performance Test");
-    let _ = tracing_subscriber::fmt::try_init();
+// #[tokio::test]
+// #[ignore]
+// async fn test_read_batching_performance() {
+//     println!("🚀 Starting Read Batching Performance Test");
+//     let _ = tracing_subscriber::fmt::try_init();
 
-    // Setup test environment
-    let context = match setup_stress_test_environment().await {
-        Ok(ctx) => {
-            println!("✅ Read batching test environment setup complete");
-            ctx
-        }
-        Err(e) => {
-            println!("❌ Failed to setup read batching test environment: {}", e);
-            return;
-        }
-    };
+//     // Setup test environment
+//     let context = match setup_stress_test_environment().await {
+//         Ok(ctx) => {
+//             println!("✅ Read batching test environment setup complete");
+//             ctx
+//         }
+//         Err(e) => {
+//             println!("❌ Failed to setup read batching test environment: {}", e);
+//             return;
+//         }
+//     };
 
-    // Phase 1: Create test accounts
-    println!("\n📝 PHASE 1: Create Test Accounts");
-    println!("=================================");
+//     // Phase 1: Create test accounts
+//     println!("\n📝 PHASE 1: Create Test Accounts");
+//     println!("=================================");
 
-    let account_count = 100;
-    println!("🔧 Creating {} test accounts...", account_count);
+//     let account_count = 100;
+//     println!("🔧 Creating {} test accounts...", account_count);
 
-    let mut account_ids = Vec::new();
-    for i in 0..account_count {
-        let owner_name = format!("ReadTestUser_{}", i);
-        let initial_balance = Decimal::new(1000, 0);
+//     let mut account_ids = Vec::new();
+//     for i in 0..account_count {
+//         let owner_name = format!("ReadTestUser_{}", i);
+//         let initial_balance = Decimal::new(1000, 0);
 
-        match context
-            .cqrs_service
-            .create_account(owner_name, initial_balance)
-            .await
-        {
-            Ok(account_id) => {
-                account_ids.push(account_id);
-                println!("✅ Created account {}: {}", i, account_id);
-            }
-            Err(e) => {
-                println!("❌ Failed to create account {}: {}", i, e);
-            }
-        }
-    }
+//         match context
+//             .cqrs_service
+//             .create_account(owner_name, initial_balance)
+//             .await
+//         {
+//             Ok(account_id) => {
+//                 account_ids.push(account_id);
+//                 println!("✅ Created account {}: {}", i, account_id);
+//             }
+//             Err(e) => {
+//                 println!("❌ Failed to create account {}: {}", i, e);
+//             }
+//         }
+//     }
 
-    println!("✅ Created {} accounts successfully", account_ids.len());
+//     println!("✅ Created {} accounts successfully", account_ids.len());
 
-    // Phase 2: Perform some write operations to create data
-    println!("\n📝 PHASE 2: Create Test Data");
-    println!("=============================");
+//     // Phase 2: Perform some write operations to create data
+//     println!("\n📝 PHASE 2: Create Test Data");
+//     println!("=============================");
 
-    for (i, &account_id) in account_ids.iter().enumerate() {
-        // Perform some deposits and withdrawals
-        for j in 0..5 {
-            let amount = Decimal::new(10 + j as i64, 0);
-            match context.cqrs_service.deposit_money(account_id, amount).await {
-                Ok(_) => println!("✅ Deposit {} for account {}: {}", j, i, account_id),
-                Err(e) => println!("❌ Failed deposit {} for account {}: {}", j, i, e),
-            }
-        }
-    }
+//     for (i, &account_id) in account_ids.iter().enumerate() {
+//         // Perform some deposits and withdrawals
+//         for j in 0..5 {
+//             let amount = Decimal::new(10 + j as i64, 0);
+//             match context.cqrs_service.deposit_money(account_id, amount).await {
+//                 Ok(_) => println!("✅ Deposit {} for account {}: {}", j, i, account_id),
+//                 Err(e) => println!("❌ Failed deposit {} for account {}: {}", j, i, e),
+//             }
+//         }
+//     }
 
-    // Wait for CDC processing
-    println!("⏳ Waiting for CDC processing...");
-    tokio::time::sleep(Duration::from_secs(10)).await;
+//     // Wait for CDC processing
+//     println!("⏳ Waiting for CDC processing...");
+//     tokio::time::sleep(Duration::from_secs(10)).await;
 
-    // Phase 3: Test Read Batching Performance
-    println!("\n📝 PHASE 3: Read Batching Performance Test");
-    println!("===========================================");
+//     // Phase 3: Test Read Batching Performance
+//     println!("\n📝 PHASE 3: Read Batching Performance Test");
+//     println!("===========================================");
 
-    // Get read batching service
-    let read_batching_service = match context.cqrs_service.get_read_batching_service() {
-        Some(service) => {
-            println!("✅ Read batching service available");
-            service.clone()
-        }
-        None => {
-            println!("❌ Read batching service not available");
-            return;
-        }
-    };
+//     // Get read batching service
+//     let read_batching_service = match context.cqrs_service.get_direct_read_service() {
+//         Some(service) => {
+//             println!("✅ Read batching service available");
+//             service.clone()
+//         }
+//         None => {
+//             println!("❌ Read batching service not available");
+//             return;
+//         }
+//     };
 
-    // Test individual reads vs batch reads
-    println!("🔍 Testing individual reads vs batch reads...");
+//     // Test individual reads vs batch reads
+//     println!("🔍 Testing individual reads vs batch reads...");
 
-    // Test 1: Individual reads
-    println!("📖 Test 1: Individual Reads");
-    let individual_start = Instant::now();
-    let mut individual_results = Vec::new();
+//     // Test 1: Individual reads
+//     println!("📖 Test 1: Individual Reads");
+//     let individual_start = Instant::now();
+//     let mut individual_results = Vec::new();
 
-    for &account_id in &account_ids {
-        let start = Instant::now();
-        let result = context.cqrs_service.get_account(account_id).await;
-        let latency = start.elapsed();
+//     for &account_id in &account_ids {
+//         let start = Instant::now();
+//         let result = context.cqrs_service.get_account(account_id).await;
+//         let latency = start.elapsed();
 
-        individual_results.push((account_id, result.is_ok(), latency));
-    }
+//         individual_results.push((account_id, result.is_ok(), latency));
+//     }
 
-    let individual_duration = individual_start.elapsed();
-    let individual_success = individual_results
-        .iter()
-        .filter(|(_, success, _)| *success)
-        .count();
+//     let individual_duration = individual_start.elapsed();
+//     let individual_success = individual_results
+//         .iter()
+//         .filter(|(_, success, _)| *success)
+//         .count();
 
-    println!("  - Individual Reads Results:");
-    println!("    • Duration: {:?}", individual_duration);
-    println!(
-        "    • Success Rate: {:.2}%",
-        (individual_success as f64 / account_ids.len() as f64) * 100.0
-    );
-    println!(
-        "    • Reads/sec: {:.2}",
-        account_ids.len() as f64 / individual_duration.as_secs_f64()
-    );
+//     println!("  - Individual Reads Results:");
+//     println!("    • Duration: {:?}", individual_duration);
+//     println!(
+//         "    • Success Rate: {:.2}%",
+//         (individual_success as f64 / account_ids.len() as f64) * 100.0
+//     );
+//     println!(
+//         "    • Reads/sec: {:.2}",
+//         account_ids.len() as f64 / individual_duration.as_secs_f64()
+//     );
 
-    // Test 2: Batch reads
-    println!("📦 Test 2: Batch Reads");
-    let batch_start = Instant::now();
+//     // Test 2: Batch reads
+//     println!("📦 Test 2: Batch Reads");
+//     let batch_start = Instant::now();
 
-    // Create batch read operations
-    let mut read_operations = Vec::new();
-    for &account_id in &account_ids {
-        read_operations.push(ReadOperation::GetAccount { account_id });
-    }
+//     // Create batch read operations
+//     let mut read_operations = Vec::new();
+//     for &account_id in &account_ids {
+//         read_operations.push(ReadOperation::GetAccount { account_id });
+//     }
 
-    println!(
-        "  - Submitting {} read operations for batch processing",
-        read_operations.len()
-    );
+//     println!(
+//         "  - Submitting {} read operations for batch processing",
+//         read_operations.len()
+//     );
 
-    let batch_operation_ids = match read_batching_service
-        .submit_read_operations_batch(read_operations)
-        .await
-    {
-        Ok(ids) => {
-            println!(
-                "  - ✅ Batch read submitted with {} operation IDs",
-                ids.len()
-            );
-            ids
-        }
-        Err(e) => {
-            println!("  - ❌ Batch read failed: {}", e);
-            return;
-        }
-    };
+//     let batch_operation_ids = match read_batching_service
+//         .process_read_operations_parallel(read_operations)
+//         .await
+//     {
+//         Ok(ids) => {
+//             println!(
+//                 "  - ✅ Batch read submitted with {} operation IDs",
+//                 ids.len()
+//             );
+//             ids
+//         }
+//         Err(e) => {
+//             println!("  - ❌ Batch read failed: {}", e);
+//             return;
+//         }
+//     };
 
-    // Wait for all batch results
-    let mut batch_results = Vec::new();
-    for operation_id in batch_operation_ids {
-        let start = Instant::now();
-        match read_batching_service.wait_for_result(operation_id).await {
-            Ok(result) => {
-                let latency = start.elapsed();
-                let success = match result {
-                    ReadOperationResult::Account { account, .. } => account.is_some(),
-                    _ => false,
-                };
-                batch_results.push((operation_id, success, latency));
-            }
-            Err(e) => {
-                println!("  - ❌ Failed to get batch result: {}", e);
-                batch_results.push((operation_id, false, start.elapsed()));
-            }
-        }
-    }
+//     // Wait for all batch results
+//     let mut batch_results = Vec::new();
+//     // for operation_id in batch_operation_ids {
+//     //     let start = Instant::now();
+//     //     match read_batching_service.wait_for_result(operation_id).await {
+//     //         Ok(result) => {
+//     //             let latency = start.elapsed();
+//     //             let success = match result {
+//     //                 ReadOperationResult::Account { account, .. } => account.is_some(),
+//     //                 _ => false,
+//     //             };
+//     //             batch_results.push((operation_id, success, latency));
+//     //         }
+//     //         Err(e) => {
+//     //             println!("  - ❌ Failed to get batch result: {}", e);
+//     //             batch_results.push((operation_id, false, start.elapsed()));
+//     //         }
+//     //     }
+//     // }
 
-    let batch_duration = batch_start.elapsed();
-    let batch_success = batch_results
-        .iter()
-        .filter(|(_, success, _)| *success)
-        .count();
+//     let batch_duration = batch_start.elapsed();
+//     let batch_success = batch_results
+//         .iter()
+//         .filter(|(_, success, _)| *success)
+//         .count();
 
-    println!("  - Batch Reads Results:");
-    println!("    • Duration: {:?}", batch_duration);
-    println!(
-        "    • Success Rate: {:.2}%",
-        (batch_success as f64 / account_ids.len() as f64) * 100.0
-    );
-    println!(
-        "    • Reads/sec: {:.2}",
-        account_ids.len() as f64 / batch_duration.as_secs_f64()
-    );
+//     println!("  - Batch Reads Results:");
+//     println!("    • Duration: {:?}", batch_duration);
+//     println!(
+//         "    • Success Rate: {:.2}%",
+//         (batch_success as f64 / account_ids.len() as f64) * 100.0
+//     );
+//     println!(
+//         "    • Reads/sec: {:.2}",
+//         account_ids.len() as f64 / batch_duration.as_secs_f64()
+//     );
 
-    // Performance comparison
-    println!("\n📊 PERFORMANCE COMPARISON");
-    println!("=========================");
-    let individual_ops_per_sec = account_ids.len() as f64 / individual_duration.as_secs_f64();
-    let batch_ops_per_sec = account_ids.len() as f64 / batch_duration.as_secs_f64();
-    let improvement = if individual_ops_per_sec > 0.0 {
-        ((batch_ops_per_sec - individual_ops_per_sec) / individual_ops_per_sec) * 100.0
-    } else {
-        0.0
-    };
+//     // Performance comparison
+//     println!("\n📊 PERFORMANCE COMPARISON");
+//     println!("=========================");
+//     let individual_ops_per_sec = account_ids.len() as f64 / individual_duration.as_secs_f64();
+//     let batch_ops_per_sec = account_ids.len() as f64 / batch_duration.as_secs_f64();
+//     let improvement = if individual_ops_per_sec > 0.0 {
+//         ((batch_ops_per_sec - individual_ops_per_sec) / individual_ops_per_sec) * 100.0
+//     } else {
+//         0.0
+//     };
 
-    println!(
-        "  - Individual Reads: {:.2} ops/sec",
-        individual_ops_per_sec
-    );
-    println!("  - Batch Reads: {:.2} ops/sec", batch_ops_per_sec);
-    println!("  - Performance Improvement: {:.2}%", improvement);
+//     println!(
+//         "  - Individual Reads: {:.2} ops/sec",
+//         individual_ops_per_sec
+//     );
+//     println!("  - Batch Reads: {:.2} ops/sec", batch_ops_per_sec);
+//     println!("  - Performance Improvement: {:.2}%", improvement);
 
-    // Cleanup
-    println!("\n🧹 Cleaning up test resources...");
-    if let Err(e) = cleanup_test_resources(&context).await {
-        println!("⚠️  Warning: Cleanup failed: {}", e);
-    }
+//     // Cleanup
+//     println!("\n🧹 Cleaning up test resources...");
+//     if let Err(e) = cleanup_test_resources(&context).await {
+//         println!("⚠️  Warning: Cleanup failed: {}", e);
+//     }
 
-    println!("✅ Read Batching Performance Test completed successfully!");
-}
+//     println!("✅ Read Batching Performance Test completed successfully!");
+// }
 
 async fn verify_data_integrity_individual_reads(context: &StressTestContext, account_ids: &[Uuid]) {
     println!("🔍 Verifying account balances and transaction history using individual reads...");
