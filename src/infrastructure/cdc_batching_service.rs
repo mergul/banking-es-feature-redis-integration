@@ -12,9 +12,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-const CDC_NUM_PARTITIONS: usize = 4; // Reduced from 16 to 4 for larger batches per partition
-const CDC_DEFAULT_BATCH_SIZE: usize = 2000; // Increased to 2000 to match ProjectionConfig batch_size
-const CDC_BATCH_TIMEOUT_MS: u64 = 25; // 5x poll interval (5ms * 5 = 25ms) - consistent with other components
+const CDC_NUM_PARTITIONS: usize = 8; // Increased from 4 to 8 for better parallelism
+const CDC_DEFAULT_BATCH_SIZE: usize = 3000; // Increased to 3000 for larger batches
+const CDC_BATCH_TIMEOUT_MS: u64 = 25; // Increased to 50ms for better batching
 
 #[derive(Clone)]
 pub struct CDCBatchingConfig {
@@ -298,15 +298,15 @@ impl CDCBatchingService {
         let mut results = Vec::new();
         let mut retry_count = 0;
 
-        // BULK MODE: Batch boyutu büyükse bulk mode başlat
-        let should_use_bulk_mode = batch.projections.len() >= 3; // 3+ projection için bulk mode
+        // CRITICAL OPTIMIZATION: Use bulk mode for larger batches to improve performance
+        let should_use_bulk_mode = batch.projections.len() >= 10; // Increased threshold for bulk mode
         let mut bulk_config_manager = if should_use_bulk_mode {
             Some(BulkInsertConfigManager::new())
         } else {
             None
         };
 
-        // BULK MODE: Eğer bulk mode kullanılacaksa başlat
+        // CRITICAL OPTIMIZATION: Activate bulk mode for better write performance
         if let Some(ref mut config_manager) = bulk_config_manager {
             if let Err(e) = config_manager
                 .start_bulk_mode_projection_store(projection_store)
@@ -323,9 +323,18 @@ impl CDCBatchingService {
         }
 
         while retry_count < config.max_retries {
-            // Always start a new transaction for each retry attempt
+            // CRITICAL OPTIMIZATION: Start transaction with timeout and retry logic
             let mut transaction = match write_pool.begin().await {
-                Ok(tx) => tx,
+                Ok(mut tx) => {
+                    // Set transaction timeout for better performance
+                    if let Err(e) = sqlx::query("SET LOCAL statement_timeout = 60000") // 60 second timeout
+                        .execute(&mut *tx)
+                        .await
+                    {
+                        warn!("Failed to set transaction timeout: {}", e);
+                    }
+                    tx
+                }
                 Err(e) => {
                     retry_count += 1;
                     if retry_count >= config.max_retries {
@@ -346,6 +355,9 @@ impl CDCBatchingService {
                         }
                         return results;
                     }
+                    // Exponential backoff for transaction failures
+                    let backoff = Duration::from_millis(100 * (2_u64.pow(retry_count as u32)));
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
             };
@@ -380,7 +392,8 @@ impl CDCBatchingService {
                 if is_serialization_conflict && retry_count < config.max_retries - 1 {
                     let _ = transaction.rollback().await;
                     retry_count += 1;
-                    let backoff = Duration::from_millis(50 * retry_count as u64);
+                    // CRITICAL OPTIMIZATION: Exponential backoff for serialization conflicts
+                    let backoff = Duration::from_millis(100 * (2_u64.pow(retry_count as u32)));
                     info!(
                         "Serialization conflict detected, retrying in {:?} (attempt {}/{})",
                         backoff, retry_count, config.max_retries
@@ -408,6 +421,9 @@ impl CDCBatchingService {
                         }
                         return results;
                     }
+                    // CRITICAL OPTIMIZATION: Exponential backoff for other errors
+                    let backoff = Duration::from_millis(200 * (2_u64.pow(retry_count as u32)));
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
             }

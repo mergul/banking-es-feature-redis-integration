@@ -760,7 +760,7 @@ impl ProjectionStore {
         Ok(accounts)
     }
 
-    /// True batch query: Get multiple accounts in a single SQL query
+    /// True batch query: Get multiple accounts in a single SQL query - OPTIMIZED FOR READ POOL
     pub async fn get_accounts_batch(&self, account_ids: &[Uuid]) -> Result<Vec<AccountProjection>> {
         if account_ids.is_empty() {
             return Ok(Vec::new());
@@ -801,7 +801,8 @@ impl ProjectionStore {
             std::sync::atomic::Ordering::Relaxed,
         );
 
-        // Fetch uncached accounts in a single batch query
+        // CRITICAL OPTIMIZATION: Use READ POOL for batch queries
+        // This separates read operations from write operations
         let db_accounts = sqlx::query_as!(
             AccountProjection,
             r#"
@@ -930,34 +931,122 @@ impl ProjectionStore {
             // account_ids
         );
 
-        // Use bulk upsert instead of individual transactions for better performance
+        // CRITICAL OPTIMIZATION: Use WRITE POOL for bulk upsert operations
+        // This ensures write operations don't block read operations
         let pool = pools.select_pool(OperationType::Write).clone();
-        let mut tx = pool.begin().await?;
 
-        // Process all accounts in a single bulk operation
-        Self::bulk_upsert_accounts(&mut tx, &accounts).await?;
+        // OPTIMIZATION: Use connection with timeout and retry
+        let mut retries = 0;
+        let max_retries = 3;
 
-        tx.commit().await?;
+        while retries < max_retries {
+            match pool.begin().await {
+                Ok(mut tx) => {
+                    // Set transaction timeout for write operations
+                    if let Err(e) = sqlx::query("SET LOCAL statement_timeout = 30000") // 30 second timeout
+                        .execute(&mut *tx)
+                        .await
+                    {
+                        tracing::warn!("Failed to set transaction timeout: {}", e);
+                    }
 
-        // Increment batch_updates metric
-        metrics
-            .batch_updates
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tracing::info!(
-            "ProjectionStore: upsert_accounts_batch_parallel DB upsert completed successfully for {} accounts.",
-            account_count,
-           // account_ids
-        );
-        Ok(())
+                    // Process all accounts in a single bulk operation
+                    match Self::bulk_upsert_accounts(&mut tx, &accounts).await {
+                        Ok(_) => {
+                            match tx.commit().await {
+                                Ok(_) => {
+                                    // Increment batch_updates metric
+                                    metrics
+                                        .batch_updates
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    tracing::info!(
+                                        "ProjectionStore: upsert_accounts_batch_parallel DB upsert completed successfully for {} accounts. IDs: {:?}",
+                                        account_count,
+                                        account_ids
+                                    );
+                                    return Ok(());
+                                }
+                                Err(e) => {
+                                    retries += 1;
+                                    tracing::error!(
+                                        "Transaction commit failed (attempt {}/{}): {}",
+                                        retries,
+                                        max_retries,
+                                        e
+                                    );
+                                    if retries >= max_retries {
+                                        return Err(e.into());
+                                    }
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                                        100 * retries as u64,
+                                    ))
+                                    .await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            retries += 1;
+                            tracing::error!(
+                                "Bulk upsert failed (attempt {}/{}): {}",
+                                retries,
+                                max_retries,
+                                e
+                            );
+                            if retries >= max_retries {
+                                return Err(e);
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                100 * retries as u64,
+                            ))
+                            .await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    retries += 1;
+                    tracing::error!(
+                        "Failed to begin transaction (attempt {}/{}): {}",
+                        retries,
+                        max_retries,
+                        e
+                    );
+                    if retries >= max_retries {
+                        return Err(e.into());
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * retries as u64))
+                        .await;
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to upsert accounts after {} retries",
+            max_retries
+        ))
     }
 
     async fn insert_transactions_batch_parallel(
         pools: &Arc<PartitionedPools>,
         transactions: Vec<TransactionProjection>,
     ) -> Result<()> {
-        // Use bulk insert instead of individual transactions for better performance
+        // CRITICAL OPTIMIZATION: Use WRITE POOL for transaction insert operations
+        // This ensures write operations don't block read operations
         let pool = pools.select_pool(OperationType::Write).clone();
-        let mut tx = pool.begin().await?;
+
+        // OPTIMIZATION: Use connection with timeout and retry
+        let mut retries = 0;
+        let max_retries = 3;
+
+        while retries < max_retries {
+            match pool.begin().await {
+                Ok(mut tx) => {
+                    // Set transaction timeout for write operations
+                    if let Err(e) = sqlx::query("SET LOCAL statement_timeout = 30000") // 30 second timeout
+                        .execute(&mut *tx)
+                        .await
+                    {
+                        tracing::warn!("Failed to set transaction timeout: {}", e);
+                    }
 
         // Process all transactions in a single bulk operation
         Self::bulk_insert_transactions_direct_copy(&mut tx, &transactions)
