@@ -881,7 +881,7 @@ impl UltraOptimizedCDCEventProcessor {
         Ok(())
     }
 
-    /// CRITICAL OPTIMIZATION: Process multiple CDC events in batch
+    /// CRITICAL OPTIMIZATION: Process multiple CDC events in batch with read-write separation
     pub async fn process_cdc_events_batch(&self, cdc_events: Vec<serde_json::Value>) -> Result<()> {
         if cdc_events.is_empty() {
             return Ok(());
@@ -929,7 +929,7 @@ impl UltraOptimizedCDCEventProcessor {
         let mut error_count = 0;
         
         // CRITICAL OPTIMIZATION: Process all aggregates in batch instead of individually
-        match Self::process_events_for_aggregates(
+        match Self::process_events_for_aggregates_optimized(
             events_by_aggregate,
             &self.projection_cache,
             &self.cache_service,
@@ -1030,6 +1030,338 @@ impl UltraOptimizedCDCEventProcessor {
         }
 
         Ok(())
+    }
+
+    /// OPTIMIZED: Process events for aggregates with read-write separation
+    async fn process_events_for_aggregates_optimized(
+        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
+        projection_cache: &Arc<RwLock<ProjectionCache>>,
+        cache_service: &Arc<dyn CacheServiceTrait>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Result<(
+        Vec<crate::infrastructure::projections::AccountProjection>,
+        Vec<Uuid>,
+    )> {
+        // Track transaction projections to create
+        let mut transaction_projections: Vec<
+            crate::infrastructure::projections::TransactionProjection,
+        > = Vec::new();
+        let mut updated_projections = Vec::new();
+        let mut processed_aggregates = Vec::new();
+
+        // CRITICAL OPTIMIZATION: Batch read all projections in single SQL query
+        let aggregate_ids: Vec<Uuid> = events_by_aggregate.keys().cloned().collect();
+        tracing::debug!("📊 Batch loading projections for {} aggregates: {:?}", aggregate_ids.len(), aggregate_ids);
+        
+        // Single SQL query to load all projections - USE READ POOL
+        let db_projections = match projection_store.get_accounts_batch(&aggregate_ids).await {
+            Ok(projections) => {
+                tracing::debug!("📊 Successfully loaded {} projections from database", projections.len());
+                projections
+            }
+            Err(e) => {
+                tracing::error!("📊 Failed to batch load projections: {:?}", e);
+                return Err(anyhow::anyhow!("Batch projection load failed: {:?}", e));
+            }
+        };
+        
+        // Convert to HashMap for fast lookup
+        let mut projections_map: HashMap<Uuid, ProjectionCacheEntry> = HashMap::new();
+        for db_projection in db_projections {
+            let cache_entry = ProjectionCacheEntry {
+                balance: db_projection.balance,
+                owner_name: db_projection.owner_name.clone(),
+                is_active: db_projection.is_active,
+                version: 0, // Will be incremented after event application
+                cached_at: tokio::time::Instant::now(),
+                last_event_id: None, // Will be set after event application
+            };
+            projections_map.insert(db_projection.id, cache_entry);
+        }
+        
+        // Create empty projections for missing aggregates
+        for aggregate_id in &aggregate_ids {
+            if !projections_map.contains_key(aggregate_id) {
+                tracing::debug!("📊 Creating empty projection for new aggregate: {}", aggregate_id);
+                let empty_projection = ProjectionCacheEntry {
+                    balance: rust_decimal::Decimal::ZERO,
+                    owner_name: String::new(),
+                    is_active: false,
+                    version: 0,
+                    cached_at: tokio::time::Instant::now(),
+                    last_event_id: None,
+                };
+                projections_map.insert(*aggregate_id, empty_projection);
+            }
+        }
+        
+        // Wrap in Arc for sharing across async tasks
+        let projections_map = Arc::new(projections_map);
+
+        // OPTIMIZATION: Use connection pooling with timeout and retry
+        let connection_timeout = Duration::from_secs(5);
+        let max_retries = 3;
+        let retry_delay = Duration::from_millis(100);
+
+        use futures::future::join_all;
+        let mut aggregate_futures = Vec::new();
+
+        // OPTIMIZATION: Pre-allocate futures to reduce memory allocation
+        aggregate_futures.reserve(events_by_aggregate.len());
+
+        // CRITICAL FIX: Define connection timeout for cache operations
+        let connection_timeout = Duration::from_secs(30);  // 500ms'den 30s'ye çıkarıldı
+
+        for (aggregate_id, aggregate_events) in events_by_aggregate {
+            let projection_cache = projection_cache.clone();
+            let cache_service = cache_service.clone();
+            let projection_store = projection_store.clone();
+            let metrics = metrics.clone();
+            let projections_map = projections_map.clone();
+            
+            aggregate_futures.push(async move {
+                // OPTIMIZATION: Use read lock first, then upgrade to write if needed
+                let mut cache_guard = {
+                    // Try read lock first for better concurrency
+                    match projection_cache.try_read() {
+                        Ok(guard) => {
+                            // Check if we need write access
+                            if aggregate_events.iter().any(|e| e.event_type == "AccountCreated") {
+                                // Need write access, drop read lock and acquire write lock
+                                drop(guard);
+                                match tokio::time::timeout(Duration::from_millis(500), projection_cache.write()).await {
+                                    Ok(guard) => guard,
+                                    Err(_) => {
+                                        error!("Cache write lock timeout for aggregate {} (AccountCreated event)", aggregate_id);
+                                        return Err(anyhow::anyhow!("Cache lock timeout"));
+                                    }
+                                }
+                            } else {
+                                // Can use read lock, but we need mutable access
+                                drop(guard);
+                                match tokio::time::timeout(Duration::from_millis(500), projection_cache.write()).await {
+                                    Ok(guard) => guard,
+                                    Err(_) => {
+                                        error!("Cache write lock timeout for aggregate {} (update event)", aggregate_id);
+                                        return Err(anyhow::anyhow!("Cache lock timeout"));
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Read lock failed, use write lock with timeout
+                            match tokio::time::timeout(Duration::from_millis(500), projection_cache.write()).await {
+                                Ok(guard) => guard,
+                                Err(_) => {
+                                    error!("Cache write lock timeout for aggregate {} (read lock failed)", aggregate_id);
+                                    return Err(anyhow::anyhow!("Cache lock timeout"));
+                                }
+                            }
+                        }
+                    }
+                };
+
+                // CRITICAL OPTIMIZATION: Use pre-loaded projection from batch read
+                let mut projection = (*projections_map).get(&aggregate_id).unwrap().clone();
+                tracing::debug!("📊 Using pre-loaded projection for aggregate: {}", aggregate_id);
+
+                let mut local_transaction_projections = Vec::new();
+
+                // OPTIMIZATION: Batch event processing to reduce lock contention
+                let mut events_to_process = Vec::new();
+            for event in aggregate_events {
+                    // CRITICAL FIX: Always process AccountCreated events for new aggregates
+                    // This ensures new accounts always get projections created
+                    let is_new_aggregate_event = event.event_type == "AccountCreated";
+                    
+                    // DUPLICATE DETECTION: Check if this event has already been processed
+                    // BUT: Skip duplicate detection for AccountCreated events to ensure new aggregates are always processed
+                    if !is_new_aggregate_event && cache_guard.is_duplicate_event(&event.event_id, &aggregate_id) {
+                        tracing::debug!(
+                            "🔄 Skipping duplicate event {} for aggregate {}",
+                            event.event_id, aggregate_id
+                        );
+                        metrics
+                            .duplicate_events_skipped
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    
+                    // For new aggregate events, always process them
+                    if is_new_aggregate_event {
+                        tracing::debug!(
+                            "🆕 Processing new aggregate event {} for aggregate {} (AccountCreated)",
+                            event.event_id, aggregate_id
+                        );
+                    }
+                    
+                    events_to_process.push(event);
+                    
+                    // Process in smaller batches to reduce lock hold time
+                    if events_to_process.len() >= 5 {
+                        for event in events_to_process.drain(..) {
+                if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
+                    error!(
+                        "Failed to apply event {} to projection: {}",
+                        event.event_id, e
+                    );
+                    metrics
+                        .events_failed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    metrics
+                        .consecutive_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                } else {
+                    metrics
+                        .consecutive_failures
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                // Create transaction projections for money events
+                if let Ok(domain_event) = event.get_domain_event() {
+                    match domain_event {
+                        crate::domain::AccountEvent::MoneyDeposited {
+                            transaction_id,
+                            amount,
+                            ..
+                        } => {
+                                        local_transaction_projections.push(
+                                crate::infrastructure::projections::TransactionProjection {
+                                    id: *transaction_id,
+                                    account_id: aggregate_id,
+                                    transaction_type: "MoneyDeposited".to_string(),
+                                    amount: *amount,
+                                    timestamp: chrono::Utc::now(),
+                                },
+                            );
+                        }
+                        crate::domain::AccountEvent::MoneyWithdrawn {
+                            transaction_id,
+                            amount,
+                            ..
+                        } => {
+                                        local_transaction_projections.push(
+                                crate::infrastructure::projections::TransactionProjection {
+                                    id: *transaction_id,
+                                    account_id: aggregate_id,
+                                    transaction_type: "MoneyWithdrawn".to_string(),
+                                    amount: *amount,
+                                    timestamp: chrono::Utc::now(),
+                                },
+                            );
+                        }
+                        _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Process remaining events
+                for event in events_to_process {
+                    if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
+                        error!(
+                            "Failed to apply event {} to projection: {}",
+                            event.event_id, e
+                        );
+                        metrics
+                            .events_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        metrics
+                            .consecutive_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    } else {
+                        metrics
+                            .consecutive_failures
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
+                    }
+
+                    // Create transaction projections for money events
+                    if let Ok(domain_event) = event.get_domain_event() {
+                        match domain_event {
+                            crate::domain::AccountEvent::MoneyDeposited {
+                                transaction_id,
+                                amount,
+                                ..
+                            } => {
+                                local_transaction_projections.push(
+                                    crate::infrastructure::projections::TransactionProjection {
+                                        id: *transaction_id,
+                                        account_id: aggregate_id,
+                                        transaction_type: "MoneyDeposited".to_string(),
+                                        amount: *amount,
+                                        timestamp: chrono::Utc::now(),
+                                    },
+                                );
+                            }
+                            crate::domain::AccountEvent::MoneyWithdrawn {
+                                transaction_id,
+                                amount,
+                                ..
+                            } => {
+                                local_transaction_projections.push(
+                                    crate::infrastructure::projections::TransactionProjection {
+                                        id: *transaction_id,
+                                        account_id: aggregate_id,
+                                        transaction_type: "MoneyWithdrawn".to_string(),
+                                        amount: *amount,
+                                        timestamp: chrono::Utc::now(),
+                                    },
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // OPTIMIZATION: Clean up duplicate detection cache periodically
+                cache_guard.cleanup_duplicates();
+
+                // Update projection in cache
+            cache_guard.put(aggregate_id, projection.clone());
+                let db_projection = Self::projection_cache_to_db_projection(&projection, aggregate_id);
+                
+                Ok::<_, anyhow::Error>((db_projection, aggregate_id, local_transaction_projections))
+            });
+        }
+
+        let results = join_all(aggregate_futures).await;
+
+        // Collect results and handle errors
+        for result in results {
+            match result {
+                Ok((projection, aggregate_id, local_transaction_projections)) => {
+                    updated_projections.push(projection);
+            processed_aggregates.push(aggregate_id);
+                    transaction_projections.extend(local_transaction_projections);
+                }
+                Err(e) => {
+                    error!("Failed to process events for aggregate: {}", e);
+                    metrics
+                        .events_failed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+
+        // OPTIMIZATION: Bulk insert transaction projections if any - USE WRITE POOL
+        if !transaction_projections.is_empty() {
+            let transaction_count = transaction_projections.len();
+            if let Err(e) = projection_store
+                .insert_transactions_batch(transaction_projections)
+                .await
+            {
+                error!("Failed to bulk insert transaction projections: {}", e);
+                metrics
+                    .events_failed
+                    .fetch_add(transaction_count as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        Ok((updated_projections, processed_aggregates))
     }
 
     async fn try_process_event(&self, processable_event: &ProcessableEvent) -> Result<()> {

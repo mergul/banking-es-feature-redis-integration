@@ -23,48 +23,50 @@ impl Default for PoolPartitioningConfig {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
                 "postgresql://postgres:Francisco1@localhost:5432/banking_es".to_string()
             }),
+            // CRITICAL OPTIMIZATION: Better connection distribution for read-write separation
             write_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "200".to_string())
+                .unwrap_or_else(|_| "300".to_string()) // Increased from 200 to 300
                 .parse()
-                .unwrap_or(200)
-                / 5, // Write pool gets 1/5 of total connections
+                .unwrap_or(300)
+                / 3, // Write pool gets 1/3 of total connections (increased from 1/5)
             write_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "10".to_string())
+                .unwrap_or_else(|_| "20".to_string()) // Increased from 10 to 20
                 .parse()
-                .unwrap_or(10)
-                / 5, // Write pool gets 1/5 of min connections
+                .unwrap_or(20)
+                / 3, // Write pool gets 1/3 of min connections (increased from 1/5)
             read_pool_max_connections: std::env::var("DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "200".to_string())
+                .unwrap_or_else(|_| "300".to_string()) // Increased from 200 to 300
                 .parse()
-                .unwrap_or(200)
-                * 4
-                / 5, // Read pool gets 4/5 of total connections
+                .unwrap_or(300)
+                * 2
+                / 3, // Read pool gets 2/3 of total connections (decreased from 4/5)
             read_pool_min_connections: std::env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "10".to_string())
+                .unwrap_or_else(|_| "20".to_string()) // Increased from 10 to 20
                 .parse()
-                .unwrap_or(10)
-                * 4
-                / 5, // Read pool gets 4/5 of min connections
+                .unwrap_or(20)
+                * 2
+                / 3, // Read pool gets 2/3 of min connections (decreased from 4/5)
+            // CRITICAL OPTIMIZATION: Optimized timeout values for better performance
             acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT")
-                .unwrap_or_else(|_| "15".to_string())
+                .unwrap_or_else(|_| "10".to_string()) // Reduced from 15 to 10
                 .parse()
-                .unwrap_or(15),
+                .unwrap_or(10),
             write_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-                .unwrap_or_else(|_| "300".to_string())
+                .unwrap_or_else(|_| "180".to_string()) // Reduced from 300 to 180
                 .parse()
-                .unwrap_or(300),
+                .unwrap_or(180),
             read_idle_timeout_secs: std::env::var("DB_IDLE_TIMEOUT")
-                .unwrap_or_else(|_| "300".to_string())
+                .unwrap_or_else(|_| "300".to_string()) // Reduced from 300 to 300 (keep same)
                 .parse()
                 .unwrap_or(300),
             write_max_lifetime_secs: std::env::var("DB_WRITE_MAX_LIFETIME")
-                .unwrap_or_else(|_| "900".to_string())
+                .unwrap_or_else(|_| "600".to_string()) // Reduced from 900 to 600
                 .parse()
-                .unwrap_or(900),
+                .unwrap_or(600),
             read_max_lifetime_secs: std::env::var("DB_MAX_LIFETIME")
-                .unwrap_or_else(|_| "900".to_string())
+                .unwrap_or_else(|_| "1200".to_string()) // Increased from 900 to 1200 for reads
                 .parse()
-                .unwrap_or(900)
+                .unwrap_or(1200)
                 * 2, // Longer lifetime for reads
         }
     }
