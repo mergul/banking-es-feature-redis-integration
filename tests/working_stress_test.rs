@@ -11,7 +11,7 @@ use banking_es::{
         init,
         projections::{ProjectionConfig, ProjectionStore, ProjectionStoreTrait},
         redis_abstraction::RealRedisClient,
-        PoolSelector, ReadOperation, WriteOperation,
+        PoolSelector, ReadOperation, ReadOperationResult, WriteOperation,
     },
 };
 use rust_decimal::Decimal;
@@ -1808,32 +1808,43 @@ async fn test_write_batching_multi_row_inserts() {
         }
     };
 
-    println!("⏳ Waiting for all batch operation results...");
+    println!("⏳ Processing batch operation results...");
     let wait_start = Instant::now();
 
-    // Wait for all results with read batching
-    // for (i, operation_id) in read_operation_ids.iter().enumerate() {
-    //     let operation_start = Instant::now();
+    // Process all results from the batch operation
+    for (i, result) in read_operation_ids.iter().enumerate() {
+        let operation_start = Instant::now();
 
-    //     match read_batching_service.wait_for_result(*operation_id).await {
-    //         Ok(_) => {
-    //             successful_verifications += 1;
-    //             latencies.push(operation_start.elapsed());
-    //         }
-    //         Err(_) => {
-    //             failed_verifications += 1;
-    //             latencies.push(operation_start.elapsed());
-    //         }
-    //     }
+        match result {
+            ReadOperationResult::Account {
+                account_id,
+                account,
+            } => {
+                if account.is_some() {
+                    successful_verifications += 1;
+                    // Add balance to total if account exists
+                    if let Some(ref acc) = account {
+                        total_balance += acc.balance;
+                    }
+                } else {
+                    failed_verifications += 1;
+                }
+                latencies.push(operation_start.elapsed());
+            }
+            _ => {
+                failed_verifications += 1;
+                latencies.push(operation_start.elapsed());
+            }
+        }
 
-    //     if (i + 1) % 10000 == 0 {
-    //         println!(
-    //             "  ✅ Completed {}/{} operations",
-    //             i + 1,
-    //             operation_ids.len()
-    //         );
-    //     }
-    // }
+        if (i + 1) % 10000 == 0 {
+            println!(
+                "  ✅ Completed {}/{} operations",
+                i + 1,
+                read_operation_ids.len()
+            );
+        }
+    }
 
     let total_duration = read_start.elapsed();
     let wait_duration = wait_start.elapsed();
