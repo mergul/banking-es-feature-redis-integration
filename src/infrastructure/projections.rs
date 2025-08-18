@@ -1029,24 +1029,9 @@ impl ProjectionStore {
         pools: &Arc<PartitionedPools>,
         transactions: Vec<TransactionProjection>,
     ) -> Result<()> {
-        // CRITICAL OPTIMIZATION: Use WRITE POOL for transaction insert operations
-        // This ensures write operations don't block read operations
+        // Use bulk insert instead of individual transactions for better performance
         let pool = pools.select_pool(OperationType::Write).clone();
-
-        // OPTIMIZATION: Use connection with timeout and retry
-        let mut retries = 0;
-        let max_retries = 3;
-
-        while retries < max_retries {
-            match pool.begin().await {
-                Ok(mut tx) => {
-                    // Set transaction timeout for write operations
-                    if let Err(e) = sqlx::query("SET LOCAL statement_timeout = 30000") // 30 second timeout
-                        .execute(&mut *tx)
-                        .await
-                    {
-                        tracing::warn!("Failed to set transaction timeout: {}", e);
-                    }
+        let mut tx = pool.begin().await?;
 
         // Process all transactions in a single bulk operation
         Self::bulk_insert_transactions_direct_copy(&mut tx, &transactions)
