@@ -387,7 +387,8 @@ impl DirectReadService {
             AccountProjection,
             "SELECT id, owner_name, balance, is_active, created_at, updated_at 
              FROM account_projections 
-             WHERE id = ANY($1)",
+             WHERE id = ANY($1)
+             ORDER BY id DESC",
             account_ids
         )
         .fetch_all(pool)

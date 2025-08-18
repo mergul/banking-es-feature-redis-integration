@@ -395,9 +395,9 @@ impl ProjectionStore {
             let mut tx = conn.begin().await?;
 
             // Set transaction timeout
-            sqlx::query("SET LOCAL statement_timeout = 15000") // 15 second timeout
-                .execute(&mut *tx)
-                .await?;
+            // sqlx::query("SET LOCAL statement_timeout = 15000") // 15 second timeout
+            //     .execute(&mut *tx)
+            //     .await?;
 
             let mut chunk_results = HashMap::new();
 
@@ -687,7 +687,7 @@ impl ProjectionStore {
             SELECT id, owner_name, balance, is_active, created_at, updated_at
             FROM account_projections
             WHERE is_active = true
-            ORDER BY updated_at DESC
+            ORDER BY id DESC
             LIMIT 10000
             "#
         )
@@ -809,7 +809,7 @@ impl ProjectionStore {
             SELECT id, owner_name, balance, is_active, created_at, updated_at
             FROM account_projections
             WHERE id = ANY($1)
-            ORDER BY updated_at DESC
+            ORDER BY id DESC
             "#,
             &uncached_ids
         )
@@ -960,9 +960,9 @@ impl ProjectionStore {
                                         .batch_updates
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     tracing::info!(
-                                        "ProjectionStore: upsert_accounts_batch_parallel DB upsert completed successfully for {} accounts. IDs: {:?}",
+                                        "ProjectionStore: upsert_accounts_batch_parallel DB upsert completed successfully for {} accounts.",
                                         account_count,
-                                        account_ids
+                                        // account_ids
                                     );
                                     return Ok(());
                                 }
