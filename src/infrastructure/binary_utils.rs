@@ -1,5 +1,6 @@
 use byteorder::{BigEndian, WriteBytesExt};
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use std::io::{Cursor, Write};
 use uuid::Uuid;
 
@@ -133,7 +134,97 @@ impl PgCopyBinaryWriter {
         self.buffer.write_all(&value.to_be_bytes())?;
         Ok(())
     }
+    /// CRITICAL FIX 4: Added decimal support (was missing)
+    pub fn write_decimal(
+        &mut self,
+        decimal: &Decimal,
+        field_name: &str,
+    ) -> Result<(), std::io::Error> {
+        let pos_before = self.buffer.get_ref().len();
 
+        // Convert Decimal to PostgreSQL NUMERIC binary format
+        let decimal_str = decimal.to_string();
+
+        // Parse the decimal string to extract parts
+        let (sign, digits_str) = if decimal_str.starts_with('-') {
+            (0x4000u16, &decimal_str[1..]) // Negative sign
+        } else {
+            (0x0000u16, decimal_str.as_str()) // Positive
+        };
+
+        // Split into integer and fractional parts
+        let (integer_part, fractional_part) = if let Some(dot_pos) = digits_str.find('.') {
+            (&digits_str[..dot_pos], &digits_str[dot_pos + 1..])
+        } else {
+            (digits_str, "")
+        };
+
+        // Calculate scale (number of digits after decimal point)
+        let scale = fractional_part.len() as i16;
+
+        // Combine all digits (remove decimal point)
+        let all_digits = format!("{}{}", integer_part, fractional_part);
+
+        // PostgreSQL NUMERIC stores digits in groups of 4 decimal digits per 16-bit word
+        // Pad with leading zeros to make length multiple of 4
+        let padded_digits = if all_digits.len() % 4 == 0 {
+            all_digits.clone()
+        } else {
+            let padding = 4 - (all_digits.len() % 4);
+            format!("{}{}", "0".repeat(padding), all_digits)
+        };
+
+        // Convert groups of 4 digits to 16-bit words
+        let mut digit_words = Vec::new();
+        for chunk in padded_digits.as_bytes().chunks(4) {
+            let digit_str = std::str::from_utf8(chunk).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8 in decimal")
+            })?;
+            let digit_value: u16 = digit_str.parse().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid digit group in decimal",
+                )
+            })?;
+            digit_words.push(digit_value);
+        }
+
+        // Calculate weight (position of most significant digit group relative to decimal point)
+        let total_digits = all_digits.len() as i16;
+        let integer_digits = integer_part.len() as i16;
+        let weight = if integer_digits > 0 {
+            ((integer_digits - 1) / 4) as i16
+        } else {
+            -1 - ((scale - 1) / 4)
+        };
+
+        // Build the binary representation
+        let ndigits = digit_words.len() as u16;
+        let weight = weight;
+        let sign = sign;
+        let dscale = scale as u16;
+
+        // Calculate total size: 8 bytes header + (ndigits * 2 bytes)
+        let data_size = 8 + (ndigits as i32 * 2);
+
+        // Write length field
+        self.buffer.write_i32::<BigEndian>(data_size)?;
+
+        // Write NUMERIC header
+        self.buffer.write_u16::<BigEndian>(ndigits)?; // Number of digit groups
+        self.buffer.write_i16::<BigEndian>(weight)?; // Weight
+        self.buffer.write_u16::<BigEndian>(sign)?; // Sign
+        self.buffer.write_u16::<BigEndian>(dscale)?; // Display scale
+
+        // Write digit groups
+        for digit_word in digit_words {
+            self.buffer.write_u16::<BigEndian>(digit_word)?;
+        }
+
+        // debug_mode is only available on Diagnostic writer; keep silent here
+
+        Ok(())
+    }
     /// Finish the COPY operation
     pub fn finish(mut self) -> Result<Vec<u8>, std::io::Error> {
         // Write PGCOPY trailer

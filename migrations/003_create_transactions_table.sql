@@ -21,6 +21,17 @@ BEGIN
             FOR VALUES FROM ('2024-02-01') TO ('2024-03-01')
             WITH (fillfactor = 90);
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'transaction_projections_2025_08') THEN
+        CREATE TABLE transaction_projections_2025_08 PARTITION OF transaction_projections
+            FOR VALUES FROM ('2025_08-01') TO ('2025_09-01')
+            WITH (fillfactor = 90);
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'transaction_projections_2025_09') THEN
+        CREATE TABLE transaction_projections_2025_09 PARTITION OF transaction_projections
+            FOR VALUES FROM ('2025_09-01') TO ('2025_10-01')
+            WITH (fillfactor = 90);
+    END IF;
 END$$;
 
 -- Optimized indexes for transaction projections
@@ -67,6 +78,24 @@ BEGIN
     ) THEN
         ALTER TABLE transaction_projections_2024_02 
             ADD CONSTRAINT unique_projections_id_timestamp_2024_02 
+            UNIQUE (id, timestamp);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'unique_projections_id_timestamp_2025_08'
+    ) THEN
+        ALTER TABLE transaction_projections_2025_08 
+            ADD CONSTRAINT unique_projections_id_timestamp_2025_08 
+            UNIQUE (id, timestamp);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'unique_projections_id_timestamp_2025_09'
+    ) THEN
+        ALTER TABLE transaction_projections_2025_09 
+            ADD CONSTRAINT unique_projections_id_timestamp_2025_09 
             UNIQUE (id, timestamp);
     END IF;
 END$$;

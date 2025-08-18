@@ -2054,12 +2054,12 @@ impl UltraOptimizedCDCEventProcessor {
             })
             .ok_or_else(|| anyhow::anyhow!("Missing event_type"))?
             .to_string();
-        tracing::info!(
-            "CDC EXTRACTED: aggregate_id={}, event_id={}, event_type={}",
-            aggregate_id,
-            event_id,
-            event_type
-        );
+        // tracing::info!(
+        //     "CDC EXTRACTED: aggregate_id={}, event_id={}, event_type={}",
+        //     aggregate_id,
+        //     event_id,
+        //     event_type
+        // );
         let payload_str = event_data
             .get("payload")
             .and_then(|v| match v {
@@ -2141,12 +2141,12 @@ impl UltraOptimizedCDCEventProcessor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing event_type"))?
             .to_string();
-        tracing::info!(
-            "CDC EXTRACTED: aggregate_id={}, event_id={}, event_type={}",
-            aggregate_id,
-            event_id,
-            event_type
-        );
+        // tracing::info!(
+        //     "CDC EXTRACTED: aggregate_id={}, event_id={}, event_type={}",
+        //     aggregate_id,
+        //     event_id,
+        //     event_type
+        // );
 
         let payload_str = event_data
             .get("payload")

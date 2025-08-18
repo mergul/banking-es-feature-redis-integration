@@ -1399,7 +1399,7 @@ async fn test_write_batching_multi_row_inserts() {
     println!("\n📝 PHASE 1: Create New Test Accounts with Multi-Aggregate Batching");
     println!("===================================================================");
 
-    let account_count = 5000; // Use a smaller number for testing
+    let account_count = 10000; // Use a smaller number for testing
     println!(
         "🔧 Creating {} new test accounts with batching...",
         account_count
@@ -1455,7 +1455,7 @@ async fn test_write_batching_multi_row_inserts() {
             initial_balance,
         });
 
-        println!("🔍 Prepared operation {} for aggregate {}", i, aggregate_id);
+        // println!("🔍 Prepared operation {} for aggregate {}", i, aggregate_id);
     }
 
     let account_creation_start = Instant::now();
@@ -1467,7 +1467,7 @@ async fn test_write_batching_multi_row_inserts() {
     // Use hash-based super batch processing
     println!("🚀 Using hash-based super batch processing...");
     let operation_ids = match batching_service
-        .submit_operations_hash_super_batch(operations, 8) // 8 super batches with locking
+        .submit_operations_hash_super_batch(operations, 16) // 8 super batches with locking
         .await
     {
         Ok(ids) => {
@@ -1513,7 +1513,7 @@ async fn test_write_batching_multi_row_inserts() {
                 if result.success {
                     if let Some(account_id) = result.result {
                         account_ids.push(account_id);
-                        println!("✅ Account {} created successfully: {}", i, account_id);
+                        // println!("✅ Account {} created successfully: {}", i, account_id);
                     } else {
                         println!("⚠️  Account {} creation succeeded but no ID returned", i);
                     }
@@ -1591,7 +1591,7 @@ async fn test_write_batching_multi_row_inserts() {
     // Use hash-based super batch processing for write operations
     let write_start = Instant::now();
     let write_operation_ids = match batching_service_clone_phase2
-        .submit_operations_hash_super_batch(write_operations, 8) // 8 super batches with locking
+        .submit_operations_hash_super_batch(write_operations, 16) // 8 super batches with locking
         .await
     {
         Ok(ids) => {

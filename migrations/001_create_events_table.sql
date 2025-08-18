@@ -114,9 +114,9 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_version
     ON snapshots (version)
     WITH (fillfactor = 90);
 
--- Add GIN index for JSONB queries (GIN indexes don't support fillfactor)
-CREATE INDEX IF NOT EXISTS idx_snapshots_data_gin
-    ON snapshots USING GIN (snapshot_data jsonb_path_ops);
+-- Note: GIN index on snapshot_data removed since it will be converted to BYTEA in later migration
+-- CREATE INDEX IF NOT EXISTS idx_snapshots_data_gin
+--     ON snapshots USING GIN (snapshot_data jsonb_path_ops);
 
 -- Optional: Create a function to automatically create future partitions
 CREATE OR REPLACE FUNCTION create_monthly_partition(table_name TEXT, start_date DATE)

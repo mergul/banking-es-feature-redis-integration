@@ -2452,10 +2452,10 @@ impl EventStore {
         let start_time = std::time::Instant::now();
 
         // Use READ COMMITTED for better performance
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-            .execute(&mut **tx)
-            .await
-            .map_err(EventStoreError::DatabaseError)?;
+        // sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        //     .execute(&mut **tx)
+        //     .await
+        //     .map_err(EventStoreError::DatabaseError)?;
 
         // Pre-calculate total events for metrics
         let total_events: usize = events_by_aggregate
@@ -3196,6 +3196,23 @@ impl Default for EventMetadata {
             source: "system".to_string(),
             schema_version: "1.0".to_string(),
             tags: Vec::new(),
+        }
+    }
+}
+
+impl EventMetadata {
+    pub fn to_json_value(&self) -> serde_json::Value {
+        // Prefer serde serialization if available; fallback to manual mapping
+        match serde_json::to_value(self) {
+            Ok(v) => v,
+            Err(_) => serde_json::json!({
+                "correlation_id": self.correlation_id,
+                "causation_id": self.causation_id,
+                "user_id": self.user_id,
+                "source": self.source,
+                "schema_version": self.schema_version,
+                "tags": self.tags,
+            }),
         }
     }
 }

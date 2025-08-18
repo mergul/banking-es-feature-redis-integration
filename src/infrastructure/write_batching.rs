@@ -22,7 +22,7 @@ use crate::infrastructure::redis_aggregate_lock::{
 };
 use rand::Rng;
 
-const NUM_PARTITIONS: usize = 8; // Increased from 4 to 8 to reduce partition conflicts
+const NUM_PARTITIONS: usize = 16; // Increased from 4 to 8 to reduce partition conflicts
 const DEFAULT_BATCH_SIZE: usize = 2000;
 const CREATE_BATCH_SIZE: usize = 2000; // Optimized batch size for create operations
 const CREATE_PARTITION_ID: usize = 0; // Dedicated partition for create operations
@@ -3209,32 +3209,93 @@ impl WriteBatchingService {
                 .map_err(|e| e.to_string())
         } else {
             // Execute events and outbox operations sequentially within the same transaction
-            let events_res = event_store
-                .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
-                .await
-                .map_err(|e| e.to_string());
+            // ✅ Option 2: Structured Async Function approach
+            let cdc_repo = crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(Arc::new(
+                crate::infrastructure::PartitionedPools {
+                    write_pool: (**write_pool).clone(),
+                    read_pool: (**write_pool).clone(),
+                    config: crate::infrastructure::PoolPartitioningConfig::default(),
+                },
+            ));
+            // ✅ Parallel execution using separate transactions
+            let (events_res, outbox_res) = tokio::join!(
+                async {
+                    event_store
+                        .save_events_multi_aggregate_in_transaction(
+                            &mut transaction,
+                            events_by_aggregate,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                async {
+                    // Create separate transaction for outbox
+                    let mut outbox_tx = write_pool.begin().await.map_err(|e| e.to_string())?;
+                    let result = cdc_repo
+                        .add_pending_messages_copy(&mut outbox_tx, all_outbox_messages.clone())
+                        .await
+                        .map_err(|e| e.to_string());
 
-            let outbox_res = if events_res.is_ok() {
-                let cdc_repo = crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(
-                    Arc::new(crate::infrastructure::PartitionedPools {
-                        write_pool: (**write_pool).clone(),
-                        read_pool: (**write_pool).clone(),
-                        config: crate::infrastructure::PoolPartitioningConfig::default(),
-                    }),
-                );
-                cdc_repo
-                    .add_pending_messages_copy(&mut transaction, all_outbox_messages.clone())
-                    .await
-                    .map_err(|e| e.to_string())
-            } else {
-                Err("Events operation failed, skipping outbox".to_string())
-            };
+                    // Commit outbox transaction if successful
+                    if result.is_ok() {
+                        outbox_tx.commit().await.map_err(|e| e.to_string())?;
+                    } else {
+                        outbox_tx.rollback().await.map_err(|e| e.to_string())?;
+                    }
 
-            // Handle results - fail if either fails
+                    result
+                }
+            );
+
+            // ✅ Handle results with orphaned cleanup
             match (events_res, outbox_res) {
                 (Ok(_), Ok(_)) => Ok(()),
-                (Err(e), _) => Err(e),
-                (_, Err(e)) => Err(e),
+                (Err(e), Ok(_)) => {
+                    // ✅ Events failed but outbox succeeded - schedule orphaned cleanup
+                    warn!("Events failed but outbox succeeded - scheduling orphaned cleanup for {} messages", all_outbox_messages.len());
+
+                    // Schedule orphaned cleanup in background
+                    let outbox_messages = all_outbox_messages.clone();
+                    let write_pool = write_pool.clone();
+                    tokio::spawn(async move {
+                        if let Err(cleanup_err) =
+                            Self::schedule_orphaned_cleanup(write_pool, outbox_messages).await
+                        {
+                            error!("Failed to schedule orphaned cleanup: {}", cleanup_err);
+                        }
+                    });
+
+                    Err(e)
+                }
+                (Ok(_), Err(e)) => {
+                    // ✅ Events succeeded but outbox failed - retry outbox only
+                    warn!(
+                        "Events succeeded but outbox failed - retrying outbox for {} messages",
+                        all_outbox_messages.len()
+                    );
+
+                    // Retry outbox in background (events already saved)
+                    let outbox_messages = all_outbox_messages.clone();
+                    let write_pool = write_pool.clone();
+                    tokio::spawn(async move {
+                        if let Err(retry_err) =
+                            Self::retry_outbox_only(write_pool, outbox_messages).await
+                        {
+                            error!(
+                                "Failed to retry outbox after events succeeded: {}",
+                                retry_err
+                            );
+                            // Log warning but don't fail the operation (eventual consistency)
+                            warn!("Events saved but outbox failed after retry - eventual consistency mode");
+                        } else {
+                            info!("Successfully retried outbox after events succeeded");
+                        }
+                    });
+
+                    // Don't fail the operation - events are already saved
+                    Ok(())
+                }
+                (Err(e), Err(_)) => Err(e),
             }
         };
 
@@ -3556,7 +3617,7 @@ impl BulkInsertConfigManager {
         }
 
         // Apply bulk config
-        self.apply_bulk_event_store_config(event_store).await?;
+        //  self.apply_bulk_event_store_config(event_store).await?;
 
         self.is_bulk_mode = true;
         info!("🚀 EventStore bulk mode activated");
@@ -3573,7 +3634,7 @@ impl BulkInsertConfigManager {
         }
 
         // Apply bulk config
-        self.apply_bulk_projection_config(projection_store).await?;
+        //  self.apply_bulk_projection_config(projection_store).await?;
 
         self.is_bulk_mode = true;
         info!("🚀 ProjectionStore bulk mode activated");
@@ -3590,10 +3651,10 @@ impl BulkInsertConfigManager {
         }
 
         // Restore original config
-        if let Some(original_config) = self.original_event_store_config.take() {
-            self.restore_event_store_config(event_store, original_config)
-                .await?;
-        }
+        // if let Some(original_config) = self.original_event_store_config.take() {
+        //     self.restore_event_store_config(event_store, original_config)
+        //         .await?;
+        // }
 
         self.is_bulk_mode = false;
         info!("🔄 EventStore bulk mode deactivated");
@@ -3610,10 +3671,10 @@ impl BulkInsertConfigManager {
         }
 
         // Restore original config
-        if let Some(original_config) = self.original_projection_config.take() {
-            self.restore_projection_config(projection_store, original_config)
-                .await?;
-        }
+        // if let Some(original_config) = self.original_projection_config.take() {
+        //     self.restore_projection_config(projection_store, original_config)
+        //         .await?;
+        // }
 
         self.is_bulk_mode = false;
         info!("🔄 ProjectionStore bulk mode deactivated");
@@ -3625,24 +3686,24 @@ impl BulkInsertConfigManager {
         event_store: &Arc<dyn EventStoreTrait>,
     ) -> Result<()> {
         // Event store'un any trait'ini kullanarak config'e erişim sağla
-        if let Some(event_store_impl) = event_store
-            .as_any()
-            .downcast_ref::<crate::infrastructure::event_store::EventStore>(
-        ) {
-            // Mevcut config'i kaydet
-            let current_config = event_store_impl.get_config();
-            self.original_event_store_config = Some(current_config);
+        // if let Some(event_store_impl) = event_store
+        //     .as_any()
+        //     .downcast_ref::<crate::infrastructure::event_store::EventStore>(
+        // ) {
+        //     // Mevcut config'i kaydet
+        //     let current_config = event_store_impl.get_config();
+        //     self.original_event_store_config = Some(current_config);
 
-            // Bulk config'i uygula (PostgreSQL ayarları dahil)
-            let _original_config = unsafe {
-                let event_store_mut = event_store_impl
-                    as *const crate::infrastructure::event_store::EventStore
-                    as *mut crate::infrastructure::event_store::EventStore;
-                (*event_store_mut).apply_bulk_config_with_postgres().await
-            };
+        //     // Bulk config'i uygula (PostgreSQL ayarları dahil)
+        //     let _original_config = unsafe {
+        //         let event_store_mut = event_store_impl
+        //             as *const crate::infrastructure::event_store::EventStore
+        //             as *mut crate::infrastructure::event_store::EventStore;
+        //         (*event_store_mut).apply_bulk_config_with_postgres().await
+        //     };
 
-            debug!("Event store bulk config applied: batch_size=5000, processors=16, synchronous_commit=off (full_page_writes requires server restart)");
-        }
+        //     debug!("Event store bulk config applied: batch_size=5000, processors=16, synchronous_commit=off (full_page_writes requires server restart)");
+        // }
 
         Ok(())
     }
@@ -3652,22 +3713,22 @@ impl BulkInsertConfigManager {
         event_store: &Arc<dyn EventStoreTrait>,
         original_config: EventStoreConfig,
     ) -> Result<()> {
-        if let Some(event_store_impl) = event_store
-            .as_any()
-            .downcast_ref::<crate::infrastructure::event_store::EventStore>(
-        ) {
-            // Orijinal config'i geri yükle (PostgreSQL ayarları dahil)
-            unsafe {
-                let event_store_mut = event_store_impl
-                    as *const crate::infrastructure::event_store::EventStore
-                    as *mut crate::infrastructure::event_store::EventStore;
-                (*event_store_mut)
-                    .restore_config_with_postgres(original_config)
-                    .await?;
-            }
+        // if let Some(event_store_impl) = event_store
+        //     .as_any()
+        //     .downcast_ref::<crate::infrastructure::event_store::EventStore>(
+        // ) {
+        //     // Orijinal config'i geri yükle (PostgreSQL ayarları dahil)
+        //     unsafe {
+        //         let event_store_mut = event_store_impl
+        //             as *const crate::infrastructure::event_store::EventStore
+        //             as *mut crate::infrastructure::event_store::EventStore;
+        //         (*event_store_mut)
+        //             .restore_config_with_postgres(original_config)
+        //             .await?;
+        //     }
 
-            info!("🔄 Event store orijinal config geri yüklendi (PostgreSQL settings restored)");
-        }
+        //     info!("🔄 Event store orijinal config geri yüklendi (PostgreSQL settings restored)");
+        // }
 
         Ok(())
     }
@@ -3677,26 +3738,26 @@ impl BulkInsertConfigManager {
         projection_store: &Arc<dyn ProjectionStoreTrait>,
     ) -> Result<()> {
         // Projection store'un any trait'ini kullanarak config'e erişim sağla
-        if let Some(projection_store_impl) = projection_store
-            .as_any()
-            .downcast_ref::<crate::infrastructure::projections::ProjectionStore>(
-        ) {
-            // Mevcut config'i kaydet
-            let current_config = projection_store_impl.get_config();
-            self.original_projection_config = Some(current_config);
+        // if let Some(projection_store_impl) = projection_store
+        //     .as_any()
+        //     .downcast_ref::<crate::infrastructure::projections::ProjectionStore>(
+        // ) {
+        //     // Mevcut config'i kaydet
+        //     let current_config = projection_store_impl.get_config();
+        //     self.original_projection_config = Some(current_config);
 
-            // Bulk config'i uygula (PostgreSQL ayarları dahil)
-            let _original_config = unsafe {
-                let projection_store_mut = projection_store_impl
-                    as *const crate::infrastructure::projections::ProjectionStore
-                    as *mut crate::infrastructure::projections::ProjectionStore;
-                (*projection_store_mut)
-                    .apply_bulk_config_with_postgres()
-                    .await
-            };
+        //     // Bulk config'i uygula (PostgreSQL ayarları dahil)
+        //     let _original_config = unsafe {
+        //         let projection_store_mut = projection_store_impl
+        //             as *const crate::infrastructure::projections::ProjectionStore
+        //             as *mut crate::infrastructure::projections::ProjectionStore;
+        //         (*projection_store_mut)
+        //             .apply_bulk_config_with_postgres()
+        //             .await
+        //     };
 
-            info!("📊 Projection store bulk config uygulandı: batch_size=2000, synchronous_commit=off (full_page_writes requires server restart)");
-        }
+        //     info!("📊 Projection store bulk config uygulandı: batch_size=2000, synchronous_commit=off (full_page_writes requires server restart)");
+        // }
 
         Ok(())
     }
@@ -3706,24 +3767,24 @@ impl BulkInsertConfigManager {
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         original_config: ProjectionConfig,
     ) -> Result<()> {
-        if let Some(projection_store_impl) = projection_store
-            .as_any()
-            .downcast_ref::<crate::infrastructure::projections::ProjectionStore>(
-        ) {
-            // Orijinal config'i geri yükle (PostgreSQL ayarları dahil)
-            unsafe {
-                let projection_store_mut = projection_store_impl
-                    as *const crate::infrastructure::projections::ProjectionStore
-                    as *mut crate::infrastructure::projections::ProjectionStore;
-                (*projection_store_mut)
-                    .restore_config_with_postgres(original_config)
-                    .await?;
-            }
+        // if let Some(projection_store_impl) = projection_store
+        //     .as_any()
+        //     .downcast_ref::<crate::infrastructure::projections::ProjectionStore>(
+        // ) {
+        //     // Orijinal config'i geri yükle (PostgreSQL ayarları dahil)
+        //     unsafe {
+        //         let projection_store_mut = projection_store_impl
+        //             as *const crate::infrastructure::projections::ProjectionStore
+        //             as *mut crate::infrastructure::projections::ProjectionStore;
+        //         (*projection_store_mut)
+        //             .restore_config_with_postgres(original_config)
+        //             .await?;
+        //     }
 
-            info!(
-                "🔄 Projection store orijinal config geri yüklendi (PostgreSQL settings restored)"
-            );
-        }
+        //     info!(
+        //         "🔄 Projection store orijinal config geri yüklendi (PostgreSQL settings restored)"
+        //     );
+        // }
 
         Ok(())
     }

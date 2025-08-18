@@ -177,17 +177,17 @@ impl ProjectionStoreTrait for ProjectionStore {
     }
     async fn upsert_accounts_batch(&self, accounts: Vec<AccountProjection>) -> Result<()> {
         tracing::info!(
-            "ProjectionStore: upsert_accounts_batch called with {} accounts. IDs: {:?}",
+            "ProjectionStore: upsert_accounts_batch called with {} accounts.",
             accounts.len(),
-            accounts.iter().map(|a| a.id).collect::<Vec<_>>()
+            // accounts.iter().map(|a| a.id).collect::<Vec<_>>()
         );
-        for acc in &accounts {
-            tracing::info!(
-                "[ProjectionStore] upsert_accounts_batch: account_id={}, owner_name={}",
-                acc.id,
-                acc.owner_name
-            );
-        }
+        // for acc in &accounts {
+        //     tracing::info!(
+        //         "[ProjectionStore] upsert_accounts_batch: account_id={}, owner_name={}",
+        //         acc.id,
+        //         acc.owner_name
+        //     );
+        // }
         let send_result = self
             .update_sender
             .send(ProjectionUpdate::AccountBatch(accounts));
@@ -934,7 +934,7 @@ impl ProjectionStore {
                             account_batch.extend(accounts);
                             // CRITICAL OPTIMIZATION: Process immediately if batch is large enough
                             if account_batch.len() >= config.batch_size { // Use config.batch_size instead of hardcoded 500
-                                tracing::info!("ProjectionStore: update_processor flushing account batch of size {}. IDs: {:?}", account_batch.len(), account_batch.iter().map(|a| a.id).collect::<Vec<_>>());
+                                tracing::info!("ProjectionStore: update_processor flushing account batch of size {}.", account_batch.len());
                                 let batch_to_process = std::mem::take(&mut account_batch);
                                 let pools = pools.clone();
                                 let metrics = metrics.clone();
@@ -962,7 +962,7 @@ impl ProjectionStore {
                 }
                 _ = interval.tick() => {
                     if !account_batch.is_empty() {
-                        tracing::info!("ProjectionStore: update_processor flushing account batch of size {}. IDs: {:?}", account_batch.len(), account_batch.iter().map(|a| a.id).collect::<Vec<_>>());
+                        tracing::info!("ProjectionStore: update_processor flushing account batch of size {}.", account_batch.len());
                         let batch_to_process = std::mem::take(&mut account_batch);
                         let pools = pools.clone();
                         let metrics = metrics.clone();
@@ -994,9 +994,9 @@ impl ProjectionStore {
         let account_count = accounts.len();
         let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
         tracing::info!(
-            "ProjectionStore: upsert_accounts_batch_parallel flushing {} accounts to DB. IDs: {:?}",
+            "ProjectionStore: upsert_accounts_batch_parallel flushing {} accounts to DB.",
             account_count,
-            account_ids
+            // account_ids
         );
 
         // Use bulk upsert instead of individual transactions for better performance
@@ -1013,9 +1013,9 @@ impl ProjectionStore {
             .batch_updates
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::info!(
-            "ProjectionStore: upsert_accounts_batch_parallel DB upsert completed successfully for {} accounts. IDs: {:?}",
+            "ProjectionStore: upsert_accounts_batch_parallel DB upsert completed successfully for {} accounts.",
             account_count,
-            account_ids
+           // account_ids
         );
         Ok(())
     }
@@ -1029,7 +1029,9 @@ impl ProjectionStore {
         let mut tx = pool.begin().await?;
 
         // Process all transactions in a single bulk operation
-        Self::bulk_insert_transactions(&mut tx, &transactions).await?;
+        Self::bulk_insert_transactions_direct_copy(&mut tx, &transactions)
+            .await
+            .map_err(|e| anyhow::anyhow!("Error inserting transactions with COPY: {}", e));
 
         tx.commit().await?;
         Ok(())
@@ -1040,10 +1042,10 @@ impl ProjectionStore {
         accounts: &[AccountProjection],
     ) -> Result<()> {
         let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
-        tracing::info!(
-            "[ProjectionStore] bulk_upsert_accounts: about to upsert accounts: ids={:?}",
-            account_ids
-        );
+        // tracing::info!(
+        //     "[ProjectionStore] bulk_upsert_accounts: about to upsert accounts: ids={:?}",
+        //     account_ids
+        // );
 
         // Only deduplicate if we have more than 1 account to avoid unnecessary overhead
         let accounts_to_upsert = if accounts.len() > 1 {
@@ -1145,7 +1147,7 @@ impl ProjectionStore {
         let amounts: Vec<Decimal> = transactions.iter().map(|t| t.amount).collect();
         let timestamps: Vec<DateTime<Utc>> = transactions.iter().map(|t| t.timestamp).collect();
 
-        sqlx::query!(
+        let result = sqlx::query!(
             r#"
             INSERT INTO transaction_projections (id, account_id, transaction_type, amount, timestamp)
             SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::decimal[], $5::timestamptz[])
@@ -1158,7 +1160,88 @@ impl ProjectionStore {
             &timestamps
         )
         .execute(&mut **tx)
-        .await?;
+        .await;
+
+        match result {
+            Ok(res) => {
+                tracing::info!(
+                "[ProjectionStore] bulk_insert_transactions: Successfully processed {} transactions, rows_affected={}",
+                transactions.len(),
+                res.rows_affected()
+            );
+                if res.rows_affected() < transactions.len() as u64 {
+                    tracing::warn!(
+                    "[ProjectionStore] bulk_insert_transactions: {} transactions were skipped due to conflicts",
+                    transactions.len() as u64 - res.rows_affected()
+                );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                "[ProjectionStore] bulk_insert_transactions: Failed to insert {} transactions: {}",
+                transactions.len(),
+                e
+            );
+
+                // Log additional error details
+                if let sqlx::Error::Database(db_err) = &e {
+                    tracing::error!(
+                    "[ProjectionStore] Database error - code: {:?}, message: {}, constraint: {:?}",
+                    db_err.code(),
+                    db_err.message(),
+                    db_err.constraint()
+                );
+                }
+
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Direct COPY bulk insert transactions - assumes records are unique (no conflicts)
+    /// This is faster than temp table approach but will fail if conflicts occur
+    async fn bulk_insert_transactions_direct_copy(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        transactions: &[TransactionProjection],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        if transactions.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            "[ProjectionStore] bulk_insert_transactions_direct_copy: processing {} transactions (assuming unique)",
+            transactions.len()
+        );
+
+        // CRITICAL: Use fixed binary writer
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new();
+        for transaction in transactions {
+            writer.write_row(5)?; // 5 fields
+            writer.write_uuid(&transaction.id)?;
+            writer.write_uuid(&transaction.account_id)?;
+            writer.write_text(&transaction.transaction_type)?;
+            writer.write_decimal(&transaction.amount, "amount")?;
+            writer.write_timestamp(&transaction.timestamp)?;
+        }
+        let binary_data = writer.finish()?;
+
+        tracing::debug!(
+            "[ProjectionStore] Generated binary data: {} bytes for {} tuples",
+            binary_data.len(),
+            transactions.len()
+        );
+
+        // Execute direct COPY to target table
+        let copy_command = "COPY transaction_projections FROM STDIN WITH (FORMAT BINARY)";
+        let mut copy_in = tx.copy_in_raw(copy_command).await?;
+        copy_in.send(binary_data.as_slice()).await?;
+        let copy_result = copy_in.finish().await?;
+
+        tracing::info!(
+            "[ProjectionStore] Direct COPY successfully inserted {} transactions",
+            copy_result
+        );
 
         Ok(())
     }
