@@ -3208,7 +3208,6 @@ impl WriteBatchingService {
                 .await
                 .map_err(|e| e.to_string())
         } else {
-            // Execute events and outbox operations sequentially within the same transaction
             // ✅ Option 2: Structured Async Function approach
             let cdc_repo = crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(Arc::new(
                 crate::infrastructure::PartitionedPools {

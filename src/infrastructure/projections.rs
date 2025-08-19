@@ -1286,6 +1286,65 @@ impl ProjectionStore {
         Ok(())
     }
 
+    /// NEW: Direct COPY for new accounts (INSERT only, no UPSERT)
+    /// This is optimized for AccountCreated events where we know the account doesn't exist
+    pub async fn bulk_insert_new_accounts_with_copy(
+        &self,
+        accounts: Vec<AccountProjection>,
+    ) -> Result<()> {
+        if accounts.is_empty() {
+            return Ok(());
+        }
+
+        let account_count = accounts.len();
+        tracing::info!(
+            "[ProjectionStore] bulk_insert_new_accounts_with_copy: processing {} new accounts",
+            account_count
+        );
+
+        let pool = self.pools.select_pool(OperationType::Write);
+        let mut tx = pool.begin().await?;
+
+        // CRITICAL: Direct COPY to target table (no temp table needed for new accounts)
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new();
+        for account in &accounts {
+            writer.write_row(6)?; // 6 fields
+            writer.write_uuid(&account.id)?;
+            writer.write_text(&account.owner_name)?;
+            writer.write_decimal(&account.balance, "balance")?;
+            writer.write_bool(account.is_active)?;
+            writer.write_timestamp(&account.created_at)?;
+            writer.write_timestamp(&account.updated_at)?;
+        }
+        let binary_data = writer.finish()?;
+
+        tracing::debug!(
+            "[ProjectionStore] Generated binary data: {} bytes for {} new accounts",
+            binary_data.len(),
+            accounts.len()
+        );
+
+        // CRITICAL: Direct COPY to target table (no temp table, no UPSERT)
+        let copy_command = "COPY account_projections FROM STDIN WITH (FORMAT BINARY)";
+        let mut copy_in = tx.copy_in_raw(copy_command).await?;
+        copy_in.send(binary_data.as_slice()).await?;
+        let copy_result = copy_in.finish().await?;
+
+        tracing::info!(
+            "[ProjectionStore] Direct COPY successfully inserted {} new accounts (no temp table, no UPSERT)",
+            copy_result
+        );
+
+        tx.commit().await?;
+
+        // Update metrics
+        self.metrics
+            .batch_updates
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        Ok(())
+    }
+
     async fn cache_cleanup_worker(
         account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
         transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
