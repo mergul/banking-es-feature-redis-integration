@@ -10,13 +10,18 @@ class AuthProvider with ChangeNotifier {
   String? _username;
   LoginResponse? _loginResponse;
   bool _isAuthenticated = false;
+  bool _isLoading = false;
 
   String? get token => _token;
   String? get username => _username;
   LoginResponse? get loginResponse => _loginResponse;
   bool get isAuthenticated => _isAuthenticated;
+  bool get isLoading => _isLoading;
 
   Future<void> login(String username, String password) async {
+    _isLoading = true;
+    notifyListeners();
+    
     try {
       final loginRequest = LoginRequest(username: username, password: password);
       final loginResponse = await _authService.login(loginRequest);
@@ -35,6 +40,7 @@ class AuthProvider with ChangeNotifier {
       print('🔑 Token length: ${_token?.length}');
       print('🔑 Raw access_token: $accessToken');
       print('🔑 Raw access_token type: ${accessToken.runtimeType}');
+      print('📊 Accounts count: ${loginResponse.accounts.length}');
       
       // Debug: Check if accessToken is a Map
       if (accessToken is Map) {
@@ -45,9 +51,12 @@ class AuthProvider with ChangeNotifier {
       }
       
       await _saveAuthData();
+      _isLoading = false;
       notifyListeners();
     } catch (e) {
       print('❌ Login failed: $e');
+      _isLoading = false;
+      notifyListeners();
       rethrow;
     }
   }
@@ -59,6 +68,24 @@ class AuthProvider with ChangeNotifier {
     _isAuthenticated = false;
     await _clearAuthData();
     notifyListeners();
+  }
+
+  Future<void> refreshUserAccounts() async {
+    if (_username == null || _username!.isEmpty) {
+      print('⚠️ Cannot refresh accounts: username is null or empty');
+      return;
+    }
+
+    try {
+      print('🔄 Refreshing user accounts for: $_username');
+      final response = await _authService.getUserAccounts(_username!);
+      _loginResponse = response;
+      print('✅ Refreshed accounts count: ${response.accounts.length}');
+      notifyListeners();
+    } catch (e) {
+      print('❌ Failed to refresh user accounts: $e');
+      rethrow;
+    }
   }
 
   Future<void> _saveAuthData() async {
@@ -90,8 +117,10 @@ class AuthProvider with ChangeNotifier {
   Future<void> tryAutoLogin() async {
     final prefs = await SharedPreferences.getInstance();
     if (!prefs.containsKey('token')) {
+      print('🔄 No saved token found for auto login');
       return;
     }
+    
     _token = prefs.getString('token');
     _username = prefs.getString('username');
     _isAuthenticated = true;
@@ -100,6 +129,16 @@ class AuthProvider with ChangeNotifier {
     print('🔄 Auto login - Username: $_username');
     print('🔄 Auto login - Token type: ${_token.runtimeType}');
     print('🔄 Auto login - Token length: ${_token?.length}');
+    
+    // Try to load user accounts for auto login
+    if (_username != null && _username!.isNotEmpty) {
+      try {
+        await refreshUserAccounts();
+      } catch (e) {
+        print('⚠️ Failed to load accounts during auto login: $e');
+        // Don't fail auto login if accounts can't be loaded
+      }
+    }
     
     notifyListeners();
   }
