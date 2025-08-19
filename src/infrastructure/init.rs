@@ -1,24 +1,30 @@
 // Remove all AccountService references - only use CQRS services
 // use crate::application::services::AccountService; // Commented out
 
-use crate::application::services::CQRSAccountService;
-use crate::infrastructure::auth::{AuthConfig, AuthService};
-use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
 use crate::infrastructure::connection_pool_monitor::{ConnectionPoolMonitor, PoolMonitorConfig};
 use crate::infrastructure::connection_pool_partitioning::{
     OperationType, PartitionedPools, PoolSelector,
 };
 use crate::infrastructure::deadlock_detector::DeadlockDetector;
 use crate::infrastructure::event_store::{EventStore, EventStoreConfig, EventStoreTrait};
-use crate::infrastructure::kafka_abstraction::KafkaConfig;
-use crate::infrastructure::kafka_event_processor::KafkaEventProcessor;
 use crate::infrastructure::l1_cache_updater::L1CacheUpdater;
 use crate::infrastructure::projections::{ProjectionConfig, ProjectionStore, ProjectionStoreTrait};
 use crate::infrastructure::redis_abstraction::{RealRedisClient, RedisClient, RedisPoolConfig};
-use crate::infrastructure::repository::{AccountRepository, AccountRepositoryTrait};
 use crate::infrastructure::scaling::{ScalingConfig, ScalingManager};
 use crate::infrastructure::sharding::{ShardConfig, ShardManager};
-use crate::infrastructure::user_repository::UserRepository;
+use crate::infrastructure::{
+    auth::{AuthConfig, AuthService},
+    cache_service::{CacheConfig, CacheService, CacheServiceTrait, EvictionPolicy},
+    kafka_event_processor::KafkaEventProcessor,
+    lock_free_operations::LockFreeOperations,
+    // read_batching::ReadBatchingService,
+    read_service::DirectReadService,
+    repository::{AccountRepository, AccountRepositoryTrait},
+    user_repository::UserRepository,
+    websocket::WebSocketManager,
+    write_batching::WriteBatchingService,
+    KafkaConfig,
+};
 use anyhow::Result;
 use redis::Client;
 use std::sync::Arc;
@@ -36,6 +42,7 @@ pub struct ServiceContext {
     pub account_repository: Arc<dyn AccountRepositoryTrait + Send + Sync>,
     pub shard_manager: Arc<ShardManager>,
     pub scaling_manager: Arc<ScalingManager>,
+    pub websocket_manager: Arc<WebSocketManager>,
 }
 
 impl ServiceContext {
@@ -639,6 +646,7 @@ pub async fn init_all_services(
         account_repository,
         shard_manager,
         scaling_manager,
+        websocket_manager: Arc::new(WebSocketManager::new()),
     };
 
     Ok(service_context)
@@ -769,5 +777,6 @@ pub async fn init_all_services_with_pool(
         account_repository,
         shard_manager,
         scaling_manager,
+        websocket_manager: Arc::new(WebSocketManager::new()),
     })
 }

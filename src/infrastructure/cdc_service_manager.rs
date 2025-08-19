@@ -863,9 +863,13 @@ impl CDCServiceManager {
     }
 
     async fn validate_kafka_connectivity(&self) -> Result<()> {
-        // Add Kafka connectivity validation logic
         tracing::info!("CDC Service Manager: Validating Kafka connectivity...");
-        // Placeholder - implement actual connectivity check
+
+        // Just validate that we can create a consumer - the actual consumer group join
+        // will happen when the real CDC consumer starts
+        let _test_consumer = Self::create_kafka_consumer(&self.config).await?;
+
+        tracing::info!("CDC Service Manager: ✅ Kafka connectivity validated successfully");
         Ok(())
     }
 

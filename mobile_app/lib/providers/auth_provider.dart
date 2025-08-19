@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../api/auth_service.dart';
+import '../api/websocket_service.dart';
 import '../models/login_request.dart';
 import '../models/login_response.dart';
+import '../models/register_request.dart';
 
 class AuthProvider with ChangeNotifier {
   final AuthService _authService = AuthService();
+  final WebSocketService _websocketService = WebSocketService();
   String? _token;
   String? _username;
   LoginResponse? _loginResponse;
@@ -17,6 +20,7 @@ class AuthProvider with ChangeNotifier {
   LoginResponse? get loginResponse => _loginResponse;
   bool get isAuthenticated => _isAuthenticated;
   bool get isLoading => _isLoading;
+  WebSocketService get websocketService => _websocketService;
 
   Future<void> login(String username, String password) async {
     _isLoading = true;
@@ -51,6 +55,10 @@ class AuthProvider with ChangeNotifier {
       }
       
       await _saveAuthData();
+      
+      // Subscribe to WebSocket updates for this user
+      await _websocketService.subscribe(username);
+      
       _isLoading = false;
       notifyListeners();
     } catch (e) {
@@ -62,6 +70,11 @@ class AuthProvider with ChangeNotifier {
   }
 
   Future<void> logout() async {
+    // Unsubscribe from WebSocket updates
+    if (_username != null) {
+      await _websocketService.unsubscribe(_username!);
+    }
+    
     _token = null;
     _username = null;
     _loginResponse = null;
@@ -84,6 +97,65 @@ class AuthProvider with ChangeNotifier {
       notifyListeners();
     } catch (e) {
       print('❌ Failed to refresh user accounts: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> registerAndLogin(String username, String email, String password) async {
+    _isLoading = true;
+    notifyListeners();
+    
+    try {
+      // Step 1: Register user
+      final registerRequest = RegisterRequest(username: username, email: email, password: password);
+      final registerResponse = await _authService.register(registerRequest);
+      
+      print('✅ Registration successful for user: $username');
+      print('📊 Account created: ${registerResponse.accounts.first.id}');
+      
+      // Step 2: Wait for projection to be updated with polling
+      print('⏳ Waiting for projection to be updated...');
+      await _waitForProjectionUpdate(username);
+      print('✅ Projection update wait completed');
+      
+      // Step 3: Auto login after registration
+      final loginRequest = LoginRequest(username: username, password: password);
+      final loginResponse = await _authService.login(loginRequest);
+      
+      // If login response has no accounts but register response does, use register response accounts
+      if (loginResponse.accounts.isEmpty && registerResponse.accounts.isNotEmpty) {
+        print('⚠️ Login response has no accounts, using register response accounts');
+        _loginResponse = LoginResponse(
+          message: loginResponse.message,
+          token: loginResponse.token,
+          username: loginResponse.username,
+          accounts: registerResponse.accounts,
+          primaryAccountId: registerResponse.primaryAccountId,
+        );
+      } else {
+        _loginResponse = loginResponse;
+      }
+      
+      // Extract access_token safely
+      final accessToken = _loginResponse!.token['access_token'];
+      _token = accessToken?.toString() ?? '';
+      _username = _loginResponse!.username;
+      _isAuthenticated = true;
+      
+      print('🔐 Auto login successful for user: $_username');
+      print('📊 Accounts count: ${_loginResponse!.accounts.length}');
+      
+      await _saveAuthData();
+      
+      // Subscribe to WebSocket updates for this user
+      await _websocketService.subscribe(username);
+      
+      _isLoading = false;
+      notifyListeners();
+    } catch (e) {
+      print('❌ Register and login failed: $e');
+      _isLoading = false;
+      notifyListeners();
       rethrow;
     }
   }
@@ -141,5 +213,32 @@ class AuthProvider with ChangeNotifier {
     }
     
     notifyListeners();
+  }
+
+  Future<void> _waitForProjectionUpdate(String username) async {
+    const maxAttempts = 30; // 30 attempts * 200ms = 6 seconds max
+    const delayMs = 200;
+    
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        print('🔄 Polling attempt $attempt/$maxAttempts for user: $username');
+        
+        final response = await _authService.getUserAccounts(username);
+        
+        if (response.accounts.isNotEmpty) {
+          print('✅ Projection updated! Found ${response.accounts.length} accounts');
+          return;
+        }
+        
+        print('⏳ No accounts found yet, waiting ${delayMs}ms...');
+        await Future.delayed(Duration(milliseconds: delayMs));
+        
+      } catch (e) {
+        print('⚠️ Polling error on attempt $attempt: $e');
+        await Future.delayed(Duration(milliseconds: delayMs));
+      }
+    }
+    
+    print('⚠️ Projection update timeout after $maxAttempts attempts');
   }
 }

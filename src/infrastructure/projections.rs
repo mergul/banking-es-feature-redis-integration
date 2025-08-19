@@ -153,6 +153,7 @@ pub trait ProjectionStoreTrait: Send + Sync {
         &self,
         transactions: Vec<TransactionProjection>,
     ) -> Result<()>;
+    async fn get_accounts_by_owner(&self, owner_name: &str) -> Result<Vec<AccountProjection>>;
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
@@ -163,6 +164,9 @@ impl ProjectionStoreTrait for ProjectionStore {
     }
     async fn get_all_accounts(&self) -> Result<Vec<AccountProjection>> {
         self.get_all_accounts().await
+    }
+    async fn get_accounts_by_owner(&self, owner_name: &str) -> Result<Vec<AccountProjection>> {
+        self.get_accounts_by_owner(owner_name).await
     }
 
     async fn get_accounts_batch(&self, account_ids: &[Uuid]) -> Result<Vec<AccountProjection>> {
@@ -697,6 +701,37 @@ impl ProjectionStore {
         self.metrics.query_duration.fetch_add(
             start_time.elapsed().as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(accounts)
+    }
+
+    pub async fn get_accounts_by_owner(&self, owner_name: &str) -> Result<Vec<AccountProjection>> {
+        let start_time = Instant::now();
+
+        let accounts = sqlx::query_as!(
+            AccountProjection,
+            r#"
+            SELECT id, owner_name, balance, is_active, created_at, updated_at
+            FROM account_projections
+            WHERE owner_name = $1 AND is_active = true
+            ORDER BY id DESC
+            "#,
+            owner_name
+        )
+        .fetch_all(self.pools.select_pool(OperationType::Read))
+        .await?;
+
+        self.metrics.query_duration.fetch_add(
+            start_time.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        info!(
+            "Retrieved {} accounts for user {} in {:?}",
+            accounts.len(),
+            owner_name,
+            start_time.elapsed()
         );
 
         Ok(accounts)

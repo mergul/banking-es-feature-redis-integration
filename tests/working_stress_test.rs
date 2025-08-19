@@ -184,7 +184,7 @@ async fn setup_stress_test_environment(
 
     // Wait for CDC consumer to be ready before account creation
     println!("⏳ Waiting for CDC consumer to be ready...");
-    tokio::time::sleep(Duration::from_secs(5)).await; // Wait 5 seconds for consumer to join group
+    tokio::time::sleep(Duration::from_secs(2)).await; // Reduced wait time since consumer group join is done in service manager
 
     // Verify CDC consumer is ready by checking if it can receive messages
     let mut retries = 0;

@@ -5,6 +5,7 @@ import '../providers/auth_provider.dart';
 import '../models/login_response.dart';
 import '../api/auth_service.dart';
 import '../api/account_service.dart';
+import '../api/websocket_service.dart';
 import 'transfer_screen.dart';
 import 'transaction_history_screen.dart';
 
@@ -34,6 +35,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     super.initState();
     _initializeAnimations();
     _loadUserAccounts();
+    _setupWebSocketListener();
   }
 
   void _initializeAnimations() {
@@ -817,6 +819,52 @@ class _DashboardScreenState extends State<DashboardScreen>
             child: const Text('Çıkış Yap'),
           ),
         ],
+      ),
+    );
+  }
+
+  void _setupWebSocketListener() {
+    final authProvider = Provider.of<AuthProvider>(context, listen: false);
+    final websocketService = authProvider.websocketService;
+    
+    websocketService.messageStream?.listen((message) {
+      print('📨 WebSocket message received in dashboard: ${message.type}');
+      
+      switch (message.type) {
+        case 'ProjectionUpdated':
+          _handleProjectionUpdate(message.data);
+          break;
+        case 'AccountCreated':
+          _handleAccountCreated(message.data);
+          break;
+        default:
+          print('📨 Unknown WebSocket message type: ${message.type}');
+      }
+    });
+  }
+
+  void _handleProjectionUpdate(Map<String, dynamic> data) {
+    print('📊 Handling projection update: $data');
+    // Refresh accounts when projection is updated
+    _loadUserAccounts();
+  }
+
+  void _handleAccountCreated(Map<String, dynamic> data) {
+    print('🆕 Handling account created: $data');
+    // Show notification and refresh accounts
+    _showAccountCreatedNotification(data);
+    _loadUserAccounts();
+  }
+
+  void _showAccountCreatedNotification(Map<String, dynamic> data) {
+    final accountId = data['account_id'] ?? '';
+    final balance = data['initial_balance'] ?? '';
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Yeni hesap oluşturuldu! Hesap No: $accountId, Bakiye: \$$balance'),
+        backgroundColor: Colors.green,
+        duration: const Duration(seconds: 5),
       ),
     );
   }

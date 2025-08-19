@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../api/auth_service.dart';
 import '../models/register_request.dart';
+import '../models/login_response.dart';
+import '../providers/auth_provider.dart';
 
 class RegistrationScreen extends StatefulWidget {
   const RegistrationScreen({super.key});
@@ -130,16 +133,30 @@ class _RegistrationScreenState extends State<RegistrationScreen>
     });
 
     try {
-      final request = RegisterRequest(
-        username: _usernameController.text.trim(),
-        email: _emailController.text.trim(),
-        password: _passwordController.text,
+      final authProvider = Provider.of<AuthProvider>(context, listen: false);
+      
+      // Use AuthProvider for registration and auto-login
+      await authProvider.registerAndLogin(
+        _usernameController.text.trim(),
+        _emailController.text.trim(),
+        _passwordController.text,
       );
 
-      await _authService.register(request);
-
       if (mounted) {
-        _showSuccessSnackBar('Kayıt başarılı! Giriş yapabilirsiniz.');
+        // Show account creation success message
+        final loginResponse = authProvider.loginResponse;
+        if (loginResponse != null && loginResponse.accounts.isNotEmpty) {
+          final account = loginResponse.accounts.first;
+          _showSuccessSnackBar(
+            'Kayıt başarılı! Hesabınız oluşturuldu.\n'
+            'Hesap No: ${account.id}\n'
+            'Başlangıç Bakiyesi: \$${account.balance}'
+          );
+          
+          // Show detailed success dialog
+          await _showAccountCreatedDialog(loginResponse);
+        }
+        
         await Future.delayed(const Duration(seconds: 2));
         Navigator.pop(context);
       }
@@ -154,6 +171,82 @@ class _RegistrationScreenState extends State<RegistrationScreen>
         });
       }
     }
+  }
+
+  Future<void> _showAccountCreatedDialog(LoginResponse loginResponse) async {
+    final account = loginResponse.accounts.first;
+    
+    return showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.green, size: 28),
+              SizedBox(width: 8),
+              Text('Hesap Oluşturuldu!'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Tebrikler! Banka hesabınız başarıyla oluşturuldu.',
+                style: TextStyle(fontSize: 16),
+              ),
+              SizedBox(height: 16),
+              Container(
+                padding: EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Hesap Bilgileri:',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF3F51B5),
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text('Hesap No: ${account.id}'),
+                    Text('Bakiye: \$${account.balance}'),
+                    Text('Durum: Aktif'),
+                  ],
+                ),
+              ),
+              SizedBox(height: 12),
+              Text(
+                'Artık giriş yaparak hesabınızı kullanabilirsiniz.',
+                style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+              child: Text(
+                'Tamam',
+                style: TextStyle(
+                  color: Color(0xFF3F51B5),
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   void _showErrorSnackBar(String message) {

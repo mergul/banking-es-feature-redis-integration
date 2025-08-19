@@ -4,6 +4,7 @@
 use crate::application::services::CQRSAccountService;
 use crate::domain::AccountError;
 use crate::infrastructure::auth::{AuthService, LoginRequest, UserRole};
+use crate::infrastructure::websocket::WebSocketManager;
 use anyhow::Result;
 use axum::{
     extract::{Path, State},
@@ -26,7 +27,11 @@ pub struct RegisterRequest {
 
 // Authentication handlers
 pub async fn register(
-    State((cqrs_service, auth_service)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
+    State((cqrs_service, auth_service, ws_manager)): State<(
+        Arc<CQRSAccountService>,
+        Arc<AuthService>,
+        Arc<WebSocketManager>,
+    )>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // Step 1: Create auth user
@@ -62,12 +67,30 @@ pub async fn register(
                         "Banking account created successfully for user: {} with account_id: {} and auth_user_id: {}",
                         payload.username, account_id, auth_user.id
                     );
+
+                    // Broadcast account creation via WebSocket
+                    ws_manager.broadcast_account_created(
+                        &payload.username,
+                        &account_id.to_string(),
+                        &initial_balance.to_string(),
+                    );
+
+                    // Also broadcast projection update
+                    ws_manager.broadcast_projection_updated(
+                        &payload.username,
+                        &account_id.to_string(),
+                        &initial_balance.to_string(),
+                        true, // is_active
+                    );
+
                     Ok(Json(json!({
                         "message": "User and banking account created successfully",
                         "username": payload.username,
                         "auth_user_id": auth_user.id,
                         "account_id": account_id,
-                        "initial_balance": initial_balance
+                        "initial_balance": initial_balance,
+                        "account_created_at": chrono::Utc::now().to_rfc3339(),
+                        "account_status": "active"
                     })))
                 }
                 Err(e) => {
@@ -101,7 +124,11 @@ pub async fn register(
 }
 
 pub async fn login(
-    State((cqrs_service, auth_service)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
+    State((cqrs_service, auth_service, ws_manager)): State<(
+        Arc<CQRSAccountService>,
+        Arc<AuthService>,
+        Arc<WebSocketManager>,
+    )>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     match auth_service
@@ -111,15 +138,15 @@ pub async fn login(
         Ok(token) => {
             info!("User logged in successfully: {}", payload.username);
 
-            // Get all banking accounts for this user
-            let accounts_result = cqrs_service.get_all_accounts().await;
-            let user_accounts = match accounts_result {
+            // Get accounts for this specific user efficiently
+            let user_accounts = match cqrs_service.get_accounts_by_owner(&payload.username).await {
                 Ok(accounts) => {
-                    // Filter accounts for this specific user
+                    info!(
+                        "Retrieved {} accounts for user {}",
+                        accounts.len(),
+                        payload.username
+                    );
                     accounts
-                        .into_iter()
-                        .filter(|account| account.owner_name == payload.username)
-                        .collect::<Vec<_>>()
                 }
                 Err(e) => {
                     warn!(
@@ -139,6 +166,16 @@ pub async fn login(
                 .or_else(|| user_accounts.first());
 
             let primary_account_id = primary_account.map(|account| account.id);
+
+            // Broadcast projection updates via WebSocket for each account
+            for account in &user_accounts {
+                ws_manager.broadcast_projection_updated(
+                    &payload.username,
+                    &account.id.to_string(),
+                    &account.balance.to_string(),
+                    account.is_active,
+                );
+            }
 
             Ok(Json(json!({
                 "message": "Login successful",
@@ -165,7 +202,11 @@ pub async fn login(
 }
 
 pub async fn logout(
-    State((_, auth_service)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
+    State((_, auth_service, _)): State<(
+        Arc<CQRSAccountService>,
+        Arc<AuthService>,
+        Arc<WebSocketManager>,
+    )>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // For now, just return success
     // In a real implementation, you might want to invalidate the token
@@ -175,20 +216,29 @@ pub async fn logout(
 }
 
 pub async fn get_user_accounts(
-    State((cqrs_service, _)): State<(Arc<CQRSAccountService>, Arc<AuthService>)>,
+    State((cqrs_service, _, _)): State<(
+        Arc<CQRSAccountService>,
+        Arc<AuthService>,
+        Arc<WebSocketManager>,
+    )>,
     Path(username): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    match cqrs_service.get_all_accounts().await {
-        Ok(accounts) => {
-            let user_accounts: Vec<_> = accounts
-                .into_iter()
-                .filter(|account| account.owner_name == username)
-                .collect();
+    match cqrs_service.get_accounts_by_owner(&username).await {
+        Ok(user_accounts) => {
+            info!(
+                "Retrieved {} accounts for user {}",
+                user_accounts.len(),
+                username
+            );
 
             Ok(Json(json!({
+                "message": "Accounts retrieved successfully",
+                "token": {
+                    "access_token": "temp_token"
+                },
                 "username": username,
                 "accounts": user_accounts,
-                "count": user_accounts.len()
+                "primaryAccountId": user_accounts.first().map(|acc| acc.id)
             })))
         }
         Err(e) => {

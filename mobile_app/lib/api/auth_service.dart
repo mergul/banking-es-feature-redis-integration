@@ -21,14 +21,34 @@ class AuthService {
     }
   }
 
-  Future<void> register(RegisterRequest registerRequest) async {
+  Future<LoginResponse> register(RegisterRequest registerRequest) async {
     final response = await http.post(
       Uri.parse('$baseUrl/register'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode(registerRequest.toJson()),
     );
 
-    if (response.statusCode != 200) {
+    if (response.statusCode == 200) {
+      // Parse the response to get account information
+      final responseData = jsonDecode(response.body);
+      
+      // Create a LoginResponse with the created account
+      return LoginResponse(
+        message: responseData['message'] ?? 'Registration successful',
+        token: {'access_token': 'temp_token'}, // Will be replaced after login
+        username: responseData['username'] ?? registerRequest.username,
+        accounts: [
+          AccountInfo(
+            id: responseData['account_id']?.toString() ?? '',
+            balance: responseData['initial_balance']?.toString() ?? '1000.00',
+            isActive: true,
+            isPrimary: true,
+            createdAt: responseData['account_created_at']?.toString() ?? DateTime.now().toIso8601String(),
+          ),
+        ],
+        primaryAccountId: responseData['account_id']?.toString(),
+      );
+    } else {
       throw Exception('Failed to register');
     }
   }

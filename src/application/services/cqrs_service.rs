@@ -1701,6 +1701,50 @@ impl CQRSAccountService {
         result
     }
 
+    /// Get accounts by owner name efficiently
+    pub async fn get_accounts_by_owner(
+        &self,
+        owner_name: &str,
+    ) -> Result<Vec<AccountProjection>, AccountError> {
+        let start_time = std::time::Instant::now();
+        info!("Querying accounts for owner: {}", owner_name);
+
+        self.metrics
+            .queries_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let result = self
+            .projection_store
+            .get_accounts_by_owner(owner_name)
+            .await;
+
+        let duration = start_time.elapsed();
+        match &result {
+            Ok(accounts) => {
+                self.metrics
+                    .queries_successful
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Successfully retrieved {} accounts for owner {} in {:?}",
+                    accounts.len(),
+                    owner_name,
+                    duration
+                );
+            }
+            Err(e) => {
+                self.metrics
+                    .queries_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!(
+                    "Failed to query accounts for owner {}: {} (took {:?})",
+                    owner_name, e, duration
+                );
+            }
+        }
+
+        result.map_err(|e| AccountError::InfrastructureError(e.to_string()))
+    }
+
     /// Process batch transactions
     pub async fn batch_transactions(
         &self,

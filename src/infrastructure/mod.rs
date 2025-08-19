@@ -47,6 +47,7 @@ pub mod stuck_operation_diagnostic;
 pub mod timeout_manager;
 pub mod troubleshooting;
 pub mod user_repository; // Added for OutboxPollingService
+pub mod websocket;
 pub mod write_batching; // Added write batching // Added CDC batching service
 
 pub use auth::*;

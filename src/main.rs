@@ -325,7 +325,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/auth/accounts/{username}",
             get(crate::web::handlers::get_user_accounts),
         )
-        .with_state((cqrs_service.clone(), service_context.auth_service.clone()));
+        .with_state((
+            cqrs_service.clone(),
+            service_context.auth_service.clone(),
+            service_context.websocket_manager.clone(),
+        ));
+
+    // Create WebSocket router
+    let websocket_router = Router::new()
+        .route(
+            "/ws",
+            get(crate::infrastructure::websocket::websocket_handler),
+        )
+        .with_state(service_context.websocket_manager.clone());
 
     // The main app is now just the CQRS router, potentially with some global/static routes.
     // For now, the root HTML page lists both old and new endpoints. This should be updated later.
@@ -333,6 +345,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(root)) // Keep the root informational page for now
         .merge(cqrs_router)
         .merge(auth_router)
+        .merge(websocket_router)
         // Global middleware can still be applied here if needed, outside of create_cqrs_router
         .layer(
             ServiceBuilder::new()
