@@ -25,6 +25,9 @@ pub struct CDCServiceManager {
     outbox_repo: Arc<CDCOutboxRepository>,
     processor: Arc<UltraOptimizedCDCEventProcessor>,
 
+    // Projection store for CDC Batching Service
+    projection_store: Arc<dyn ProjectionStoreTrait>,
+
     // Unified shutdown management
     shutdown_token: CancellationToken,
 
@@ -289,7 +292,7 @@ impl CDCServiceManager {
         let processor = Arc::new(UltraOptimizedCDCEventProcessor::new(
             kafka_producer,
             cache_service,
-            projection_store,
+            projection_store.clone(),
             metrics.clone(),
             None,
             None, // Use default performance config
@@ -300,6 +303,7 @@ impl CDCServiceManager {
             config,
             outbox_repo,
             processor,
+            projection_store,
             shutdown_token,
             tasks: Arc::new(RwLock::new(Vec::new())),
             state: Arc::new(RwLock::new(ServiceState::Stopped)),
@@ -397,48 +401,43 @@ impl CDCServiceManager {
         let consumer_handle = self.start_resilient_consumer().await?;
         tasks.push(consumer_handle);
 
-        // Start event processor's batch processor if enabled
-        if self.optimization_config.enable_batching {
-            tracing::info!("CDC Service Manager: Starting event processor's batch processor...");
-
-            // Use the static method to start the batch processor
-            let processor_clone = self.processor.clone();
-
-            // Start the event processor's batch processor
-            match UltraOptimizedCDCEventProcessor::enable_and_start_batch_processor_arc(
-                processor_clone,
-            )
-            .await
-            {
-                Ok(_) => {
-                    tracing::info!("CDC Service Manager: ✅ Event processor's batch processor started successfully");
-                }
-                Err(e) => {
-                    tracing::error!("CDC Service Manager: Failed to start event processor's batch processor: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Force start batch processor regardless of config
-        tracing::info!("CDC Service Manager: Force starting batch processor...");
+        // Start event processor's batch processor
+        tracing::info!("CDC Service Manager: Starting event processor's batch processor...");
         let processor_clone = self.processor.clone();
+
         match UltraOptimizedCDCEventProcessor::enable_and_start_batch_processor_arc(processor_clone)
             .await
         {
             Ok(_) => {
-                tracing::info!(
-                    "CDC Service Manager: ✅ Batch processor force started successfully"
-                );
+                tracing::info!("CDC Service Manager: ✅ Event processor's batch processor started successfully");
             }
             Err(e) => {
                 tracing::error!(
-                    "CDC Service Manager: Failed to force start batch processor: {}",
+                    "CDC Service Manager: Failed to start event processor's batch processor: {}",
                     e
                 );
                 return Err(e);
             }
         }
+
+        // Start CDC Batching Service for parallel projection updates
+        tracing::info!("CDC Service Manager: Starting CDC Batching Service...");
+        let write_pool = self
+            .outbox_repo
+            .get_pools()
+            .select_pool(crate::infrastructure::connection_pool_partitioning::OperationType::Write)
+            .clone()
+            .into();
+
+        // Create CDC Batching Service instance using the existing projection store
+        let _cdc_batching_service =
+            crate::infrastructure::cdc_batching_service::PartitionedCDCBatching::new(
+                self.projection_store.clone(),
+                write_pool,
+            )
+            .await;
+
+        tracing::info!("CDC Service Manager: ✅ CDC Batching Service started successfully");
 
         tracing::info!("CDC Service Manager: ✅ Core services started");
         Ok(())
