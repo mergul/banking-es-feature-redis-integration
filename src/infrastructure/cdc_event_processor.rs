@@ -456,6 +456,156 @@ pub struct DLQEvent {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub retry_count: u32,
 }
+// /// Event Classifier - Separates events before CDC processing
+// pub struct CDCEventClassifier {
+//     partitioned_cdc: Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>>,
+// }
+
+// impl CDCEventClassifier {
+//     pub fn new(partitioned_cdc: Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>>) -> Self {
+//         Self { partitioned_cdc }
+//     }
+
+//     /// Main entry point: Classify and route events to appropriate processing
+//     pub async fn process_mixed_events(
+//         &self,
+//         mixed_events: Vec<(Uuid, AccountProjection, String)>, // (aggregate_id, projection, event_type)
+//     ) -> Result<ProcessingResults> {
+//         if mixed_events.is_empty() {
+//             return Ok(ProcessingResults::empty());
+//         }
+
+//         info!("🔍 EVENT CLASSIFIER: Processing {} mixed events", mixed_events.len());
+
+//         // STEP 1: Separate events by type
+//         let (account_created_events, other_events) = self.classify_events(mixed_events);
+
+//         info!(
+//             "📊 EVENT CLASSIFIER: Separated {} AccountCreated events and {} other events",
+//             account_created_events.len(),
+//             other_events.len()
+//         );
+
+//         // STEP 2: Process each type with its optimized path
+//         let mut results = ProcessingResults::new();
+
+//         // Process AccountCreated events (if any)
+//         if !account_created_events.is_empty() {
+//             info!("🚀 EVENT CLASSIFIER: Routing {} AccountCreated events to Partition 0", 
+//                   account_created_events.len());
+                  
+//             let account_created_operation_ids = self
+//                 .partitioned_cdc.as_ref().unwrap()
+//                 .submit_account_created_projections_bulk(account_created_events)
+//                 .await?;
+                
+//             results.account_created_operations = account_created_operation_ids;
+            
+//             info!("✅ EVENT CLASSIFIER: AccountCreated events submitted successfully");
+//         }
+
+//         // Process other events (if any)
+//         if !other_events.is_empty() {
+//             info!("🔄 EVENT CLASSIFIER: Routing {} other events to Partitions 1-N", 
+//                   other_events.len());
+                  
+//             let other_operation_ids = self
+//                 .process_other_events_by_type(other_events)
+//                 .await?;
+                
+//             results.other_operations = other_operation_ids;
+            
+//             info!("✅ EVENT CLASSIFIER: Other events submitted successfully");
+//         }
+
+//         info!(
+//             "🎯 EVENT CLASSIFIER: Completed processing {} total events ({} AccountCreated, {} others)",
+//             results.total_operations(),
+//             results.account_created_operations.len(),
+//             results.other_operations.len()
+//         );
+
+//         Ok(results)
+//     }
+
+//     /// STEP 1: Classify events into AccountCreated vs Others
+//     fn classify_events(
+//         &self,
+//         mixed_events: Vec<(Uuid, AccountProjection, String)>,
+//     ) -> (Vec<(Uuid, AccountProjection)>, HashMap<String, Vec<(Uuid, AccountProjection)>>) {
+//         let mut account_created_events = Vec::new();
+//         let mut other_events: HashMap<String, Vec<(Uuid, AccountProjection)>> = HashMap::new();
+
+//         for (aggregate_id, projection, event_type) in mixed_events {
+//             if event_type == "AccountCreated" {
+//                 account_created_events.push((aggregate_id, projection));
+//             } else {
+//                 other_events
+//                     .entry(event_type)
+//                     .or_insert_with(Vec::new)
+//                     .push((aggregate_id, projection));
+//             }
+//         }
+
+//         (account_created_events, other_events)
+//     }
+
+//     /// STEP 2: Process other events grouped by event type
+//     async fn process_other_events_by_type(
+//         &self,
+//         other_events: HashMap<String, Vec<(Uuid, AccountProjection)>>,
+//     ) -> Result<HashMap<String, Vec<Uuid>>> {
+//         let mut results = HashMap::new();
+
+//         for (event_type, projections) in other_events {
+//             info!("🔄 EVENT CLASSIFIER: Processing {} events of type '{}'", 
+//                   projections.len(), event_type);
+
+//             let operation_ids = self
+//                 .partitioned_cdc.as_ref().unwrap()
+//                 .submit_other_events_bulk(projections, event_type.clone())
+//                 .await?;
+
+//             results.insert(event_type, operation_ids);
+//         }
+
+//         Ok(results)
+//     }
+// }
+
+// /// Results container for tracking processing outcomes
+// #[derive(Debug)]
+// pub struct ProcessingResults {
+//     pub account_created_operations: Vec<Uuid>,
+//     pub other_operations: HashMap<String, Vec<Uuid>>, // event_type -> operation_ids
+// }
+
+// impl ProcessingResults {
+//     pub fn new() -> Self {
+//         Self {
+//             account_created_operations: Vec::new(),
+//             other_operations: HashMap::new(),
+//         }
+//     }
+
+//     pub fn empty() -> Self {
+//         Self::new()
+//     }
+
+//     pub fn total_operations(&self) -> usize {
+//         self.account_created_operations.len() + 
+//         self.other_operations.values().map(|ops| ops.len()).sum::<usize>()
+//     }
+
+//     pub fn all_operation_ids(&self) -> Vec<Uuid> {
+//         let mut all_ids = self.account_created_operations.clone();
+//         for operation_ids in self.other_operations.values() {
+//             all_ids.extend(operation_ids.iter().cloned());
+//         }
+//         all_ids
+//     }
+// }
+
 
 // Ultra-optimized CDC Event Processor with business logic validation
 pub struct UltraOptimizedCDCEventProcessor {
@@ -665,11 +815,9 @@ impl UltraOptimizedCDCEventProcessor {
             monitoring_system: Arc::new(Mutex::new(None)),
             cdc_batching_service,
             write_pool,
-            // REMOVED: Accumulation batching - using ProjectionStore standard batching instead
         }
     }
 
-    // REMOVED: Accumulation flush task - using ProjectionStore standard batching instead
 
     /// NEW: Static version for AccountCreated events processing (without CDC Batching Service)
     async fn process_account_created_events_direct_copy_static(
@@ -1471,7 +1619,7 @@ impl UltraOptimizedCDCEventProcessor {
                         }
                     } else {
                         // Fallback to direct projection store
-                        tracing::warn!("CDC Event Processor: CDC Batching Service not available, falling back to direct projection store");
+                        tracing::info!("CDC Event Processor: CDC Batching Service not available, falling back to direct projection store");
                         match self
                             .projection_store
                             .upsert_accounts_batch(projections)
@@ -1489,6 +1637,8 @@ impl UltraOptimizedCDCEventProcessor {
                             }
                         }
                     }
+                } else {
+                    tracing::debug!("CDC Event Processor: No projections to process in batch");
                 }
             }
             Err(e) => {
@@ -2031,7 +2181,9 @@ impl UltraOptimizedCDCEventProcessor {
                     metrics,
                 )
                 .await?;
-
+//             let account_created_operation_ids = batching_service
+//                 .submit_account_created_projections_bulk(account_created_events)
+//                 .await?;
             let new_aggregates_len = new_aggregates.len();
             all_projections.extend(new_projections);
             processed_aggregates.extend(new_aggregates);
@@ -2052,7 +2204,9 @@ impl UltraOptimizedCDCEventProcessor {
                 metrics,
             )
             .await?;
-
+//             let operation_ids = batching_service               
+//                 .submit_other_events_bulk(projections, event_type.clone())
+//                 .await?;
             let updated_aggregates_len = updated_aggregates.len();
             all_projections.extend(updated_projections);
             processed_aggregates.extend(updated_aggregates);
