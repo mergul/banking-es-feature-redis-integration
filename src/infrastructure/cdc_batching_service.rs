@@ -118,12 +118,25 @@ impl Clone for CDCOperationResult {
         }
     }
 }
-
+/// Enhanced CDCBatch with event type separation
 pub struct CDCBatch {
     pub batch_id: Uuid,
     pub projections: Vec<(Uuid, AccountProjection, Uuid, String)>, // (aggregate_id, projection, operation_id, event_type)
     pub created_at: Instant,
     pub partition_id: Option<usize>,
+    pub batch_type: CDCBatchType, // NEW: Identifies the batch type
+}
+// pub struct CDCBatch {
+//     pub batch_id: Uuid,
+//     pub projections: Vec<(Uuid, AccountProjection, Uuid, String)>, // (aggregate_id, projection, operation_id, event_type)
+//     pub created_at: Instant,
+//     pub partition_id: Option<usize>,
+// }
+/// Batch type to distinguish processing requirements
+#[derive(Clone, Debug, PartialEq)]
+pub enum CDCBatchType {
+    AccountCreated, // INSERT only, no locking, no state checking
+    OtherEvents,    // UPDATE, requires locking, state checking, etc.
 }
 
 impl CDCBatch {
@@ -133,6 +146,32 @@ impl CDCBatch {
             projections: Vec::new(),
             created_at: Instant::now(),
             partition_id,
+            batch_type: CDCBatchType::OtherEvents, // Default to OtherEvents
+        }
+    }
+    pub fn new_account_created_batch(partition_id: Option<usize>) -> Self {
+        Self {
+            batch_id: Uuid::new_v4(),
+            projections: Vec::new(),
+            created_at: Instant::now(),
+            partition_id,
+            batch_type: CDCBatchType::AccountCreated, // Specialized for AccountCreated
+        }
+    }
+
+    pub fn new_other_events_batch(partition_id: Option<usize>) -> Self {
+        Self {
+            batch_id: Uuid::new_v4(),
+            projections: Vec::new(),
+            created_at: Instant::now(),
+            partition_id,
+            batch_type: CDCBatchType::OtherEvents, // Specialized for other events
+        }
+    }
+    pub fn can_accept_event_type(&self, event_type: &str) -> bool {
+        match self.batch_type {
+            CDCBatchType::AccountCreated => event_type == "AccountCreated",
+            CDCBatchType::OtherEvents => event_type != "AccountCreated",
         }
     }
 
@@ -190,8 +229,11 @@ pub struct CDCBatchingService {
     projection_store: Arc<dyn ProjectionStoreTrait>,
     write_pool: Arc<PgPool>,
 
+    // Separate batches for different event types
+    account_created_batch: Arc<Mutex<CDCBatch>>, // NEW: Dedicated AccountCreated batch
+    other_events_batch: Arc<Mutex<CDCBatch>>,    // NEW: Dedicated other events batch
     // Batching state
-    current_batch: Arc<Mutex<CDCBatch>>,
+    // current_batch: Arc<Mutex<CDCBatch>>,
     pending_results: Arc<Mutex<HashMap<Uuid, mpsc::Sender<CDCOperationResult>>>>,
     completed_results: Arc<Mutex<HashMap<Uuid, CDCOperationResult>>>,
 
@@ -218,7 +260,9 @@ impl CDCBatchingService {
             config,
             projection_store,
             write_pool,
-            current_batch: Arc::new(Mutex::new(CDCBatch::new(None))),
+            // current_batch: Arc::new(Mutex::new(CDCBatch::new(None))),
+            account_created_batch: Arc::new(Mutex::new(CDCBatch::new(Some(0)))),
+            other_events_batch: Arc::new(Mutex::new(CDCBatch::new(None))),
             pending_results: Arc::new(Mutex::new(HashMap::new())),
             completed_results: Arc::new(Mutex::new(HashMap::new())),
             batch_processor_handle: Arc::new(Mutex::new(None)),
@@ -237,15 +281,117 @@ impl CDCBatchingService {
         projection_store: Arc<dyn ProjectionStoreTrait>,
         write_pool: Arc<PgPool>,
     ) -> Self {
-        let mut service = Self::new(config, projection_store, write_pool);
-        service.partition_id = Some(partition_id);
-        service.num_partitions = Some(num_partitions);
-        service.current_batch = Arc::new(Mutex::new(CDCBatch::new(Some(partition_id))));
-        service
-    }
+        // Partition 0 is dedicated to AccountCreated events
+        let (account_created_batch, other_events_batch) = if partition_id == 0 {
+            (
+                Arc::new(Mutex::new(CDCBatch::new_account_created_batch(Some(
+                    partition_id,
+                )))),
+                Arc::new(Mutex::new(CDCBatch::new_other_events_batch(Some(
+                    partition_id,
+                )))), // Still available for overflow
+            )
+        } else {
+            (
+                Arc::new(Mutex::new(CDCBatch::new_account_created_batch(Some(
+                    partition_id,
+                )))), // Should remain empty
+                Arc::new(Mutex::new(CDCBatch::new_other_events_batch(Some(
+                    partition_id,
+                )))),
+            )
+        };
 
+        Self {
+            config,
+            projection_store,
+            write_pool,
+            account_created_batch,
+            other_events_batch,
+            pending_results: Arc::new(Mutex::new(HashMap::new())),
+            completed_results: Arc::new(Mutex::new(HashMap::new())),
+            batch_processor_handle: Arc::new(Mutex::new(None)),
+            shutdown_token: CancellationToken::new(),
+            batches_processed: Arc::new(Mutex::new(0)),
+            projections_processed: Arc::new(Mutex::new(0)),
+            partition_id: Some(partition_id),
+            num_partitions: Some(num_partitions),
+        }
+    }
+    /// Submit projection update with automatic event type routing
+    pub async fn submit_projection_update_with_event_type(
+        &self,
+        aggregate_id: Uuid,
+        projection: AccountProjection,
+        event_type: String,
+    ) -> Result<Uuid> {
+        let operation_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(1);
+
+        // Add to pending results
+        {
+            let mut pending_guard = self.pending_results.lock().await;
+            pending_guard.insert(operation_id, tx);
+        }
+
+        // Route to appropriate batch based on event type and partition
+        if event_type == "AccountCreated" {
+            if self.partition_id == Some(0) {
+                // Partition 0: Add to AccountCreated batch
+                let mut batch_guard = self.account_created_batch.lock().await;
+                batch_guard.add_projection_with_event_type(
+                    aggregate_id,
+                    projection,
+                    operation_id,
+                    event_type,
+                );
+                info!("➡️ AccountCreated event routed to Partition 0 AccountCreated batch");
+            } else {
+                // Other partitions: Should not receive AccountCreated events, but handle gracefully
+                warn!(
+                    "⚠️ AccountCreated event received on Partition {}, this should not happen",
+                    self.partition_id.unwrap_or(999)
+                );
+                let mut batch_guard = self.account_created_batch.lock().await;
+                batch_guard.add_projection_with_event_type(
+                    aggregate_id,
+                    projection,
+                    operation_id,
+                    event_type,
+                );
+            }
+        } else {
+            if self.partition_id == Some(0) {
+                // Partition 0: Can handle overflow other events if needed
+                let mut batch_guard = self.other_events_batch.lock().await;
+                batch_guard.add_projection_with_event_type(
+                    aggregate_id,
+                    projection,
+                    operation_id,
+                    event_type,
+                );
+                debug!("🔄 Other event routed to Partition 0 other events batch (overflow)");
+            } else {
+                // Other partitions: Normal processing for other events
+                let mut batch_guard = self.other_events_batch.lock().await;
+                batch_guard.add_projection_with_event_type(
+                    aggregate_id,
+                    projection,
+                    operation_id,
+                    event_type,
+                );
+                info!(
+                    "🔄 Other event routed to Partition {} other events batch",
+                    self.partition_id.unwrap_or(999)
+                );
+            }
+        }
+
+        Ok(operation_id)
+    }
     pub async fn start(&self) -> Result<()> {
-        let current_batch = self.current_batch.clone();
+        let account_created_batch = self.account_created_batch.clone();
+        let other_events_batch = self.other_events_batch.clone();
         let pending_results = self.pending_results.clone();
         let completed_results = self.completed_results.clone();
         let projection_store = self.projection_store.clone();
@@ -257,7 +403,8 @@ impl CDCBatchingService {
 
         let handle = tokio::spawn(async move {
             Self::process_batch_loop(
-                current_batch,
+                account_created_batch,
+                other_events_batch,
                 pending_results,
                 completed_results,
                 projection_store,
@@ -282,8 +429,10 @@ impl CDCBatchingService {
         Ok(())
     }
 
+    /// Enhanced batch processing loop with separate batch handling
     async fn process_batch_loop(
-        current_batch: Arc<Mutex<CDCBatch>>,
+        account_created_batch: Arc<Mutex<CDCBatch>>,
+        other_events_batch: Arc<Mutex<CDCBatch>>,
         pending_results: Arc<Mutex<HashMap<Uuid, mpsc::Sender<CDCOperationResult>>>>,
         completed_results: Arc<Mutex<HashMap<Uuid, CDCOperationResult>>>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
@@ -299,27 +448,48 @@ impl CDCBatchingService {
         loop {
             interval.tick().await;
 
-            // Check if current batch should be processed
-            let should_process = {
-                let batch_guard = current_batch.lock().await;
-                batch_guard.should_process(
+            // Check and process AccountCreated batch
+            let account_created_batch_to_process = {
+                let mut batch_guard = account_created_batch.lock().await;
+                if batch_guard.should_process(
                     config.max_batch_size,
                     Duration::from_millis(config.max_batch_wait_time_ms),
-                )
+                ) && !batch_guard.projections.is_empty()
+                {
+                    Some(std::mem::replace(
+                        &mut *batch_guard,
+                        CDCBatch::new_account_created_batch(partition_id),
+                    ))
+                } else {
+                    None
+                }
             };
 
-            if should_process {
-                let batch_to_process = {
-                    let mut batch_guard = current_batch.lock().await;
-                    if batch_guard.projections.is_empty() {
-                        continue;
-                    }
-                    std::mem::replace(&mut *batch_guard, CDCBatch::new(partition_id))
-                };
+            // Check and process other events batch
+            let other_events_batch_to_process = {
+                let mut batch_guard = other_events_batch.lock().await;
+                if batch_guard.should_process(
+                    config.max_batch_size,
+                    Duration::from_millis(config.max_batch_wait_time_ms),
+                ) && !batch_guard.projections.is_empty()
+                {
+                    Some(std::mem::replace(
+                        &mut *batch_guard,
+                        CDCBatch::new_other_events_batch(partition_id),
+                    ))
+                } else {
+                    None
+                }
+            };
 
-                // Process the batch
-                let results = Self::execute_cdc_batch(
-                    &batch_to_process,
+            // Process AccountCreated batch (if any)
+            if let Some(batch) = account_created_batch_to_process {
+                info!(
+                    "🚀 Processing AccountCreated batch with {} projections",
+                    batch.projections.len()
+                );
+                let results = Self::execute_account_created_batch(
+                    &batch,
                     &projection_store,
                     &write_pool,
                     &config,
@@ -327,86 +497,150 @@ impl CDCBatchingService {
                 )
                 .await;
 
-                // Update metrics
-                {
-                    let mut batches_guard = batches_processed.lock().await;
-                    *batches_guard += 1;
-                }
-                {
-                    let mut projections_guard = projections_processed.lock().await;
-                    *projections_guard += batch_to_process.projections.len() as u64;
-                }
+                Self::handle_batch_results(results, &pending_results, &completed_results).await;
+                Self::update_metrics(
+                    &batches_processed,
+                    &projections_processed,
+                    batch.projections.len(),
+                )
+                .await;
+            }
 
-                // Send results to pending operations and store in completed results
-                {
-                    let mut pending_guard = pending_results.lock().await;
-                    let mut completed_guard = completed_results.lock().await;
-                    for (operation_id, result) in results {
-                        // Store in completed results
-                        completed_guard.insert(operation_id, result.clone());
-
-                        // Send to pending operation if still waiting
-                        if let Some(sender) = pending_guard.remove(&operation_id) {
-                            // Non-blocking send to prevent deadlocks
-                            if let Err(e) = sender.try_send(result) {
-                                error!(
-                                    "Failed to send result to operation {}: {}",
-                                    operation_id, e
-                                );
-                            }
-                        }
-                    }
-                }
-
+            // Process other events batch (if any)
+            if let Some(batch) = other_events_batch_to_process {
                 info!(
-                    "CDC Batch processed: {} projections in partition {:?}",
-                    batch_to_process.projections.len(),
-                    partition_id
+                    "🔄 Processing other events batch with {} projections",
+                    batch.projections.len()
                 );
+                let results = Self::execute_other_events_batch(
+                    &batch,
+                    &projection_store,
+                    &write_pool,
+                    &config,
+                    partition_id,
+                )
+                .await;
+
+                Self::handle_batch_results(results, &pending_results, &completed_results).await;
+                Self::update_metrics(
+                    &batches_processed,
+                    &projections_processed,
+                    batch.projections.len(),
+                )
+                .await;
             }
         }
     }
-
-    pub async fn execute_cdc_batch(
+    /// Optimized processing for AccountCreated events (INSERT only, no locking)
+    async fn execute_account_created_batch(
         batch: &CDCBatch,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         write_pool: &Arc<PgPool>,
         config: &CDCBatchingConfig,
         partition_id: Option<usize>,
     ) -> Vec<(Uuid, CDCOperationResult)> {
-        println!(
-            "[DEBUG] execute_cdc_batch: Starting CDC batch with {} projections",
+        info!(
+            "🚀 ACCOUNT CREATED BATCH: Processing {} projections with optimized INSERT-only path",
             batch.projections.len()
         );
+
+        let mut results = Vec::new();
+        let batch_start = Instant::now();
+
+        // Extract projections for bulk INSERT
+        let projections: Vec<AccountProjection> = batch
+            .projections
+            .iter()
+            .map(|(_, projection, _, _)| projection.clone())
+            .collect();
+
+        // OPTIMIZED PATH: Direct bulk INSERT without locking or state checking
+        let result = projection_store
+            .bulk_insert_new_accounts_with_copy(projections)
+            .await;
+
+        match result {
+            Ok(_) => {
+                // Create success results for all projections
+                for (aggregate_id, _, operation_id, _) in &batch.projections {
+                    results.push((
+                        *operation_id,
+                        CDCOperationResult {
+                            operation_id: *operation_id,
+                            success: true,
+                            aggregate_id: Some(*aggregate_id),
+                            error: None,
+                            duration: batch_start.elapsed(),
+                        },
+                    ));
+                }
+                info!(
+                    "✅ ACCOUNT CREATED BATCH: Successfully processed {} projections",
+                    batch.projections.len()
+                );
+            }
+            Err(e) => {
+                // Create failure results for all projections
+                error!(
+                    "❌ ACCOUNT CREATED BATCH: Failed to process {} projections: {}",
+                    batch.projections.len(),
+                    e
+                );
+                for (aggregate_id, _, operation_id, _) in &batch.projections {
+                    results.push((
+                        *operation_id,
+                        CDCOperationResult {
+                            operation_id: *operation_id,
+                            success: false,
+                            aggregate_id: Some(*aggregate_id),
+                            error: Some(format!("AccountCreated batch failed: {}", e)),
+                            duration: batch_start.elapsed(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        results
+    }
+    /// Standard processing for other events (UPDATE with locking and state checking)
+    async fn execute_other_events_batch(
+        batch: &CDCBatch,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        write_pool: &Arc<PgPool>,
+        config: &CDCBatchingConfig,
+        partition_id: Option<usize>,
+    ) -> Vec<(Uuid, CDCOperationResult)> {
+        info!("🔄 OTHER EVENTS BATCH: Processing {} projections with full UPDATE path (locking, state checking)", 
+              batch.projections.len());
+
         let mut results = Vec::new();
         let mut retry_count = 0;
 
-        // BULK MODE: Batch boyutu büyükse bulk mode başlat
-        let should_use_bulk_mode = batch.projections.len() >= 3; // 3+ projection için bulk mode
+        // Use bulk mode for better performance with other events
+        let should_use_bulk_mode = batch.projections.len() >= 3;
         let mut bulk_config_manager = if should_use_bulk_mode {
             Some(BulkInsertConfigManager::new())
         } else {
             None
         };
 
-        // BULK MODE: Eğer bulk mode kullanılacaksa başlat
+        // Start bulk mode if needed
         if let Some(ref mut config_manager) = bulk_config_manager {
             if let Err(e) = config_manager
                 .start_bulk_mode_projection_store(projection_store)
                 .await
             {
-                error!("Failed to start bulk mode in CDC batch: {}", e);
-                // Bulk mode başarısız olsa bile normal modda devam et
+                error!("Failed to start bulk mode for other events batch: {}", e);
             } else {
                 info!(
-                    "🚀 CDC Bulk mode activated for batch with {} projections",
+                    "🚀 OTHER EVENTS: Bulk mode activated for {} projections",
                     batch.projections.len()
                 );
             }
         }
 
         while retry_count < config.max_retries {
-            // Always start a new transaction for each retry attempt
             let mut transaction = match write_pool.begin().await {
                 Ok(tx) => tx,
                 Err(e) => {
@@ -419,10 +653,7 @@ impl CDCBatchingService {
                                     operation_id: *operation_id,
                                     success: false,
                                     aggregate_id: Some(*aggregate_id),
-                                    error: Some(format!(
-                                        "Failed to begin transaction after {} retries: {}",
-                                        config.max_retries, e
-                                    )),
+                                    error: Some(format!("Failed to begin transaction: {}", e)),
                                     duration: Duration::ZERO,
                                 },
                             ));
@@ -434,56 +665,21 @@ impl CDCBatchingService {
             };
 
             let batch_start = Instant::now();
-
-            // CRITICAL: CDC Event Processor already separates events by type
-            // This batch contains only one type of projections (either all AccountCreated or all others)
-            // No need to separate again - just process all projections with the appropriate method
-
             let projections: Vec<AccountProjection> = batch
                 .projections
                 .iter()
                 .map(|(_, projection, _, _)| projection.clone())
                 .collect();
 
-            // Determine processing method based on batch type
-            // If this is an AccountCreated batch, use direct COPY
-            // If this is an other events batch, use UPSERT
-            // let is_account_created_batch = batch
-            //     .projections
-            //     .iter()
-            //     .any(|(_, _, _, event_type)| event_type == "AccountCreated");
-            let is_account_created_batch = partition_id.unwrap() == 0;
-            let result = if is_account_created_batch {
-                // Process as AccountCreated batch (direct COPY)
-                info!(
-                        "🚀 CDC BATCHING: Using direct COPY (INSERT only) for {} AccountCreated projections",
-                        projections.len()
-                    );
-                projection_store
-                    .bulk_insert_new_accounts_with_copy(projections)
-                    .await
-            } else {
-                // Process as other events batch (UPDATE)
-                info!(
-                    "🔄 CDC BATCHING: Using bulk_update_accounts_with_copy for {} other projections",
-                    projections.len()
-                );
-                projection_store
-                    .bulk_update_accounts_with_copy(projections)
-                    .await
-            };
+            // FULL PATH: UPDATE with locking, state checking, etc.
+            let result = projection_store
+                .bulk_update_accounts_with_copy(projections)
+                .await;
 
             if let Err(e) = result {
-                let partition_info = partition_id
-                    .map(|p| format!("partition_{}", p))
-                    .unwrap_or_else(|| "unknown_partition".to_string());
+                error!("Failed to process other events batch: {}", e);
 
-                error!(
-                    "Failed to process projections in CDC batch ({}): {:?}",
-                    partition_info, e
-                );
-
-                // Check if this is a serialization conflict that we should retry
+                // Check for serialization conflicts and retry logic
                 let is_serialization_conflict = e
                     .to_string()
                     .contains("could not serialize access due to read/write dependencies");
@@ -493,7 +689,7 @@ impl CDCBatchingService {
                     retry_count += 1;
                     let backoff = Duration::from_millis(50 * retry_count as u64);
                     info!(
-                        "Serialization conflict detected, retrying in {:?} (attempt {}/{})",
+                        "🔄 OTHER EVENTS: Serialization conflict, retrying in {:?} (attempt {}/{})",
                         backoff, retry_count, config.max_retries
                     );
                     tokio::time::sleep(backoff).await;
@@ -510,7 +706,7 @@ impl CDCBatchingService {
                                     success: false,
                                     aggregate_id: Some(*aggregate_id),
                                     error: Some(format!(
-                                        "Failed to process projections after {} retries: {}",
+                                        "Failed after {} retries: {}",
                                         config.max_retries, e
                                     )),
                                     duration: Duration::ZERO,
@@ -534,10 +730,7 @@ impl CDCBatchingService {
                                 operation_id: *operation_id,
                                 success: false,
                                 aggregate_id: Some(*aggregate_id),
-                                error: Some(format!(
-                                    "Failed to commit transaction after {} retries: {}",
-                                    config.max_retries, e
-                                )),
+                                error: Some(format!("Failed to commit: {}", e)),
                                 duration: Duration::ZERO,
                             },
                         ));
@@ -561,232 +754,481 @@ impl CDCBatchingService {
                 ));
             }
 
-            // BULK MODE: İşlem başarılı olduysa bulk mode'u sonlandır
-            if let Some(ref mut config_manager) = bulk_config_manager {
-                if let Err(e) = config_manager
-                    .end_bulk_mode_projection_store(projection_store)
-                    .await
-                {
-                    error!("Failed to end bulk mode in CDC batch: {}", e);
-                } else {
-                    info!("🔄 CDC Bulk mode deactivated after successful batch processing");
-                }
-            }
-
-            return results;
+            info!(
+                "✅ OTHER EVENTS BATCH: Successfully processed {} projections",
+                batch.projections.len()
+            );
+            break;
         }
 
-        // BULK MODE: Tüm retry'lar başarısız olduysa bulk mode'u sonlandır
+        // End bulk mode if needed
         if let Some(ref mut config_manager) = bulk_config_manager {
             if let Err(e) = config_manager
                 .end_bulk_mode_projection_store(projection_store)
                 .await
             {
-                error!(
-                    "Failed to end bulk mode after retry failures in CDC batch: {}",
-                    e
-                );
+                error!("Failed to end bulk mode for other events batch: {}", e);
+            } else {
+                info!("🔄 OTHER EVENTS: Bulk mode deactivated");
             }
-        }
-
-        // Return failure results for all operations
-        for (aggregate_id, _, operation_id, _) in &batch.projections {
-            results.push((
-                *operation_id,
-                CDCOperationResult {
-                    operation_id: *operation_id,
-                    success: false,
-                    aggregate_id: Some(*aggregate_id),
-                    error: Some(format!(
-                        "Failed to process CDC batch after {} retries",
-                        config.max_retries
-                    )),
-                    duration: Duration::ZERO,
-                },
-            ));
         }
 
         results
     }
+    // Helper methods
+    async fn handle_batch_results(
+        results: Vec<(Uuid, CDCOperationResult)>,
+        pending_results: &Arc<Mutex<HashMap<Uuid, mpsc::Sender<CDCOperationResult>>>>,
+        completed_results: &Arc<Mutex<HashMap<Uuid, CDCOperationResult>>>,
+    ) {
+        let mut pending_guard = pending_results.lock().await;
+        let mut completed_guard = completed_results.lock().await;
 
-    pub async fn submit_projection_update(
-        &self,
-        aggregate_id: Uuid,
-        projection: AccountProjection,
-    ) -> Result<Uuid> {
-        let operation_id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::channel(1);
+        for (operation_id, result) in results {
+            completed_guard.insert(operation_id, result.clone());
 
-        // Add to pending results with operation_id -> sender mapping
-        {
-            let mut pending_guard = self.pending_results.lock().await;
-            pending_guard.insert(operation_id, tx);
+            if let Some(sender) = pending_guard.remove(&operation_id) {
+                if let Err(e) = sender.try_send(result) {
+                    error!("Failed to send result to operation {}: {}", operation_id, e);
+                }
+            }
         }
-
-        // Add to current batch with operation_id tracking
-        {
-            let mut batch_guard = self.current_batch.lock().await;
-            batch_guard.add_projection_with_operation_id(aggregate_id, projection, operation_id);
-        }
-
-        Ok(operation_id)
     }
+
+    async fn update_metrics(
+        batches_processed: &Arc<Mutex<u64>>,
+        projections_processed: &Arc<Mutex<u64>>,
+        projection_count: usize,
+    ) {
+        {
+            let mut batches_guard = batches_processed.lock().await;
+            *batches_guard += 1;
+        }
+        {
+            let mut projections_guard = projections_processed.lock().await;
+            *projections_guard += projection_count as u64;
+        }
+    }
+    // pub async fn execute_cdc_batch(
+    //     batch: &CDCBatch,
+    //     projection_store: &Arc<dyn ProjectionStoreTrait>,
+    //     write_pool: &Arc<PgPool>,
+    //     config: &CDCBatchingConfig,
+    //     partition_id: Option<usize>,
+    // ) -> Vec<(Uuid, CDCOperationResult)> {
+    //     println!(
+    //         "[DEBUG] execute_cdc_batch: Starting CDC batch with {} projections",
+    //         batch.projections.len()
+    //     );
+    //     let mut results = Vec::new();
+    //     let mut retry_count = 0;
+
+    //     // BULK MODE: Batch boyutu büyükse bulk mode başlat
+    //     let should_use_bulk_mode = batch.projections.len() >= 3; // 3+ projection için bulk mode
+    //     let mut bulk_config_manager = if should_use_bulk_mode {
+    //         Some(BulkInsertConfigManager::new())
+    //     } else {
+    //         None
+    //     };
+
+    //     // BULK MODE: Eğer bulk mode kullanılacaksa başlat
+    //     if let Some(ref mut config_manager) = bulk_config_manager {
+    //         if let Err(e) = config_manager
+    //             .start_bulk_mode_projection_store(projection_store)
+    //             .await
+    //         {
+    //             error!("Failed to start bulk mode in CDC batch: {}", e);
+    //             // Bulk mode başarısız olsa bile normal modda devam et
+    //         } else {
+    //             info!(
+    //                 "🚀 CDC Bulk mode activated for batch with {} projections",
+    //                 batch.projections.len()
+    //             );
+    //         }
+    //     }
+
+    //     while retry_count < config.max_retries {
+    //         // Always start a new transaction for each retry attempt
+    //         let mut transaction = match write_pool.begin().await {
+    //             Ok(tx) => tx,
+    //             Err(e) => {
+    //                 retry_count += 1;
+    //                 if retry_count >= config.max_retries {
+    //                     for (aggregate_id, _, operation_id, _) in &batch.projections {
+    //                         results.push((
+    //                             *operation_id,
+    //                             CDCOperationResult {
+    //                                 operation_id: *operation_id,
+    //                                 success: false,
+    //                                 aggregate_id: Some(*aggregate_id),
+    //                                 error: Some(format!(
+    //                                     "Failed to begin transaction after {} retries: {}",
+    //                                     config.max_retries, e
+    //                                 )),
+    //                                 duration: Duration::ZERO,
+    //                             },
+    //                         ));
+    //                     }
+    //                     return results;
+    //                 }
+    //                 continue;
+    //             }
+    //         };
+
+    //         let batch_start = Instant::now();
+
+    //         // CRITICAL: CDC Event Processor already separates events by type
+    //         // This batch contains only one type of projections (either all AccountCreated or all others)
+    //         // No need to separate again - just process all projections with the appropriate method
+
+    //         let projections: Vec<AccountProjection> = batch
+    //             .projections
+    //             .iter()
+    //             .map(|(_, projection, _, _)| projection.clone())
+    //             .collect();
+
+    //         // Determine processing method based on batch type
+    //         // If this is an AccountCreated batch, use direct COPY
+    //         // If this is an other events batch, use UPSERT
+    //         // let is_account_created_batch = batch
+    //         //     .projections
+    //         //     .iter()
+    //         //     .any(|(_, _, _, event_type)| event_type == "AccountCreated");
+    //         let is_account_created_batch = partition_id.unwrap() == 0;
+    //         let result = if is_account_created_batch {
+    //             // Process as AccountCreated batch (direct COPY)
+    //             info!(
+    //                     "🚀 CDC BATCHING: Using direct COPY (INSERT only) for {} AccountCreated projections",
+    //                     projections.len()
+    //                 );
+    //             projection_store
+    //                 .bulk_insert_new_accounts_with_copy(projections)
+    //                 .await
+    //         } else {
+    //             // Process as other events batch (UPDATE)
+    //             info!(
+    //                 "🔄 CDC BATCHING: Using bulk_update_accounts_with_copy for {} other projections",
+    //                 projections.len()
+    //             );
+    //             projection_store
+    //                 .bulk_update_accounts_with_copy(projections)
+    //                 .await
+    //         };
+
+    //         if let Err(e) = result {
+    //             let partition_info = partition_id
+    //                 .map(|p| format!("partition_{}", p))
+    //                 .unwrap_or_else(|| "unknown_partition".to_string());
+
+    //             error!(
+    //                 "Failed to process projections in CDC batch ({}): {:?}",
+    //                 partition_info, e
+    //             );
+
+    //             // Check if this is a serialization conflict that we should retry
+    //             let is_serialization_conflict = e
+    //                 .to_string()
+    //                 .contains("could not serialize access due to read/write dependencies");
+
+    //             if is_serialization_conflict && retry_count < config.max_retries - 1 {
+    //                 let _ = transaction.rollback().await;
+    //                 retry_count += 1;
+    //                 let backoff = Duration::from_millis(50 * retry_count as u64);
+    //                 info!(
+    //                     "Serialization conflict detected, retrying in {:?} (attempt {}/{})",
+    //                     backoff, retry_count, config.max_retries
+    //                 );
+    //                 tokio::time::sleep(backoff).await;
+    //                 continue;
+    //             } else {
+    //                 let _ = transaction.rollback().await;
+    //                 retry_count += 1;
+    //                 if retry_count >= config.max_retries {
+    //                     for (aggregate_id, _, operation_id, _) in &batch.projections {
+    //                         results.push((
+    //                             *operation_id,
+    //                             CDCOperationResult {
+    //                                 operation_id: *operation_id,
+    //                                 success: false,
+    //                                 aggregate_id: Some(*aggregate_id),
+    //                                 error: Some(format!(
+    //                                     "Failed to process projections after {} retries: {}",
+    //                                     config.max_retries, e
+    //                                 )),
+    //                                 duration: Duration::ZERO,
+    //                             },
+    //                         ));
+    //                     }
+    //                     return results;
+    //                 }
+    //                 continue;
+    //             }
+    //         }
+
+    //         // Commit transaction
+    //         if let Err(e) = transaction.commit().await {
+    //             retry_count += 1;
+    //             if retry_count >= config.max_retries {
+    //                 for (aggregate_id, _, operation_id, _) in &batch.projections {
+    //                     results.push((
+    //                         *operation_id,
+    //                         CDCOperationResult {
+    //                             operation_id: *operation_id,
+    //                             success: false,
+    //                             aggregate_id: Some(*aggregate_id),
+    //                             error: Some(format!(
+    //                                 "Failed to commit transaction after {} retries: {}",
+    //                                 config.max_retries, e
+    //                             )),
+    //                             duration: Duration::ZERO,
+    //                         },
+    //                     ));
+    //                 }
+    //                 return results;
+    //             }
+    //             continue;
+    //         }
+
+    //         // Create success results
+    //         for (aggregate_id, _, operation_id, _) in &batch.projections {
+    //             results.push((
+    //                 *operation_id,
+    //                 CDCOperationResult {
+    //                     operation_id: *operation_id,
+    //                     success: true,
+    //                     aggregate_id: Some(*aggregate_id),
+    //                     error: None,
+    //                     duration: batch_start.elapsed(),
+    //                 },
+    //             ));
+    //         }
+
+    //         // BULK MODE: İşlem başarılı olduysa bulk mode'u sonlandır
+    //         if let Some(ref mut config_manager) = bulk_config_manager {
+    //             if let Err(e) = config_manager
+    //                 .end_bulk_mode_projection_store(projection_store)
+    //                 .await
+    //             {
+    //                 error!("Failed to end bulk mode in CDC batch: {}", e);
+    //             } else {
+    //                 info!("🔄 CDC Bulk mode deactivated after successful batch processing");
+    //             }
+    //         }
+
+    //         return results;
+    //     }
+
+    //     // BULK MODE: Tüm retry'lar başarısız olduysa bulk mode'u sonlandır
+    //     if let Some(ref mut config_manager) = bulk_config_manager {
+    //         if let Err(e) = config_manager
+    //             .end_bulk_mode_projection_store(projection_store)
+    //             .await
+    //         {
+    //             error!(
+    //                 "Failed to end bulk mode after retry failures in CDC batch: {}",
+    //                 e
+    //             );
+    //         }
+    //     }
+
+    //     // Return failure results for all operations
+    //     for (aggregate_id, _, operation_id, _) in &batch.projections {
+    //         results.push((
+    //             *operation_id,
+    //             CDCOperationResult {
+    //                 operation_id: *operation_id,
+    //                 success: false,
+    //                 aggregate_id: Some(*aggregate_id),
+    //                 error: Some(format!(
+    //                     "Failed to process CDC batch after {} retries",
+    //                     config.max_retries
+    //                 )),
+    //                 duration: Duration::ZERO,
+    //             },
+    //         ));
+    //     }
+
+    //     results
+    // }
+
+    // pub async fn submit_projection_update(
+    //     &self,
+    //     aggregate_id: Uuid,
+    //     projection: AccountProjection,
+    // ) -> Result<Uuid> {
+    //     let operation_id = Uuid::new_v4();
+    //     let (tx, _rx) = mpsc::channel(1);
+
+    //     // Add to pending results with operation_id -> sender mapping
+    //     {
+    //         let mut pending_guard = self.pending_results.lock().await;
+    //         pending_guard.insert(operation_id, tx);
+    //     }
+
+    //     // Add to current batch with operation_id tracking
+    //     {
+    //         let mut batch_guard = self.current_batch.lock().await;
+    //         batch_guard.add_projection_with_operation_id(aggregate_id, projection, operation_id);
+    //     }
+
+    //     Ok(operation_id)
+    // }
 
     /// Submit multiple projections as a dedicated batch (like write_batching)
-    pub async fn submit_projections_bulk(
-        &self,
-        projections: Vec<(Uuid, AccountProjection)>, // (aggregate_id, projection)
-    ) -> Result<Vec<Uuid>> {
-        self.submit_projections_bulk_with_event_types(projections, "Unknown".to_string())
-            .await
-    }
+    // pub async fn submit_projections_bulk(
+    //     &self,
+    //     projections: Vec<(Uuid, AccountProjection)>, // (aggregate_id, projection)
+    // ) -> Result<Vec<Uuid>> {
+    //     self.submit_projections_bulk_with_event_types(projections, "Unknown".to_string())
+    //         .await
+    // }
 
-    /// Submit multiple projections with event type information
-    pub async fn submit_projections_bulk_with_event_types(
-        &self,
-        projections: Vec<(Uuid, AccountProjection)>, // (aggregate_id, projection)
-        event_type: String,
-    ) -> Result<Vec<Uuid>> {
-        if projections.is_empty() {
-            return Ok(Vec::new());
-        }
+    // /// Submit multiple projections with event type information
+    // pub async fn submit_projections_bulk_with_event_types(
+    //     &self,
+    //     projections: Vec<(Uuid, AccountProjection)>, // (aggregate_id, projection)
+    //     event_type: String,
+    // ) -> Result<Vec<Uuid>> {
+    //     if projections.is_empty() {
+    //         return Ok(Vec::new());
+    //     }
 
-        info!(
-            "🚀 CDC Batching Service: Starting bulk processing for {} projections",
-            projections.len()
-        );
+    //     info!(
+    //         "🚀 CDC Batching Service: Starting bulk processing for {} projections",
+    //         projections.len()
+    //     );
 
-        // Create a dedicated batch for immediate processing
-        let mut dedicated_batch = CDCBatch::new(self.partition_id);
-        let mut operation_ids = Vec::new();
+    //     // Create a dedicated batch for immediate processing
+    //     let mut dedicated_batch = CDCBatch::new(self.partition_id);
+    //     let mut operation_ids = Vec::new();
 
-        let projections_len = projections.len();
+    //     let projections_len = projections.len();
 
-        // Add all projections to the dedicated batch with event type
-        for (aggregate_id, projection) in projections {
-            let operation_id = Uuid::new_v4();
-            dedicated_batch.add_projection_with_event_type(
-                aggregate_id,
-                projection,
-                operation_id,
-                event_type.clone(),
-            );
-            operation_ids.push(operation_id);
-        }
+    //     // Add all projections to the dedicated batch with event type
+    //     for (aggregate_id, projection) in projections {
+    //         let operation_id = Uuid::new_v4();
+    //         dedicated_batch.add_projection_with_event_type(
+    //             aggregate_id,
+    //             projection,
+    //             operation_id,
+    //             event_type.clone(),
+    //         );
+    //         operation_ids.push(operation_id);
+    //     }
 
-        info!(
-            "📦 CDC Batching Service: Created dedicated batch with {} projections",
-            projections_len
-        );
+    //     info!(
+    //         "📦 CDC Batching Service: Created dedicated batch with {} projections",
+    //         projections_len
+    //     );
 
-        // Execute the dedicated batch immediately
-        let batch_results = Self::execute_cdc_batch(
-            &dedicated_batch,
-            &self.projection_store,
-            &self.write_pool,
-            &self.config,
-            self.partition_id,
-        )
-        .await;
+    //     // Execute the dedicated batch immediately
+    //     let batch_results = Self::execute_cdc_batch(
+    //         &dedicated_batch,
+    //         &self.projection_store,
+    //         &self.write_pool,
+    //         &self.config,
+    //         self.partition_id,
+    //     )
+    //     .await;
 
-        // Store completed results and send to pending operations
-        {
-            let mut pending_guard = self.pending_results.lock().await;
-            let mut completed_guard = self.completed_results.lock().await;
+    //     // Store completed results and send to pending operations
+    //     {
+    //         let mut pending_guard = self.pending_results.lock().await;
+    //         let mut completed_guard = self.completed_results.lock().await;
 
-            for (operation_id, result) in batch_results {
-                // Store in completed results
-                completed_guard.insert(operation_id, result.clone());
+    //         for (operation_id, result) in batch_results {
+    //             // Store in completed results
+    //             completed_guard.insert(operation_id, result.clone());
 
-                // Send to pending operation if still waiting
-                if let Some(sender) = pending_guard.remove(&operation_id) {
-                    if let Err(e) = sender.try_send(result) {
-                        error!("Failed to send result to operation {}: {}", operation_id, e);
-                    }
-                }
-            }
-        }
+    //             // Send to pending operation if still waiting
+    //             if let Some(sender) = pending_guard.remove(&operation_id) {
+    //                 if let Err(e) = sender.try_send(result) {
+    //                     error!("Failed to send result to operation {}: {}", operation_id, e);
+    //                 }
+    //             }
+    //         }
+    //     }
 
-        info!(
-            "✅ CDC Batching Service: Bulk processing completed for {} projections",
-            projections_len
-        );
+    //     info!(
+    //         "✅ CDC Batching Service: Bulk processing completed for {} projections",
+    //         projections_len
+    //     );
 
-        Ok(operation_ids)
-    }
+    //     Ok(operation_ids)
+    // }
 
     /// NEW: Submit AccountCreated projections with optimized processing
-    pub async fn submit_account_created_projections_bulk(
-        &self,
-        projections: Vec<(Uuid, AccountProjection)>, // (aggregate_id, projection)
-    ) -> Result<Vec<Uuid>> {
-        if projections.is_empty() {
-            return Ok(Vec::new());
-        }
+    // pub async fn submit_account_created_projections_bulk(
+    //     &self,
+    //     projections: Vec<(Uuid, AccountProjection)>, // (aggregate_id, projection)
+    // ) -> Result<Vec<Uuid>> {
+    //     if projections.is_empty() {
+    //         return Ok(Vec::new());
+    //     }
 
-        info!(
-            "🚀 CDC Batching Service: Starting AccountCreated bulk processing for {} projections",
-            projections.len()
-        );
+    //     info!(
+    //         "🚀 CDC Batching Service: Starting AccountCreated bulk processing for {} projections",
+    //         projections.len()
+    //     );
 
-        // Create a dedicated batch for AccountCreated projections
-        let mut dedicated_batch = CDCBatch::new(self.partition_id);
-        let mut operation_ids = Vec::new();
+    //     // Create a dedicated batch for AccountCreated projections
+    //     let mut dedicated_batch = CDCBatch::new(self.partition_id);
+    //     let mut operation_ids = Vec::new();
 
-        let projections_len = projections.len();
+    //     let projections_len = projections.len();
 
-        // Add all AccountCreated projections to the dedicated batch
-        for (aggregate_id, projection) in projections {
-            let operation_id = Uuid::new_v4();
-            dedicated_batch.add_projection_with_event_type(
-                aggregate_id,
-                projection,
-                operation_id,
-                "AccountCreated".to_string(),
-            );
-            operation_ids.push(operation_id);
-        }
+    //     // Add all AccountCreated projections to the dedicated batch
+    //     for (aggregate_id, projection) in projections {
+    //         let operation_id = Uuid::new_v4();
+    //         dedicated_batch.add_projection_with_event_type(
+    //             aggregate_id,
+    //             projection,
+    //             operation_id,
+    //             "AccountCreated".to_string(),
+    //         );
+    //         operation_ids.push(operation_id);
+    //     }
 
-        info!(
-            "📦 CDC Batching Service: Created dedicated AccountCreated batch with {} projections",
-            projections_len
-        );
+    //     info!(
+    //         "📦 CDC Batching Service: Created dedicated AccountCreated batch with {} projections",
+    //         projections_len
+    //     );
 
-        // Execute the dedicated batch immediately
-        let batch_results = Self::execute_cdc_batch(
-            &dedicated_batch,
-            &self.projection_store,
-            &self.write_pool,
-            &self.config,
-            self.partition_id,
-        )
-        .await;
+    //     // Execute the dedicated batch immediately
+    //     let batch_results = Self::execute_cdc_batch(
+    //         &dedicated_batch,
+    //         &self.projection_store,
+    //         &self.write_pool,
+    //         &self.config,
+    //         self.partition_id,
+    //     )
+    //     .await;
 
-        // Store completed results and send to pending operations
-        {
-            let mut pending_guard = self.pending_results.lock().await;
-            let mut completed_guard = self.completed_results.lock().await;
+    //     // Store completed results and send to pending operations
+    //     {
+    //         let mut pending_guard = self.pending_results.lock().await;
+    //         let mut completed_guard = self.completed_results.lock().await;
 
-            for (operation_id, result) in batch_results {
-                // Store in completed results
-                completed_guard.insert(operation_id, result.clone());
+    //         for (operation_id, result) in batch_results {
+    //             // Store in completed results
+    //             completed_guard.insert(operation_id, result.clone());
 
-                // Send to pending operation if still waiting
-                if let Some(sender) = pending_guard.remove(&operation_id) {
-                    if let Err(e) = sender.try_send(result) {
-                        error!("Failed to send result to operation {}: {}", operation_id, e);
-                    }
-                }
-            }
-        }
+    //             // Send to pending operation if still waiting
+    //             if let Some(sender) = pending_guard.remove(&operation_id) {
+    //                 if let Err(e) = sender.try_send(result) {
+    //                     error!("Failed to send result to operation {}: {}", operation_id, e);
+    //                 }
+    //             }
+    //         }
+    //     }
 
-        info!(
-            "✅ CDC Batching Service: AccountCreated bulk processing completed for {} projections",
-            projections_len
-        );
+    //     info!(
+    //         "✅ CDC Batching Service: AccountCreated bulk processing completed for {} projections",
+    //         projections_len
+    //     );
 
-        Ok(operation_ids)
-    }
+    //     Ok(operation_ids)
+    // }
 
     pub async fn wait_for_result(&self, operation_id: Uuid) -> Result<CDCOperationResult> {
         // Check completed results first
@@ -855,21 +1297,21 @@ impl CDCBatchingService {
     }
 
     /// Execute CDC batch with bulk config
-    pub async fn execute_cdc_batch_with_bulk_config(
-        &self,
-        batch: &CDCBatch,
-    ) -> Result<Vec<(Uuid, CDCOperationResult)>> {
-        let results = CDCBatchingService::execute_cdc_batch(
-            batch,
-            &self.projection_store,
-            &self.write_pool,
-            &self.config,
-            self.partition_id,
-        )
-        .await;
+    // pub async fn execute_cdc_batch_with_bulk_config(
+    //     &self,
+    //     batch: &CDCBatch,
+    // ) -> Result<Vec<(Uuid, CDCOperationResult)>> {
+    //     let results = CDCBatchingService::execute_cdc_batch(
+    //         batch,
+    //         &self.projection_store,
+    //         &self.write_pool,
+    //         &self.config,
+    //         self.partition_id,
+    //     )
+    //     .await;
 
-        Ok(results)
-    }
+    //     Ok(results)
+    // }
 
     /// Submit projections with bulk config
     pub async fn submit_projections_bulk_with_bulk_config(
@@ -992,6 +1434,106 @@ impl PartitionedCDCBatching {
 
         Self { processors }
     }
+    /// Submit AccountCreated events - always route to Partition 0
+    pub async fn submit_account_created_projections_bulk(
+        &self,
+        projections: Vec<(Uuid, AccountProjection)>,
+    ) -> Result<Vec<Uuid>> {
+        if projections.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        info!(
+            "🚀 PARTITIONED CDC: Routing {} AccountCreated events to dedicated Partition 0",
+            projections.len()
+        );
+
+        // ALWAYS route AccountCreated events to Partition 0
+        let partition_0_processor = &self.processors[0];
+
+        let mut operation_ids = Vec::new();
+        for (aggregate_id, projection) in projections {
+            let operation_id = partition_0_processor
+                .submit_projection_update_with_event_type(
+                    aggregate_id,
+                    projection,
+                    "AccountCreated".to_string(),
+                )
+                .await?;
+            operation_ids.push(operation_id);
+        }
+
+        info!(
+            "✅ PARTITIONED CDC: Successfully routed {} AccountCreated events to Partition 0",
+            operation_ids.len()
+        );
+
+        Ok(operation_ids)
+    }
+    /// Submit other events - route to partitions 1-N (exclude Partition 0)
+    pub async fn submit_other_events_bulk(
+        &self,
+        projections: Vec<(Uuid, AccountProjection)>,
+        event_type: String,
+    ) -> Result<Vec<Uuid>> {
+        if projections.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if event_type == "AccountCreated" {
+            return Err(anyhow::anyhow!(
+                "Use submit_account_created_projections_bulk for AccountCreated events"
+            ));
+        }
+
+        info!(
+            "🔄 PARTITIONED CDC: Distributing {} {} events across partitions 1-{}",
+            projections.len(),
+            event_type,
+            self.processors.len() - 1
+        );
+
+        let mut operation_ids = Vec::new();
+        let num_other_partitions = self.processors.len() - 1; // Exclude partition 0
+
+        // Distribute across partitions 1 to N using hash-based partitioning
+        let mut projections_by_partition: HashMap<usize, Vec<(Uuid, AccountProjection)>> =
+            HashMap::new();
+
+        for (aggregate_id, projection) in projections {
+            // Hash-based partitioning, but skip partition 0
+            let partition_id = ((aggregate_id.as_u128() as usize) % num_other_partitions) + 1;
+            projections_by_partition
+                .entry(partition_id)
+                .or_insert_with(Vec::new)
+                .push((aggregate_id, projection));
+        }
+
+        // Submit to each partition
+        for (partition_id, partition_projections) in projections_by_partition.clone() {
+            let processor = &self.processors[partition_id];
+
+            for (aggregate_id, projection) in partition_projections {
+                let operation_id = processor
+                    .submit_projection_update_with_event_type(
+                        aggregate_id,
+                        projection,
+                        event_type.clone(),
+                    )
+                    .await?;
+                operation_ids.push(operation_id);
+            }
+        }
+
+        info!(
+            "✅ PARTITIONED CDC: Successfully distributed {} {} events across {} partitions",
+            operation_ids.len(),
+            event_type,
+            projections_by_partition.len()
+        );
+
+        Ok(operation_ids)
+    }
 
     pub fn get_processor_for_aggregate(&self, aggregate_id: &Uuid) -> &Arc<CDCBatchingService> {
         // HYBRID: Hash-based partitioning for consistency
@@ -1031,121 +1573,121 @@ impl PartitionedCDCBatching {
     }
 
     /// NEW: Submit AccountCreated projections with optimized processing
-    pub async fn submit_account_created_projections_bulk(
-        &self,
-        projections: Vec<(Uuid, AccountProjection)>, // (aggregate_id, projection)
-    ) -> Result<Vec<Uuid>> {
-        if projections.is_empty() {
-            return Ok(Vec::new());
-        }
+    // pub async fn submit_account_created_projections_bulk(
+    //     &self,
+    //     projections: Vec<(Uuid, AccountProjection)>, // (aggregate_id, projection)
+    // ) -> Result<Vec<Uuid>> {
+    //     if projections.is_empty() {
+    //         return Ok(Vec::new());
+    //     }
 
-        info!(
-            "🚀 PartitionedCDC: Starting AccountCreated bulk processing for {} projections",
-            projections.len()
-        );
+    //     info!(
+    //         "🚀 PartitionedCDC: Starting AccountCreated bulk processing for {} projections",
+    //         projections.len()
+    //     );
 
-        let projections_len = projections.len();
+    //     let projections_len = projections.len();
 
-        // SEQUENTIAL APPROACH for AccountCreated:
-        // 1. Group by aggregate_id for consistency
-        // 2. Distribute using sequential partitioning (1000 per partition)
-        let mut projections_by_aggregate: HashMap<Uuid, Vec<AccountProjection>> = HashMap::new();
+    //     // SEQUENTIAL APPROACH for AccountCreated:
+    //     // 1. Group by aggregate_id for consistency
+    //     // 2. Distribute using sequential partitioning (1000 per partition)
+    //     let mut projections_by_aggregate: HashMap<Uuid, Vec<AccountProjection>> = HashMap::new();
 
-        // Group projections by aggregate_id
-        for (aggregate_id, projection) in projections {
-            projections_by_aggregate
-                .entry(aggregate_id)
-                .or_insert_with(Vec::new)
-                .push(projection);
-        }
+    //     // Group projections by aggregate_id
+    //     for (aggregate_id, projection) in projections {
+    //         projections_by_aggregate
+    //             .entry(aggregate_id)
+    //             .or_insert_with(Vec::new)
+    //             .push(projection);
+    //     }
 
-        let aggregate_count = projections_by_aggregate.len();
-        info!(
-            "📊 PartitionedCDC: Grouped {} AccountCreated projections into {} aggregate groups",
-            projections_len, aggregate_count
-        );
+    //     let aggregate_count = projections_by_aggregate.len();
+    //     info!(
+    //         "📊 PartitionedCDC: Grouped {} AccountCreated projections into {} aggregate groups",
+    //         projections_len, aggregate_count
+    //     );
 
-        // SEQUENTIAL: Distribute aggregates using sequential partitioning (1000 aggregates per partition)
-        let mut projections_by_partition: HashMap<usize, Vec<(Uuid, AccountProjection)>> =
-            HashMap::new();
-        let mut aggregate_index = 0;
-        let aggregates_per_partition = 1000; // First 1000 aggregates to partition 0, next 1000 to partition 1, etc.
+    //     // SEQUENTIAL: Distribute aggregates using sequential partitioning (1000 aggregates per partition)
+    //     let mut projections_by_partition: HashMap<usize, Vec<(Uuid, AccountProjection)>> =
+    //         HashMap::new();
+    //     let mut aggregate_index = 0;
+    //     let aggregates_per_partition = 1000; // First 1000 aggregates to partition 0, next 1000 to partition 1, etc.
 
-        // CRITICAL: Process aggregates sequentially, keeping all projections of an aggregate together
-        for (aggregate_id, aggregate_projections) in projections_by_aggregate {
-            // Sequential distribution: aggregate_index / aggregates_per_partition
-            let num_partitions = get_cdc_num_partitions();
-            let partition_id = (aggregate_index / aggregates_per_partition) % num_partitions;
+    //     // CRITICAL: Process aggregates sequentially, keeping all projections of an aggregate together
+    //     for (aggregate_id, aggregate_projections) in projections_by_aggregate {
+    //         // Sequential distribution: aggregate_index / aggregates_per_partition
+    //         let num_partitions = get_cdc_num_partitions();
+    //         let partition_id = (aggregate_index / aggregates_per_partition) % num_partitions;
 
-            // Add ALL projections for this aggregate to the selected partition
-            for projection in aggregate_projections {
-                projections_by_partition
-                    .entry(partition_id)
-                    .or_insert_with(Vec::new)
-                    .push((aggregate_id, projection));
-            }
+    //         // Add ALL projections for this aggregate to the selected partition
+    //         for projection in aggregate_projections {
+    //             projections_by_partition
+    //                 .entry(partition_id)
+    //                 .or_insert_with(Vec::new)
+    //                 .push((aggregate_id, projection));
+    //         }
 
-            aggregate_index += 1; // Move to next aggregate
-        }
+    //         aggregate_index += 1; // Move to next aggregate
+    //     }
 
-        let partitions_count = projections_by_partition.len();
-        info!(
-            "🔄 PartitionedCDC: Distributed {} AccountCreated aggregates across {} partitions using sequential partitioning ({} aggregates per partition)",
-            aggregate_count, partitions_count, aggregates_per_partition
-        );
+    //     let partitions_count = projections_by_partition.len();
+    //     info!(
+    //         "🔄 PartitionedCDC: Distributed {} AccountCreated aggregates across {} partitions using sequential partitioning ({} aggregates per partition)",
+    //         aggregate_count, partitions_count, aggregates_per_partition
+    //     );
 
-        // Process each partition's projections as dedicated batches IN PARALLEL
-        let mut partition_futures = Vec::new();
+    //     // Process each partition's projections as dedicated batches IN PARALLEL
+    //     let mut partition_futures = Vec::new();
 
-        for (partition_id, partition_projections) in projections_by_partition {
-            let processor = self.processors[partition_id].clone();
+    //     for (partition_id, partition_projections) in projections_by_partition {
+    //         let processor = self.processors[partition_id].clone();
 
-            info!(
-                "📦 PartitionedCDC: Preparing parallel AccountCreated processing for partition {} with {} projections",
-                partition_id,
-                partition_projections.len()
-            );
+    //         info!(
+    //             "📦 PartitionedCDC: Preparing parallel AccountCreated processing for partition {} with {} projections",
+    //             partition_id,
+    //             partition_projections.len()
+    //         );
 
-            // Create future for parallel execution using AccountCreated method
-            let future = async move {
-                let operation_ids = processor
-                    .submit_account_created_projections_bulk(partition_projections)
-                    .await?;
+    //         // Create future for parallel execution using AccountCreated method
+    //         let future = async move {
+    //             let operation_ids = processor
+    //                 .submit_account_created_projections_bulk(partition_projections)
+    //                 .await?;
 
-                info!(
-                    "✅ PartitionedCDC: Completed AccountCreated partition {} with {} projections",
-                    partition_id,
-                    operation_ids.len()
-                );
+    //             info!(
+    //                 "✅ PartitionedCDC: Completed AccountCreated partition {} with {} projections",
+    //                 partition_id,
+    //                 operation_ids.len()
+    //             );
 
-                Ok::<Vec<Uuid>, anyhow::Error>(operation_ids)
-            };
+    //             Ok::<Vec<Uuid>, anyhow::Error>(operation_ids)
+    //         };
 
-            partition_futures.push(future);
-        }
+    //         partition_futures.push(future);
+    //     }
 
-        // Execute all partitions in parallel
-        info!(
-            "🚀 PartitionedCDC: Starting parallel AccountCreated processing of {} partitions",
-            partition_futures.len()
-        );
+    //     // Execute all partitions in parallel
+    //     info!(
+    //         "🚀 PartitionedCDC: Starting parallel AccountCreated processing of {} partitions",
+    //         partition_futures.len()
+    //     );
 
-        let partition_results = futures::future::join_all(partition_futures).await;
+    //     let partition_results = futures::future::join_all(partition_futures).await;
 
-        // Collect all operation IDs
-        let mut all_operation_ids = Vec::new();
-        for result in partition_results {
-            let operation_ids = result?;
-            all_operation_ids.extend(operation_ids);
-        }
+    //     // Collect all operation IDs
+    //     let mut all_operation_ids = Vec::new();
+    //     for result in partition_results {
+    //         let operation_ids = result?;
+    //         all_operation_ids.extend(operation_ids);
+    //     }
 
-        info!(
-            "✅ PartitionedCDC: AccountCreated bulk processing completed for {} projections ({} aggregates) across {} partitions",
-            projections_len, aggregate_count, partitions_count
-        );
+    //     info!(
+    //         "✅ PartitionedCDC: AccountCreated bulk processing completed for {} projections ({} aggregates) across {} partitions",
+    //         projections_len, aggregate_count, partitions_count
+    //     );
 
-        Ok(all_operation_ids)
-    }
+    //     Ok(all_operation_ids)
+    // }
 
     /// SEQUENTIAL: Submit multiple projections with sequential partitioning and event types
     pub async fn submit_projections_bulk_with_event_types(
