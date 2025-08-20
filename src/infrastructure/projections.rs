@@ -415,21 +415,22 @@ impl ProjectionStore {
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .test_before_acquire(true)
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    // CRITICAL: Optimize for bulk operations
-                    sqlx::query(
-                        r#"
-                        SET statement_timeout = 10000;
-                        SET lock_timeout = 3000;
-                        SET idle_in_transaction_session_timeout = 10000;
-                    "#,
-                    )
-                    .execute(conn)
-                    .await?;
-                    Ok(())
-                })
-            })
+            // REMOVED: after_connect for performance - too slow
+            // .after_connect(|conn, _meta| {
+            //     Box::pin(async move {
+            //         // CRITICAL: Optimize for bulk operations
+            //         sqlx::query(
+            //             r#"
+            //             SET statement_timeout = 10000;
+            //             SET lock_timeout = 3000;
+            //             SET idle_in_transaction_session_timeout = 10000;
+            //         "#,
+            //         )
+            //         .execute(conn)
+            //         .await?;
+            //         Ok(())
+            //     })
+            // })
             .connect(&database_url)
             .await?;
 
@@ -1892,10 +1893,10 @@ impl ProjectionStore {
             // OPTIMIZATION: Use transaction with timeout
             let mut tx = conn.begin().await?;
 
-            // Set transaction timeout
-            sqlx::query("SET LOCAL statement_timeout = 15000") // 15 second timeout
-                .execute(&mut *tx)
-                .await?;
+            // REMOVED: Set transaction timeout for performance - too slow
+            // sqlx::query("SET LOCAL statement_timeout = 15000") // 15 second timeout
+            //     .execute(&mut *tx)
+            //     .await?;
 
             let mut chunk_results = HashMap::new();
 
@@ -2704,17 +2705,17 @@ impl ProjectionStore {
     ) -> Result<()> {
         let pool = self.pools.select_pool(OperationType::Write);
 
-        // Set synchronous_commit (only runtime-changeable parameter)
-        let sync_setting = if synchronous_commit { "on" } else { "off" };
-        sqlx::query(&format!("SET synchronous_commit = {}", sync_setting))
-            .execute(pool)
-            .await
-            .map_err(|e| ProjectionError::DatabaseError(e))?;
+        // REMOVED: Set synchronous_commit for performance - too slow
+        // let sync_setting = if synchronous_commit { "on" } else { "off" };
+        // sqlx::query(&format!("SET synchronous_commit = {}", sync_setting))
+        //     .execute(pool)
+        //     .await
+        //     .map_err(|e| ProjectionError::DatabaseError(e))?;
 
-        info!(
-            "🔧 ProjectionStore PostgreSQL setting: synchronous_commit={} (full_page_writes requires server restart)",
-            sync_setting
-        );
+        // info!(
+        //     "🔧 ProjectionStore PostgreSQL setting: synchronous_commit={} (full_page_writes requires server restart)",
+        //     sync_setting
+        // );
         Ok(())
     }
 

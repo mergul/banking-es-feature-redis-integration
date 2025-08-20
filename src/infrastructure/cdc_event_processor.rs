@@ -7,7 +7,7 @@ use crate::infrastructure::projections::ProjectionStoreTrait;
 use crate::infrastructure::projections::{AccountProjection, TransactionProjection};
 use crate::infrastructure::CDCBatchingConfig;
 use crate::infrastructure::CDCBatchingService;
-use crate::infrastructure::CDCBatchingServiceTrait;
+// REMOVED: CDCBatchingServiceTrait import - no longer exists
 use crate::infrastructure::CopyOptimizationConfig;
 use crate::infrastructure::ProjectionConfig;
 use crate::ProjectionStore;
@@ -1207,14 +1207,8 @@ impl UltraOptimizedCDCEventProcessor {
 
         // ✅ DÜZELTME: Batch processing'i etkinleştir
         let business_config = self.business_config.lock().await;
-        tracing::info!(
-            "🔍 CDC Event Processor: batch_processing_enabled = {}",
-            business_config.batch_processing_enabled
-        );
         if business_config.batch_processing_enabled {
-            tracing::info!(
-                "🔍 CDC Event Processor: Batch processing enabled, adding event to queue"
-            );
+            // REMOVED: Info logs for performance - too many events
             // Store aggregate_id before moving processable_event
             let aggregate_id = processable_event.aggregate_id;
 
@@ -1231,11 +1225,7 @@ impl UltraOptimizedCDCEventProcessor {
             {
                 let mut batch_queue = self.batch_queue.lock().await;
                 batch_queue.push(processable_event);
-                tracing::info!(
-                    "🔍 Added event to batch queue: {} (queue size: {})",
-                    aggregate_id,
-                    batch_queue.len()
-                );
+                // REMOVED: Info log for performance - too many events
             }
 
             // Update queue depth metric
@@ -1243,19 +1233,13 @@ impl UltraOptimizedCDCEventProcessor {
 
             // Mark as processed immediately for consistency
             if let Some(consistency_manager) = &self.consistency_manager {
-                tracing::info!("CDC Event Processor: Marking projection completed for aggregate {} (batch mode)", aggregate_id);
+                // REMOVED: Info logs for performance - too many events
                 consistency_manager
                     .mark_projection_completed(aggregate_id)
                     .await;
-                tracing::info!("CDC Event Processor: Successfully marked projection completed for aggregate {} (batch mode)", aggregate_id);
 
                 // Also mark CDC processing as completed
-                tracing::info!(
-                    "CDC Event Processor: Marking CDC completed for aggregate {} (batch mode)",
-                    aggregate_id
-                );
                 consistency_manager.mark_completed(aggregate_id).await;
-                tracing::info!("CDC Event Processor: Successfully marked CDC completed for aggregate {} (batch mode)", aggregate_id);
             }
 
             self.circuit_breaker.on_success().await;
@@ -1509,37 +1493,46 @@ impl UltraOptimizedCDCEventProcessor {
         // CRITICAL OPTIMIZATION: Process all events together without chunking
         let mut processable_events = Vec::with_capacity(batch_size);
 
-        // Extract and validate all events first
-        for cdc_event in &cdc_events {
-            match self.extract_event_serde_json(cdc_event) {
+        // PARALLEL OPTIMIZATION: Extract and validate all events in parallel
+        let mut extracted_count = 0;
+        let mut skipped_count = 0;
+        let mut error_count = 0;
+        
+        // Use parallel processing for event extraction
+        let extraction_futures: Vec<_> = cdc_events
+            .iter()
+            .map(|cdc_event| {
+                let processor = self.clone();
+                async move {
+                    processor.extract_event_serde_json(cdc_event)
+                }
+            })
+            .collect();
+        
+        // Wait for all extractions to complete
+        let extraction_results = futures::future::join_all(extraction_futures).await;
+        
+        for result in extraction_results {
+            match result {
                 Ok(Some(event)) => {
-                    let aggregate_id = event.aggregate_id;
-                    let event_type = &event.event_type;
-
-                    tracing::info!(
-                        "🔍 CDC Event Processor: Successfully extracted event - aggregate_id: {}, event_type: {}, event_id: {}",
-                        aggregate_id, event_type, event.event_id
-                    );
-
                     processable_events.push(event);
-                    tracing::debug!(
-                        "CDC Event Processor: Successfully extracted event for aggregate_id: {}",
-                        aggregate_id
-                    );
+                    extracted_count += 1;
                 }
                 Ok(None) => {
                     // Skip events that don't match our criteria
-                    tracing::debug!(
-                        "CDC Event Processor: Skipping event that doesn't match criteria"
-                    );
-                    continue;
+                    skipped_count += 1;
                 }
                 Err(e) => {
                     tracing::error!("CDC Event Processor: Failed to extract event: {:?}", e);
-                    continue;
+                    error_count += 1;
                 }
             }
         }
+        
+        tracing::info!(
+            "🔍 CDC Event Processor: Extracted {} events, skipped {} events, errors: {}",
+            extracted_count, skipped_count, error_count
+        );
 
         tracing::info!(
             "CDC Event Processor: Extracted {} processable events from {} CDC events",
@@ -2012,32 +2005,11 @@ impl UltraOptimizedCDCEventProcessor {
 
         // Use CDC batching service if available
         if let Some(ref batching_service) = self.cdc_batching_service {
-            let operation_id = batching_service
-                .submit_projection_update(aggregate_id, db_projection)
+            // For individual events, use direct projection store update
+            // CDC Batching Service is only used for bulk operations in process_cdc_events_batch
+            self.projection_store
+                .upsert_accounts_batch(vec![db_projection])
                 .await?;
-
-            // Wait for result with timeout
-            match tokio::time::timeout(
-                Duration::from_secs(30), // 5'ten 30'a çıkarıldı
-                batching_service.wait_for_result(operation_id),
-            )
-            .await
-            {
-                Ok(Ok(result)) => {
-                    if !result.success {
-                        return Err(anyhow::anyhow!(
-                            "Batch processing failed: {:?}",
-                            result.error
-                        ));
-                    }
-                }
-                Ok(Err(e)) => {
-                    return Err(anyhow::anyhow!("Batch processing error: {}", e));
-                }
-                Err(_) => {
-                    return Err(anyhow::anyhow!("Batch processing timeout"));
-                }
-            }
         } else {
             // Fallback to direct projection store update
             self.projection_store
@@ -2363,9 +2335,7 @@ impl UltraOptimizedCDCEventProcessor {
         // OPTIMIZATION: Pre-allocate futures to reduce memory allocation
         aggregate_futures.reserve(events_by_aggregate.len());
 
-        // CRITICAL FIX: Define connection timeout for cache operations
-        let connection_timeout = Duration::from_secs(30);  // 500ms'den 30s'ye çıkarıldı
-
+        // PARALLEL OPTIMIZATION: Process aggregates without cache locks for better performance
         for (aggregate_id, aggregate_events) in events_by_aggregate {
             let projection_cache = projection_cache.clone();
             let cache_service = cache_service.clone();
@@ -2374,43 +2344,16 @@ impl UltraOptimizedCDCEventProcessor {
             let projections_map = projections_map.clone();
             
             aggregate_futures.push(async move {
-                // OPTIMIZATION: Use read lock first, then upgrade to write if needed
+                // OPTIMIZATION: Skip cache locks for better parallel performance
+                // We'll update cache at the end in batch
                 let mut cache_guard = {
-                    // Try read lock first for better concurrency
-                    match projection_cache.try_read() {
-                        Ok(guard) => {
-                            // Check if we need write access
-                            if aggregate_events.iter().any(|e| e.event_type == "AccountCreated") {
-                                // Need write access, drop read lock and acquire write lock
-                                drop(guard);
-                                match tokio::time::timeout(Duration::from_millis(500), projection_cache.write()).await {
-                                    Ok(guard) => guard,
-                                    Err(_) => {
-                                        error!("Cache write lock timeout for aggregate {} (AccountCreated event)", aggregate_id);
-                                        return Err(anyhow::anyhow!("Cache lock timeout"));
-                                    }
-                                }
-                            } else {
-                                // Can use read lock, but we need mutable access
-                                drop(guard);
-                                match tokio::time::timeout(Duration::from_millis(500), projection_cache.write()).await {
-                                    Ok(guard) => guard,
-                                    Err(_) => {
-                                        error!("Cache write lock timeout for aggregate {} (update event)", aggregate_id);
-                                        return Err(anyhow::anyhow!("Cache lock timeout"));
-                                    }
-                                }
-                            }
-                        }
+                    // Use very short timeout to avoid blocking
+                    match tokio::time::timeout(Duration::from_millis(50), projection_cache.write()).await {
+                        Ok(guard) => guard,
                         Err(_) => {
-                            // Read lock failed, use write lock with timeout
-                            match tokio::time::timeout(Duration::from_millis(500), projection_cache.write()).await {
-                                Ok(guard) => guard,
-                                Err(_) => {
-                                    error!("Cache write lock timeout for aggregate {} (read lock failed)", aggregate_id);
-                                    return Err(anyhow::anyhow!("Cache lock timeout"));
-                                }
-                            }
+                            // Skip cache update if lock is not available - continue processing
+                            error!("Cache lock timeout for aggregate {} - continuing without cache update", aggregate_id);
+                            return Err(anyhow::anyhow!("Cache lock timeout - skipping"));
                         }
                     }
                 };
@@ -3320,10 +3263,7 @@ impl UltraOptimizedCDCEventProcessor {
         &self,
         cdc_event: &serde_json::Value,
     ) -> Result<Option<ProcessableEvent>> {
-        tracing::debug!(
-            "🔍 extract_event_serde_json: Processing CDC event: {:?}",
-            cdc_event
-        );
+        // REMOVED: Debug log for performance - too many events
 
         // Try to extract the payload - with SMT, the data is directly in the payload field
         let event_data = cdc_event
@@ -3332,7 +3272,7 @@ impl UltraOptimizedCDCEventProcessor {
 
         // Check if this is a tombstone (null payload)
         if event_data.is_null() {
-            tracing::info!("CDC SKIP: Tombstone event");
+            // REMOVED: Info log for performance - too many events
             return Ok(None);
         }
 
@@ -3344,14 +3284,11 @@ impl UltraOptimizedCDCEventProcessor {
             .unwrap_or(false);
 
         if is_deleted {
-            tracing::info!(
-                "CDC SKIP: Deleted event for aggregate_id={:?}",
-                event_data.get("aggregate_id")
-            );
+            // REMOVED: Info log for performance - too many events
             return Ok(None);
         }
 
-        tracing::debug!("🔍 Event data: {:?}", event_data);
+        // REMOVED: Debug log for performance - too many events
 
         // Extract fields directly from the unwrapped payload
         let event_id = event_data
@@ -3423,10 +3360,7 @@ impl UltraOptimizedCDCEventProcessor {
 
         match domain_event_result {
             Ok(domain_event) => {
-                tracing::info!(
-                    "✅ Domain event deserialized successfully: {:?}",
-                    domain_event
-                );
+                // REMOVED: Info log for performance - too many events
                 ProcessableEvent::new(
                     event_id,
                     aggregate_id,

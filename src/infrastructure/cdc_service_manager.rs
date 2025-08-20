@@ -441,11 +441,16 @@ impl CDCServiceManager {
 
         // Get CDC Batching Service from processor for CDCServiceManager access
         if let Some(cdc_batching_service) = self.processor.get_cdc_batching_service() {
-            self.cdc_batching_service = Some(cdc_batching_service);
+            self.cdc_batching_service = Some(cdc_batching_service.clone());
             tracing::info!("CDC Service Manager: CDC Batching Service retrieved from processor");
-        }
 
-        tracing::info!("CDC Service Manager: ✅ CDC Batching Service started successfully");
+            // Start CDC Batching Service
+            tracing::info!("CDC Service Manager: Starting CDC Batching Service...");
+            cdc_batching_service.start().await?;
+            tracing::info!("CDC Service Manager: ✅ CDC Batching Service started successfully");
+        } else {
+            tracing::warn!("CDC Service Manager: CDC Batching Service not available");
+        }
 
         tracing::info!("CDC Service Manager: ✅ Core services started");
         Ok(())

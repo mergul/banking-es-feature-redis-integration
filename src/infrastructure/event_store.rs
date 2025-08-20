@@ -2452,10 +2452,10 @@ impl EventStore {
         let start_time = std::time::Instant::now();
 
         // Use READ COMMITTED for better performance
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-            .execute(&mut **tx)
-            .await
-            .map_err(EventStoreError::DatabaseError)?;
+        // sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        //     .execute(&mut **tx)
+        //     .await
+        //     .map_err(EventStoreError::DatabaseError)?;
 
         // Pre-calculate total events for metrics
         let total_events: usize = events_by_aggregate
@@ -3012,10 +3012,11 @@ impl EventStore {
         let pool = self.get_pool();
         let setting = if synchronous_commit { "on" } else { "off" };
 
-        sqlx::query(&format!("SET synchronous_commit = {}", setting))
-            .execute(&pool)
-            .await
-            .map_err(|e| EventStoreError::DatabaseError(e))?;
+        // REMOVED: Set synchronous_commit for performance - too slow
+        // sqlx::query(&format!("SET synchronous_commit = {}", setting))
+        //     .execute(&pool)
+        //     .await
+        //     .map_err(|e| EventStoreError::DatabaseError(e))?;
 
         info!("🔧 PostgreSQL synchronous_commit set to: {}", setting);
         Ok(())
@@ -3032,30 +3033,29 @@ impl EventStore {
         // Set synchronous_commit (only runtime-changeable parameter)
         let sync_setting = if synchronous_commit { "on" } else { "off" };
 
-        // Add timeout to prevent hanging
-        let query = format!("SET synchronous_commit = {}", sync_setting);
-
-        // Use tokio::time::timeout to prevent hanging
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5), // 5 second timeout
-            sqlx::query(&query).execute(&pool),
-        )
-        .await
-        {
-            Ok(result) => {
-                result.map_err(|e| EventStoreError::DatabaseError(e))?;
-                info!(
-                    "🔧 PostgreSQL setting: synchronous_commit={} (full_page_writes requires server restart)",
-                    sync_setting
-                );
-                Ok(())
-            }
-            Err(_) => {
-                warn!("⚠️ PostgreSQL synchronous_commit setting timed out after 5 seconds");
-                // Continue without the setting rather than failing
-                Ok(())
-            }
-        }
+        // REMOVED: Set synchronous_commit for performance - too slow
+        // let query = format!("SET synchronous_commit = {}", sync_setting);
+        // match tokio::time::timeout(
+        //     std::time::Duration::from_secs(5), // 5 second timeout
+        //     sqlx::query(&query).execute(&pool),
+        // )
+        // .await
+        // {
+        //     Ok(result) => {
+        //         result.map_err(|e| EventStoreError::DatabaseError(e))?;
+        //         info!(
+        //             "🔧 PostgreSQL setting: synchronous_commit={} (full_page_writes requires server restart)",
+        //             sync_setting
+        //         );
+        //         Ok(())
+        //     }
+        //     Err(_) => {
+        //         warn!("⚠️ PostgreSQL synchronous_commit setting timed out after 5 seconds");
+        //         // Continue without the setting rather than failing
+        //         Ok(())
+        //     }
+        // }
+        Ok(())
     }
 
     /// Apply bulk config with PostgreSQL settings

@@ -1,7 +1,7 @@
 use crate::infrastructure::projections::{AccountProjection, ProjectionStoreTrait};
 use crate::infrastructure::write_batching::BulkInsertConfigManager;
 use anyhow::Result;
-use async_trait::async_trait;
+// REMOVED: async_trait import - no longer needed
 use chrono::Utc;
 use futures;
 use rust_decimal::Decimal;
@@ -27,7 +27,7 @@ fn get_cdc_default_batch_size() -> usize {
     std::env::var("CDC_BATCH_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(2000) // Default to 2000 if not set or invalid
+        .unwrap_or(1000) // Default to 1000 if not set or invalid
 }
 
 fn get_cdc_batch_timeout_ms() -> u64 {
@@ -42,25 +42,8 @@ const CDC_NUM_PARTITIONS: usize = 8; // DEPRECATED: Use get_cdc_num_partitions()
 const CDC_DEFAULT_BATCH_SIZE: usize = 2000; // DEPRECATED: Use get_cdc_default_batch_size() instead
 const CDC_BATCH_TIMEOUT_MS: u64 = 25; // DEPRECATED: Use get_cdc_batch_timeout_ms() instead
 
-/// Trait for CDC Batching Service operations
-#[async_trait]
-pub trait CDCBatchingServiceTrait: Send + Sync {
-    /// Submit a single projection update
-    async fn submit_projection_update(
-        &self,
-        aggregate_id: Uuid,
-        projection: AccountProjection,
-    ) -> Result<Uuid>;
-
-    /// Submit multiple projection updates in bulk
-    async fn submit_projections_bulk(
-        &self,
-        projections: Vec<(Uuid, AccountProjection)>,
-    ) -> Result<Vec<Uuid>>;
-
-    /// Wait for operation result
-    async fn wait_for_result(&self, operation_id: Uuid) -> Result<CDCOperationResult>;
-}
+// REMOVED: CDCBatchingServiceTrait - not used anywhere
+// The PartitionedCDCBatching uses direct methods instead of trait methods
 
 #[derive(Clone)]
 pub struct CDCBatchingConfig {
@@ -291,6 +274,19 @@ impl CDCBatchingService {
         {
             let mut batch_guard = self.current_batch.lock().await;
             batch_guard.add_projection_with_operation_id(aggregate_id, projection, operation_id);
+
+            let current_size = batch_guard.projections.len();
+            let max_size = self.config.max_batch_size;
+
+            if current_size % 100 == 0 || current_size >= max_size {
+                info!(
+                    "📦 BATCH ACCUMULATION: Partition {:?} has {} projections (max: {}, type: {:?})",
+                    self.partition_id,
+                    current_size,
+                    max_size,
+                    self.processing_type
+                );
+            }
         }
 
         Ok(operation_id)
@@ -357,11 +353,21 @@ impl CDCBatchingService {
             // Check if current batch should be processed
             let batch_to_process = {
                 let mut batch_guard = current_batch.lock().await;
-                if batch_guard.should_process(
+                let current_size = batch_guard.projections.len();
+                let should_process = batch_guard.should_process(
                     config.max_batch_size,
                     Duration::from_millis(config.max_batch_wait_time_ms),
-                ) && !batch_guard.projections.is_empty()
-                {
+                ) && !batch_guard.projections.is_empty();
+
+                if should_process {
+                    info!(
+                        "⏰ BATCH TRIGGER: Partition {:?} triggering flush with {} projections (max: {}, type: {:?})",
+                        partition_id,
+                        current_size,
+                        config.max_batch_size,
+                        processing_type
+                    );
+
                     let new_batch = match processing_type {
                         CDCBatchType::AccountCreated => {
                             CDCBatch::new_account_created_batch(partition_id)
@@ -376,12 +382,21 @@ impl CDCBatchingService {
 
             if let Some(batch) = batch_to_process {
                 // Use the appropriate processing method based on type
+                let batch_size = batch.projections.len();
+                info!(
+                    "🔥 BATCH FLUSH: Partition {:?} flushing {} projections (type: {:?}, batch_id: {})",
+                    partition_id,
+                    batch_size,
+                    processing_type,
+                    batch.batch_id
+                );
+
                 let results = match processing_type {
                     CDCBatchType::AccountCreated => {
                         info!(
                             "🚀 PARTITION {:?}: Processing AccountCreated batch with {} projections",
                             partition_id,
-                            batch.projections.len()
+                            batch_size
                         );
                         Self::execute_account_created_batch(
                             &batch,
@@ -394,8 +409,7 @@ impl CDCBatchingService {
                     CDCBatchType::OtherEvents => {
                         info!(
                             "🔄 PARTITION {:?}: Processing other events batch with {} projections",
-                            partition_id,
-                            batch.projections.len()
+                            partition_id, batch_size
                         );
                         Self::execute_other_events_batch(
                             &batch,
@@ -744,28 +758,8 @@ impl CDCBatchingService {
     }
 }
 
-#[async_trait]
-impl CDCBatchingServiceTrait for CDCBatchingService {
-    async fn submit_projection_update(
-        &self,
-        aggregate_id: Uuid,
-        projection: AccountProjection,
-    ) -> Result<Uuid> {
-        self.submit_projection_update(aggregate_id, projection)
-            .await
-    }
-
-    async fn submit_projections_bulk(
-        &self,
-        projections: Vec<(Uuid, AccountProjection)>,
-    ) -> Result<Vec<Uuid>> {
-        self.submit_projections_bulk(projections).await
-    }
-
-    async fn wait_for_result(&self, operation_id: Uuid) -> Result<CDCOperationResult> {
-        self.wait_for_result(operation_id).await
-    }
-}
+// REMOVED: CDCBatchingServiceTrait implementation for CDCBatchingService - not needed
+// The trait was removed and these methods are not used anywhere
 
 /// Multi-instance CDC Batching Manager
 pub struct PartitionedCDCBatching {
@@ -806,6 +800,31 @@ impl PartitionedCDCBatching {
             account_created_processor,
             other_events_processors,
         }
+    }
+
+    /// Start all CDC Batching Service processors
+    pub async fn start(&self) -> Result<()> {
+        info!(
+            "🚀 Starting CDC Batching Service with {} processors",
+            1 + self.other_events_processors.len()
+        );
+
+        // Start AccountCreated processor (partition 0)
+        self.account_created_processor.start().await?;
+        info!("✅ AccountCreated processor started (partition 0)");
+
+        // Start other events processors (partitions 1-N)
+        for (i, processor) in self.other_events_processors.iter().enumerate() {
+            processor.start().await?;
+            info!(
+                "✅ Other events processor {} started (partition {})",
+                i,
+                i + 1
+            );
+        }
+
+        info!("✅ CDC Batching Service started successfully");
+        Ok(())
     }
     // Submit ONLY AccountCreated events (events are pre-separated)
     pub async fn submit_account_created_projections_bulk(
@@ -849,41 +868,62 @@ impl PartitionedCDCBatching {
 
         let mut operation_ids = Vec::new();
 
-        // Distribute across other events processors using hash-based partitioning
+        // Group projections by processor for batch accumulation
+        let mut processor_groups: HashMap<usize, Vec<(Uuid, AccountProjection)>> = HashMap::new();
+
         for (aggregate_id, projection) in projections {
             let processor_index =
                 (aggregate_id.as_u128() as usize) % self.other_events_processors.len();
+            processor_groups
+                .entry(processor_index)
+                .or_insert_with(Vec::new)
+                .push((aggregate_id, projection));
+        }
+
+        // Submit each group to its processor for batch accumulation
+        for (processor_index, group_projections) in processor_groups {
             let processor = &self.other_events_processors[processor_index];
 
-            let operation_id = processor
-                .submit_projection_update(aggregate_id, projection)
-                .await?;
-            operation_ids.push(operation_id);
+            info!(
+                "📦 BATCH GROUP: Submitting {} projections to processor {} (partition {})",
+                group_projections.len(),
+                processor_index,
+                processor_index + 1
+            );
+
+            for (aggregate_id, projection) in group_projections {
+                let operation_id = processor
+                    .submit_projection_update(aggregate_id, projection)
+                    .await?;
+                operation_ids.push(operation_id);
+            }
         }
 
         Ok(operation_ids)
     }
-}
 
-#[async_trait]
-impl CDCBatchingServiceTrait for PartitionedCDCBatching {
-    async fn submit_projection_update(
-        &self,
-        aggregate_id: Uuid,
-        projection: AccountProjection,
-    ) -> Result<Uuid> {
-        self.submit_projection_update(aggregate_id, projection)
+    /// Wait for operation result from any processor
+    pub async fn wait_for_result(&self, operation_id: Uuid) -> Result<CDCOperationResult> {
+        // Try account_created_processor first, then other processors
+        match self
+            .account_created_processor
+            .wait_for_result(operation_id)
             .await
-    }
-
-    async fn submit_projections_bulk(
-        &self,
-        projections: Vec<(Uuid, AccountProjection)>,
-    ) -> Result<Vec<Uuid>> {
-        self.submit_projections_bulk(projections).await
-    }
-
-    async fn wait_for_result(&self, operation_id: Uuid) -> Result<CDCOperationResult> {
-        self.wait_for_result(operation_id).await
+        {
+            Ok(result) => Ok(result),
+            Err(_) => {
+                // Try other processors
+                for processor in &self.other_events_processors {
+                    if let Ok(result) = processor.wait_for_result(operation_id).await {
+                        return Ok(result);
+                    }
+                }
+                Err(anyhow::anyhow!("Operation not found in any processor"))
+            }
+        }
     }
 }
+
+// REMOVED: CDCBatchingServiceTrait implementation - not needed
+// The PartitionedCDCBatching only uses submit_account_created_projections_bulk and submit_other_events_bulk
+// which are direct methods, not trait methods
