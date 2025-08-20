@@ -257,7 +257,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pools.clone(),
             None, // <-- pass None for metrics in production
             Some(cqrs_service.get_consistency_manager()), // Pass consistency manager from CQRS service
-        )?;
+        )
+        .await?;
 
         // Start CDC service
         manager.start().await?;

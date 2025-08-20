@@ -186,7 +186,8 @@ async fn setup_stress_test_environment(
         service_context.event_store.get_partitioned_pools().clone(),
         Some(metrics.clone()),
         Some(cqrs_service.get_consistency_manager()),
-    )?;
+    )
+    .await?;
 
     // Start CDC service (same as main.rs)
     println!("🔧 Starting CDC service manager...");

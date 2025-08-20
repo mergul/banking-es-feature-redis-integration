@@ -595,6 +595,7 @@ impl UltraOptimizedCDCEventProcessor {
             performance_config,
             consistency_manager,
             None,
+            None, // cdc_batching_service
         )
     }
 
@@ -607,6 +608,7 @@ impl UltraOptimizedCDCEventProcessor {
         performance_config: Option<AdvancedPerformanceConfig>,
         consistency_manager: Option<Arc<ConsistencyManager>>,
         write_pool: Option<Arc<sqlx::PgPool>>,
+        cdc_batching_service: Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>>,
     ) -> Self {
         let business_config: BusinessLogicConfig = business_config.unwrap_or_default();
         let performance_config = performance_config.unwrap_or_default();
@@ -661,7 +663,7 @@ impl UltraOptimizedCDCEventProcessor {
             // Phase 2.2: Scalability Enhancements
             cluster_manager: Arc::new(Mutex::new(None)),
             monitoring_system: Arc::new(Mutex::new(None)),
-            cdc_batching_service: None,
+            cdc_batching_service,
             write_pool,
             // REMOVED: Accumulation batching - using ProjectionStore standard batching instead
         }
@@ -766,6 +768,11 @@ impl UltraOptimizedCDCEventProcessor {
                 "Write pool not available for CDC Batching Service initialization"
             ))
         }
+    }
+
+    /// Get CDC Batching Service if available
+    pub fn get_cdc_batching_service(&self) -> Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>> {
+        self.cdc_batching_service.clone()
     }
 
     pub async fn start_batch_processor(&mut self) -> Result<()> {
@@ -1464,6 +1471,7 @@ impl UltraOptimizedCDCEventProcessor {
                         }
                     } else {
                         // Fallback to direct projection store
+                        tracing::warn!("CDC Event Processor: CDC Batching Service not available, falling back to direct projection store");
                         match self
                             .projection_store
                             .upsert_accounts_batch(projections)

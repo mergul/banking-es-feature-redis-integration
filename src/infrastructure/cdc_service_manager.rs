@@ -52,6 +52,10 @@ pub struct CDCServiceManager {
 
     // New advanced outbox cleanup service
     outbox_cleaner: Option<Arc<OutboxCleaner>>,
+
+    // CDC Batching Service for parallel projection updates
+    cdc_batching_service:
+        Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -267,7 +271,7 @@ impl Default for EnhancedCDCMetrics {
 }
 
 impl CDCServiceManager {
-    pub fn new(
+    pub async fn new(
         config: DebeziumConfig,
         outbox_repo: Arc<CDCOutboxRepository>,
         kafka_producer: crate::infrastructure::kafka_abstraction::KafkaProducer,
@@ -289,7 +293,19 @@ impl CDCServiceManager {
                 Default::default(),
             ),
         );
-        let processor = Arc::new(UltraOptimizedCDCEventProcessor::new(
+        // Create CDC Batching Service first
+        let write_pool = pools
+            .select_pool(crate::infrastructure::connection_pool_partitioning::OperationType::Write)
+            .clone();
+
+        let cdc_batching_service =
+            crate::infrastructure::cdc_batching_service::PartitionedCDCBatching::new(
+                projection_store.clone(),
+                Arc::new(write_pool.clone()),
+            )
+            .await;
+
+        let processor = Arc::new(UltraOptimizedCDCEventProcessor::new_with_write_pool(
             kafka_producer,
             cache_service,
             projection_store.clone(),
@@ -297,6 +313,8 @@ impl CDCServiceManager {
             None,
             None, // Use default performance config
             consistency_manager.clone(),
+            Some(Arc::new(write_pool)),
+            Some(Arc::new(cdc_batching_service)),
         ));
 
         Ok(Self {
@@ -312,6 +330,7 @@ impl CDCServiceManager {
             optimization_config,
             consistency_manager,
             outbox_cleaner: None,
+            cdc_batching_service: None,
         })
     }
 
@@ -394,7 +413,7 @@ impl CDCServiceManager {
     }
 
     /// Start core CDC services
-    async fn start_core_services(&self) -> Result<()> {
+    async fn start_core_services(&mut self) -> Result<()> {
         let mut tasks = self.tasks.write().await;
 
         // Start CDC consumer with resilience
@@ -420,22 +439,11 @@ impl CDCServiceManager {
             }
         }
 
-        // Start CDC Batching Service for parallel projection updates
-        tracing::info!("CDC Service Manager: Starting CDC Batching Service...");
-        let write_pool = self
-            .outbox_repo
-            .get_pools()
-            .select_pool(crate::infrastructure::connection_pool_partitioning::OperationType::Write)
-            .clone()
-            .into();
-
-        // Create CDC Batching Service instance using the existing projection store
-        let _cdc_batching_service =
-            crate::infrastructure::cdc_batching_service::PartitionedCDCBatching::new(
-                self.projection_store.clone(),
-                write_pool,
-            )
-            .await;
+        // Get CDC Batching Service from processor for CDCServiceManager access
+        if let Some(cdc_batching_service) = self.processor.get_cdc_batching_service() {
+            self.cdc_batching_service = Some(cdc_batching_service);
+            tracing::info!("CDC Service Manager: CDC Batching Service retrieved from processor");
+        }
 
         tracing::info!("CDC Service Manager: ✅ CDC Batching Service started successfully");
 
@@ -943,6 +951,13 @@ impl CDCServiceManager {
 
     pub fn processor_arc(&self) -> Arc<UltraOptimizedCDCEventProcessor> {
         self.processor.clone()
+    }
+
+    /// Get the CDC Batching Service if available
+    pub fn get_cdc_batching_service(
+        &self,
+    ) -> Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>> {
+        self.cdc_batching_service.clone()
     }
 
     /// Ensure batch processing is enabled and started
