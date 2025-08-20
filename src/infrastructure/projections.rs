@@ -358,22 +358,20 @@ impl ProjectionStoreTrait for ProjectionStore {
             accounts.iter().map(|a| a.id).collect::<Vec<_>>()
         );
 
-        // Use the same pattern as upsert_accounts_batch - send to update processor
-        let send_result = self
-            .update_sender
-            .send(ProjectionUpdate::AccountBatch(accounts));
-        match send_result {
-            Ok(_) => tracing::info!(
-                "[ProjectionStore] bulk_update_accounts_with_copy: sent to update_sender successfully"
-            ),
-            Err(ref e) => tracing::error!(
-                "[ProjectionStore] bulk_update_accounts_with_copy: failed to send to update_sender: {}",
-                e
-            ),
+        if accounts.is_empty() {
+            return Ok(());
         }
-        send_result.map_err(|e| {
-            anyhow::Error::msg("Failed to send account batch update: ".to_string() + &e.to_string())
-        })?;
+
+        let pool = self.pools.select_pool(OperationType::Write);
+        let mut tx = pool.begin().await?;
+
+        // Use the optimized COPY function for updates only
+        if let Err(e) = Self::bulk_update_accounts_with_copy_impl(&mut tx, &accounts, pool).await {
+            tx.rollback().await?;
+            return Err(anyhow::anyhow!("Bulk update accounts failed: {:?}", e));
+        }
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -387,23 +385,8 @@ impl ProjectionStoreTrait for ProjectionStore {
             accounts.iter().map(|a| a.id).collect::<Vec<_>>()
         );
 
-        // Use the same pattern as upsert_accounts_batch - send to update processor
-        let send_result = self
-            .update_sender
-            .send(ProjectionUpdate::AccountBatch(accounts));
-        match send_result {
-            Ok(_) => tracing::info!(
-                "[ProjectionStore] bulk_insert_new_accounts_with_copy: sent to update_sender successfully"
-            ),
-            Err(ref e) => tracing::error!(
-                "[ProjectionStore] bulk_insert_new_accounts_with_copy: failed to send to update_sender: {}",
-                e
-            ),
-        }
-        send_result.map_err(|e| {
-            anyhow::Error::msg("Failed to send account batch update: ".to_string() + &e.to_string())
-        })?;
-        Ok(())
+        // Use the optimized direct COPY function for new accounts
+        self.bulk_insert_new_accounts_with_copy_impl(accounts).await
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -1965,20 +1948,6 @@ impl ProjectionStore {
         Ok(results)
     }
 
-    // pub fn new_test(pool: PgPool) -> Self {
-    //     let mut config = ProjectionConfig::default();
-    //     config.batch_size = 1; // Process immediately in test mode
-    //     config.batch_timeout_ms = 0; // No batching in test mode
-    //     let pools = Arc::new(PartitionedPools {
-    //         write_pool: pool.clone(),
-    //         read_pool: pool,
-    //         config:
-    //             crate::infrastructure::connection_pool_partitioning::PoolPartitioningConfig::default(
-    //             ),
-    //     });
-    //     Self::from_pools_with_config(pools, config)
-    // }
-
     pub fn from_pool_with_config(pool: PgPool, config: ProjectionConfig) -> Self {
         let pools = Arc::new(PartitionedPools {
             write_pool: pool.clone(),
@@ -2362,75 +2331,6 @@ impl ProjectionStore {
         Ok(cached_accounts)
     }
 
-    // async fn update_processor(
-    //     pool: PgPool,
-    //     mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
-    //     account_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<AccountProjection>>>>,
-    //     transaction_cache: Arc<RwLock<HashMap<Uuid, CacheEntry<Vec<TransactionProjection>>>>>,
-    //     config: ProjectionConfig,
-    // ) {
-    //     let mut account_batch = Vec::with_capacity(config.batch_size);
-    //     let mut transaction_batch = Vec::with_capacity(config.batch_size);
-    //     let mut last_flush = Instant::now();
-    //     let batch_timeout = Duration::from_millis(config.batch_timeout_ms);
-    //     let cache_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    //     let metrics = Arc::new(ProjectionMetrics::default());
-
-    //     tracing::info!("[ProjectionStore] Background update_processor started with batch_size={} batch_timeout_ms={}", config.batch_size, config.batch_timeout_ms);
-
-    //     while let Some(update) = receiver.recv().await {
-    //         match update {
-    //             ProjectionUpdate::AccountBatch(accounts) => {
-    //                 let ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
-    //                 tracing::info!(
-    //                     "[ProjectionStore] Received AccountBatch of size {}: ids={:?}",
-    //                     accounts.len(),
-    //                     ids
-    //                 );
-    //                 account_batch.extend(accounts);
-    //             }
-    //             ProjectionUpdate::TransactionBatch(transactions) => {
-    //                 tracing::info!(
-    //                     "[ProjectionStore] Received TransactionBatch of size {}",
-    //                     transactions.len()
-    //                 );
-    //                 transaction_batch.extend(transactions);
-    //             }
-    //         }
-
-    //         // Flush if batch size reached or timeout exceeded
-    //         if account_batch.len() >= config.batch_size
-    //             || transaction_batch.len() >= config.batch_size
-    //             || last_flush.elapsed() >= batch_timeout
-    //         {
-    //             let ids: Vec<_> = account_batch.iter().map(|a| a.id).collect();
-    //             tracing::info!("[ProjectionStore] Flushing batches: account_batch_size={}, transaction_batch_size={}, account_ids={:?}", account_batch.len(), transaction_batch.len(), ids);
-    //             if let Err(e) = Self::flush_batches(
-    //                 &pool,
-    //                 &mut account_batch,
-    //                 &mut transaction_batch,
-    //                 &account_cache,
-    //                 &transaction_cache,
-    //                 &cache_version,
-    //                 &metrics,
-    //             )
-    //             .await
-    //             {
-    //                 error!(
-    //                     "[ProjectionStore] Failed to flush batches: {} (account_ids={:?})",
-    //                     e, ids
-    //                 );
-    //             } else {
-    //                 tracing::info!(
-    //                     "[ProjectionStore] Successfully flushed batches (account_ids={:?})",
-    //                     ids
-    //                 );
-    //             }
-    //             last_flush = Instant::now();
-    //         }
-    //     }
-    //     tracing::warn!("[ProjectionStore] update_processor exiting: channel closed");
-    // }
     async fn update_processor(
         pools: Arc<PartitionedPools>,
         mut receiver: mpsc::UnboundedReceiver<ProjectionUpdate>,
@@ -2757,40 +2657,6 @@ impl ProjectionStore {
         }
     }
 
-    // async fn metrics_reporter(metrics: Arc<ProjectionMetrics>) {
-    //     let mut interval = tokio::time::interval(Duration::from_secs(60));
-
-    //     loop {
-    //         interval.tick().await;
-
-    //         let hits = metrics
-    //             .cache_hits
-    //             .load(std::sync::atomic::Ordering::Relaxed);
-    //         let misses = metrics
-    //             .cache_misses
-    //             .load(std::sync::atomic::Ordering::Relaxed);
-    //         let batches = metrics
-    //             .batch_updates
-    //             .load(std::sync::atomic::Ordering::Relaxed);
-    //         let errors = metrics.errors.load(std::sync::atomic::Ordering::Relaxed);
-    //         let avg_query_time = metrics
-    //             .query_duration
-    //             .load(std::sync::atomic::Ordering::Relaxed) as f64
-    //             / 1000.0; // Convert to milliseconds
-
-    //         let hit_rate = if hits + misses > 0 {
-    //             (hits as f64 / (hits + misses) as f64) * 100.0
-    //         } else {
-    //             0.0
-    //         };
-
-    //         info!(
-    //             "Projection Metrics - Cache Hit Rate: {:.2}%, Batch Updates: {}, Errors: {}, Avg Query Time: {:.2}ms",
-    //             hit_rate, batches, errors, avg_query_time
-    //         );
-    //     }
-    // }
-
     /// Get the current configuration
     pub fn get_config(&self) -> ProjectionConfig {
         self.config.clone()
@@ -2891,7 +2757,7 @@ impl ProjectionStore {
         Ok(())
     }
     /// Optimized bulk update accounts (updates only, no inserts)
-    async fn bulk_update_accounts_with_copy(
+    pub async fn bulk_update_accounts_with_copy_impl(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         accounts: &[AccountProjection],
         pool: &PgPool,
@@ -2992,7 +2858,7 @@ impl ProjectionStore {
     }
     /// NEW: Direct COPY for new accounts (INSERT only, no UPSERT)
     /// This is optimized for AccountCreated events where we know the account doesn't exist
-    pub async fn bulk_insert_new_accounts_with_copy(
+    pub async fn bulk_insert_new_accounts_with_copy_impl(
         &self,
         accounts: Vec<AccountProjection>,
     ) -> Result<()> {
