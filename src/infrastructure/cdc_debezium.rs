@@ -2038,10 +2038,7 @@ impl CDCConsumer {
 
         // CRITICAL: Use COPY-optimized batch processing
         let processing_start = std::time::Instant::now();
-        match processor
-            .process_cdc_events_batch_with_copy(cdc_events)
-            .await
-        {
+        match processor.process_cdc_events_batch(cdc_events).await {
             Ok(_) => {
                 let processing_duration = processing_start.elapsed();
                 let total_duration = start_time.elapsed();

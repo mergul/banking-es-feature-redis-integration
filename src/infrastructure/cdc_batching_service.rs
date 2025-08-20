@@ -448,39 +448,29 @@ impl CDCBatchingService {
             // Determine processing method based on batch type
             // If this is an AccountCreated batch, use direct COPY
             // If this is an other events batch, use UPSERT
-            let is_account_created_batch = batch
-                .projections
-                .iter()
-                .any(|(_, _, _, event_type)| event_type == "AccountCreated");
-
+            // let is_account_created_batch = batch
+            //     .projections
+            //     .iter()
+            //     .any(|(_, _, _, event_type)| event_type == "AccountCreated");
+            let is_account_created_batch = partition_id.unwrap() == 0;
             let result = if is_account_created_batch {
                 // Process as AccountCreated batch (direct COPY)
-                if let Some(projection_store_impl) =
-                    projection_store
-                        .as_any()
-                        .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
-                {
-                    info!(
+                info!(
                         "🚀 CDC BATCHING: Using direct COPY (INSERT only) for {} AccountCreated projections",
                         projections.len()
                     );
-                    projection_store_impl
-                        .bulk_insert_new_accounts_with_copy(projections)
-                        .await
-                } else {
-                    info!(
-                        "⚠️ CDC BATCHING: Fallback to UPSERT for {} AccountCreated projections (not ProjectionStore)",
-                        projections.len()
-                    );
-                    projection_store.upsert_accounts_batch(projections).await
-                }
+                projection_store
+                    .bulk_insert_new_accounts_with_copy(projections)
+                    .await
             } else {
-                // Process as other events batch (UPSERT)
+                // Process as other events batch (UPDATE)
                 info!(
-                    "🔄 CDC BATCHING: Using UPSERT for {} other projections",
+                    "🔄 CDC BATCHING: Using bulk_update_accounts_with_copy for {} other projections",
                     projections.len()
                 );
-                projection_store.upsert_accounts_batch(projections).await
+                projection_store
+                    .bulk_update_accounts_with_copy(projections)
+                    .await
             };
 
             if let Err(e) = result {
@@ -1173,37 +1163,58 @@ impl PartitionedCDCBatching {
         );
 
         let projections_len = projections.len();
+        let num_partitions = get_cdc_num_partitions();
+
+        // CRITICAL: First, segregate AccountCreated events from all others.
+        let mut account_created_projections: Vec<(Uuid, AccountProjection)> = Vec::new();
+        let mut other_projections_by_aggregate: HashMap<Uuid, Vec<AccountProjection>> =
+            HashMap::new();
+
+        // Group projections by aggregate_id, and separate out AccountCreated events
+        for (aggregate_id, projection) in projections {
+            if event_type == "AccountCreated" {
+                account_created_projections.push((aggregate_id, projection));
+            } else {
+                other_projections_by_aggregate
+                    .entry(aggregate_id)
+                    .or_insert_with(Vec::new)
+                    .push(projection);
+            }
+        }
+
+        let account_created_count = account_created_projections.len();
+        let other_aggregate_count = other_projections_by_aggregate.len();
+
+        info!(
+            "📊 PartitionedCDC: Separated {} AccountCreated events from {} other events",
+            account_created_count, other_aggregate_count
+        );
 
         // SEQUENTIAL APPROACH:
         // 1. First group by aggregate_id for consistency
         // 2. Then distribute using sequential partitioning (1000 per partition)
         let mut projections_by_aggregate: HashMap<Uuid, Vec<AccountProjection>> = HashMap::new();
-
-        // Group projections by aggregate_id
-        for (aggregate_id, projection) in projections {
-            projections_by_aggregate
-                .entry(aggregate_id)
-                .or_insert_with(Vec::new)
-                .push(projection);
-        }
-
-        let aggregate_count = projections_by_aggregate.len();
-        info!(
-            "📊 PartitionedCDC: Grouped {} projections into {} aggregate groups",
-            projections_len, aggregate_count
-        );
-
-        // SEQUENTIAL: Distribute aggregates using sequential partitioning (1000 aggregates per partition)
         let mut projections_by_partition: HashMap<usize, Vec<(Uuid, AccountProjection)>> =
             HashMap::new();
-        let mut aggregate_index = 0;
-        let aggregates_per_partition = 1000; // First 1000 aggregates to partition 0, next 1000 to partition 1, etc.
 
-        // CRITICAL: Process aggregates sequentially, keeping all projections of an aggregate together
-        for (aggregate_id, aggregate_projections) in projections_by_aggregate {
-            // Sequential distribution: aggregate_index / aggregates_per_partition
-            let num_partitions = get_cdc_num_partitions();
-            let partition_id = (aggregate_index / aggregates_per_partition) % num_partitions;
+        // Handle AccountCreated events first: force them all to partition 0
+        if !account_created_projections.is_empty() {
+            info!(
+                "➡️ PartitionedCDC: Routing all 'AccountCreated' events to dedicated Partition 0"
+            );
+            projections_by_partition.insert(0, account_created_projections);
+        }
+
+        // Now, handle all other events by distributing them across the remaining partitions (1 to 15)
+        let mut aggregate_index = 0;
+        let aggregates_per_partition = 1000;
+        let available_partitions = num_partitions - 1; // We have 15 partitions available for non-AccountCreated events
+
+        // Process other aggregates sequentially, keeping all projections of an aggregate together
+        for (aggregate_id, aggregate_projections) in other_projections_by_aggregate {
+            // Sequential distribution for other event types, avoiding partition 0
+            let partition_id =
+                (aggregate_index / aggregates_per_partition) % available_partitions + 1;
 
             // Add ALL projections for this aggregate to the selected partition
             for projection in aggregate_projections {
@@ -1218,8 +1229,9 @@ impl PartitionedCDCBatching {
 
         let partitions_count = projections_by_partition.len();
         info!(
-            "🔄 PartitionedCDC: Distributed {} aggregates across {} partitions using sequential partitioning ({} aggregates per partition)",
-            aggregate_count, partitions_count, aggregates_per_partition
+            "🔄 PartitionedCDC: Distributed {} aggregates across {} partitions using sequential partitioning",
+            projections_by_partition.values().map(|v| v.len()).sum::<usize>(),
+            partitions_count
         );
 
         // Process each partition's projections as dedicated batches IN PARALLEL
@@ -1229,10 +1241,10 @@ impl PartitionedCDCBatching {
             let processor = self.processors[partition_id].clone();
 
             info!(
-                "📦 PartitionedCDC: Preparing parallel processing for partition {} with {} projections",
-                partition_id,
-                partition_projections.len()
-            );
+            "📦 PartitionedCDC: Preparing parallel processing for partition {} with {} projections",
+            partition_id,
+            partition_projections.len()
+        );
 
             // Create future for parallel execution
             let future = async move {
@@ -1268,9 +1280,9 @@ impl PartitionedCDCBatching {
         }
 
         info!(
-            "✅ PartitionedCDC: SEQUENTIAL bulk processing completed for {} projections ({} aggregates) across {} partitions",
-            projections_len, aggregate_count, partitions_count
-        );
+        "✅ PartitionedCDC: SEQUENTIAL bulk processing completed for {} projections ({} aggregates) across {} partitions",
+        projections_len, other_aggregate_count + if account_created_count > 0 { 1 } else { 0 }, partitions_count
+    );
 
         Ok(all_operation_ids)
     }

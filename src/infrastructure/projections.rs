@@ -275,6 +275,11 @@ pub trait ProjectionStoreTrait: Send + Sync {
         account_id: Uuid,
     ) -> Result<Vec<TransactionProjection>>;
     async fn upsert_accounts_batch(&self, accounts: Vec<AccountProjection>) -> Result<()>;
+    async fn bulk_update_accounts_with_copy(&self, accounts: Vec<AccountProjection>) -> Result<()>;
+    async fn bulk_insert_new_accounts_with_copy(
+        &self,
+        accounts: Vec<AccountProjection>,
+    ) -> Result<()>;
     async fn insert_transactions_batch(
         &self,
         transactions: Vec<TransactionProjection>,
@@ -343,6 +348,61 @@ impl ProjectionStoreTrait for ProjectionStore {
                     "Failed to send transaction batch update: ".to_string() + &e.to_string(),
                 )
             })?;
+        Ok(())
+    }
+
+    async fn bulk_update_accounts_with_copy(&self, accounts: Vec<AccountProjection>) -> Result<()> {
+        tracing::info!(
+            "ProjectionStore: bulk_update_accounts_with_copy called with {} accounts. IDs: {:?}",
+            accounts.len(),
+            accounts.iter().map(|a| a.id).collect::<Vec<_>>()
+        );
+
+        // Use the same pattern as upsert_accounts_batch - send to update processor
+        let send_result = self
+            .update_sender
+            .send(ProjectionUpdate::AccountBatch(accounts));
+        match send_result {
+            Ok(_) => tracing::info!(
+                "[ProjectionStore] bulk_update_accounts_with_copy: sent to update_sender successfully"
+            ),
+            Err(ref e) => tracing::error!(
+                "[ProjectionStore] bulk_update_accounts_with_copy: failed to send to update_sender: {}",
+                e
+            ),
+        }
+        send_result.map_err(|e| {
+            anyhow::Error::msg("Failed to send account batch update: ".to_string() + &e.to_string())
+        })?;
+        Ok(())
+    }
+
+    async fn bulk_insert_new_accounts_with_copy(
+        &self,
+        accounts: Vec<AccountProjection>,
+    ) -> Result<()> {
+        tracing::info!(
+            "ProjectionStore: bulk_insert_new_accounts_with_copy called with {} accounts. IDs: {:?}",
+            accounts.len(),
+            accounts.iter().map(|a| a.id).collect::<Vec<_>>()
+        );
+
+        // Use the same pattern as upsert_accounts_batch - send to update processor
+        let send_result = self
+            .update_sender
+            .send(ProjectionUpdate::AccountBatch(accounts));
+        match send_result {
+            Ok(_) => tracing::info!(
+                "[ProjectionStore] bulk_insert_new_accounts_with_copy: sent to update_sender successfully"
+            ),
+            Err(ref e) => tracing::error!(
+                "[ProjectionStore] bulk_insert_new_accounts_with_copy: failed to send to update_sender: {}",
+                e
+            ),
+        }
+        send_result.map_err(|e| {
+            anyhow::Error::msg("Failed to send account batch update: ".to_string() + &e.to_string())
+        })?;
         Ok(())
     }
 
@@ -2830,7 +2890,106 @@ impl ProjectionStore {
 
         Ok(())
     }
+    /// Optimized bulk update accounts (updates only, no inserts)
+    async fn bulk_update_accounts_with_copy(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        accounts: &[AccountProjection],
+        pool: &PgPool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        if accounts.is_empty() {
+            return Ok(());
+        }
 
+        let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
+        tracing::info!(
+            "[ProjectionStore] bulk_update_accounts_with_copy: processing {} updates",
+            accounts.len()
+        );
+
+        // Deduplicate accounts by ID (keep last occurrence for updates)
+        let accounts_to_update = if accounts.len() > 1 {
+            let mut unique_accounts = std::collections::HashMap::new();
+            for account in accounts {
+                unique_accounts.insert(account.id, account.clone());
+            }
+            unique_accounts.into_values().collect::<Vec<_>>()
+        } else {
+            accounts.to_vec()
+        };
+
+        // Option 1: Direct UPDATE with unnested VALUES (most efficient for updates-only)
+        // if accounts_to_update.len() <= 1000 {
+        //     // Reasonable batch size for VALUES clause
+        //     return bulk_update_with_values(tx, &accounts_to_update).await;
+        // }
+
+        // Option 2: Temp table approach for large batches
+        let table_name = format!("temp_account_updates_{}", uuid::Uuid::new_v4().simple());
+
+        // Create TEMPORARY table for updates only
+        let create_table_sql = format!(
+            r#"
+        CREATE TEMPORARY TABLE {} (
+            id UUID PRIMARY KEY,
+            owner_name TEXT NOT NULL,
+            balance DECIMAL NOT NULL,
+            is_active BOOLEAN NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL
+        ) ON COMMIT DROP
+        "#,
+            table_name
+        );
+
+        sqlx::query(&create_table_sql).execute(&mut **tx).await?;
+
+        // Use binary COPY (same as before but simpler logic)
+        let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;
+        for account in &accounts_to_update {
+            writer.write_row(5)?; // Only 5 fields (no created_at)
+            writer.write_uuid(&account.id)?;
+            writer.write_text(&account.owner_name)?;
+            writer.write_decimal(&account.balance, "balance")?;
+            writer.write_bool(account.is_active)?;
+            writer.write_timestamp(&account.updated_at)?;
+        }
+        let binary_data = writer.finish()?;
+
+        let copy_command = format!("COPY {} FROM STDIN WITH (FORMAT BINARY)", table_name);
+        let mut copy_in = tx.copy_in_raw(&copy_command).await?;
+        copy_in.send(binary_data.as_slice()).await?;
+        let copy_result = copy_in.finish().await?;
+
+        tracing::info!(
+            "[ProjectionStore] COPY BINARY loaded {} rows into temp table {}",
+            copy_result,
+            table_name
+        );
+
+        // UPDATE-only query (no INSERT/UPSERT)
+        let update_sql = format!(
+            r#"
+        UPDATE account_projections 
+        SET 
+            owner_name = temp.owner_name,
+            balance = temp.balance,
+            is_active = temp.is_active,
+            updated_at = temp.updated_at
+        FROM {} temp
+        WHERE account_projections.id = temp.id
+        "#,
+            table_name
+        );
+
+        let update_result = sqlx::query(&update_sql).execute(&mut **tx).await?;
+
+        tracing::info!(
+            "[ProjectionStore] Successfully updated {} accounts via COPY BINARY",
+            update_result.rows_affected()
+        );
+
+        // Table will be automatically dropped ON COMMIT DROP
+        Ok(())
+    }
     /// NEW: Direct COPY for new accounts (INSERT only, no UPSERT)
     /// This is optimized for AccountCreated events where we know the account doesn't exist
     pub async fn bulk_insert_new_accounts_with_copy(
