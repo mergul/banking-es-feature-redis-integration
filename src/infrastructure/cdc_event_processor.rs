@@ -1493,7 +1493,7 @@ impl UltraOptimizedCDCEventProcessor {
         result
     }
 
-    /// CRITICAL OPTIMIZATION: Process multiple CDC events in batch
+    /// CRITICAL OPTIMIZATION: Process multiple CDC events in batch with event type separation
     pub async fn process_cdc_events_batch(&self, cdc_events: Vec<serde_json::Value>) -> Result<()> {
         if cdc_events.is_empty() {
             return Ok(());
@@ -1502,7 +1502,7 @@ impl UltraOptimizedCDCEventProcessor {
         let start_time = Instant::now();
         let batch_size = cdc_events.len();
         tracing::info!(
-            "🔍 CDC Event Processor: Starting batch processing of {} events",
+            "🔍 CDC Event Processor: Starting batch processing of {} events with event type separation",
             batch_size
         );
 
@@ -1556,70 +1556,128 @@ impl UltraOptimizedCDCEventProcessor {
         let events_by_aggregate = Self::group_events_by_aggregate(processable_events);
         let aggregate_count = events_by_aggregate.len();
 
+        // CRITICAL OPTIMIZATION: Separate AccountCreated events from other events
+        let (account_created_events, other_events) = Self::separate_account_created_events(events_by_aggregate);
+
+        tracing::info!(
+            "🚀 OPTIMIZED: Separated events - AccountCreated: {} aggregates, Other events: {} aggregates",
+            account_created_events.len(),
+            other_events.len()
+        );
+
         let mut success_count = 0;
         let mut error_count = 0;
 
-        // CRITICAL OPTIMIZATION: Process all aggregates in batch instead of individually
-        match UltraOptimizedCDCEventProcessor::process_events_for_aggregates_optimized(events_by_aggregate, &self.projection_cache, &self.cache_service, &self.projection_store, &self.metrics)
-            .await
-        {
-            Ok((projections, processed_aggregates)) => {
-                success_count += processed_aggregates.len();
+        // Use CDC Batching Service if available
+        if let Some(ref batching_service) = self.cdc_batching_service {
+            // Process AccountCreated events with CDC Batching Service
+            if !account_created_events.is_empty() {
+                let account_created_projections = Self::convert_account_created_events_to_projections(account_created_events).await?;
+                
+                if !account_created_projections.is_empty() {
+                    tracing::info!(
+                        "🚀 CDC BATCHING: Processing {} AccountCreated projections with CDC Batching Service",
+                        account_created_projections.len()
+                    );
 
-                // CRITICAL: Use CDC Batching Service for optimal performance
-                if !projections.is_empty() {
-                    let projections_len = projections.len();
+                    match batching_service
+                        .submit_account_created_projections_bulk(account_created_projections)
+                        .await
+                    {
+                        Ok(operation_ids) => {
+                            tracing::debug!("CDC Event Processor: Successfully submitted {} AccountCreated projections to CDC Batching Service", operation_ids.len());
 
-                    // Use CDC Batching Service if available
-                    if let Some(ref batching_service) = self.cdc_batching_service {
-                        // Convert projections to (aggregate_id, projection) format for bulk processing
-                        let projections_for_bulk: Vec<(
-                            Uuid,
-                            crate::infrastructure::projections::AccountProjection,
-                        )> = projections.iter().map(|p| (p.id, p.clone())).collect();
-
-                        // Submit ALL projections as bulk (like write_batching) - NO CHUNKING
-                        // Note: CDC Batching Service will internally separate AccountCreated from other events
-                        match batching_service
-                            .submit_projections_bulk(projections_for_bulk)
-                            .await
-                        {
-                            Ok(operation_ids) => {
-                                tracing::debug!("CDC Event Processor: Successfully submitted {} projections as bulk to CDC Batching Service", projections_len);
-
-                                // Wait for all operations to complete
-                                let mut success_count = 0;
-                                for operation_id in operation_ids {
-                                    match batching_service.wait_for_result(operation_id).await {
-                                        Ok(result) => {
-                                            if result.success {
-                                                success_count += 1;
-                                            } else {
-                                                error_count += 1;
-                                                tracing::error!("CDC Event Processor: CDC Batching Service operation failed: {:?}", result.error);
-                                            }
-                                        }
-                                        Err(e) => {
+                            // Wait for all AccountCreated operations to complete
+                            for operation_id in operation_ids {
+                                match batching_service.wait_for_result(operation_id).await {
+                                    Ok(result) => {
+                                        if result.success {
+                                            success_count += 1;
+                                        } else {
                                             error_count += 1;
-                                            tracing::error!("CDC Event Processor: Failed to wait for CDC Batching Service result: {:?}", e);
+                                            tracing::error!("CDC Event Processor: AccountCreated CDC Batching Service operation failed: {:?}", result.error);
                                         }
                                     }
+                                    Err(e) => {
+                                        error_count += 1;
+                                        tracing::error!("CDC Event Processor: Failed to wait for AccountCreated CDC Batching Service result: {:?}", e);
+                                    }
                                 }
-
-                                if success_count == projections_len {
-                                    tracing::debug!("CDC Event Processor: Successfully batch upserted {} projections via CDC Batching Service", projections_len);
-                                } else {
-                                    tracing::error!("CDC Event Processor: CDC Batching Service failed for {} projections ({} success, {} errors)", projections_len, success_count, error_count);
-                                }
-                            }
-                            Err(e) => {
-                                error_count += 1;
-                                tracing::error!("CDC Event Processor: Failed to submit projections as bulk to CDC Batching Service: {:?}", e);
                             }
                         }
-                    } else {
-                        // Fallback to direct projection store
-                        tracing::info!("CDC Event Processor: CDC Batching Service not available, falling back to direct projection store");
+                        Err(e) => {
+                            error_count += 1;
+                            tracing::error!("CDC Event Processor: Failed to submit AccountCreated projections to CDC Batching Service: {:?}", e);
+                        }
+                    }
+                }
+            }
+
+            // Process other events with CDC Batching Service
+            if !other_events.is_empty() {
+                let other_projections = Self::convert_other_events_to_projections(
+                    other_events, 
+                    &self.projection_store,
+                    &self.projection_cache,
+                    &self.cache_service,
+                    &self.metrics
+                ).await?;
+                
+                if !other_projections.is_empty() {
+                    tracing::info!(
+                        "🔄 CDC BATCHING: Processing {} other event projections with CDC Batching Service",
+                        other_projections.len()
+                    );
+
+                    match batching_service
+                        .submit_other_events_bulk(other_projections, "OtherEvents".to_string())
+                        .await
+                    {
+                        Ok(operation_ids) => {
+                            tracing::debug!("CDC Event Processor: Successfully submitted {} other event projections to CDC Batching Service", operation_ids.len());
+
+                            // Wait for all other event operations to complete
+                            for operation_id in operation_ids {
+                                match batching_service.wait_for_result(operation_id).await {
+                                    Ok(result) => {
+                                        if result.success {
+                                            success_count += 1;
+                                        } else {
+                                            error_count += 1;
+                                            tracing::error!("CDC Event Processor: Other events CDC Batching Service operation failed: {:?}", result.error);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error_count += 1;
+                                        tracing::error!("CDC Event Processor: Failed to wait for other events CDC Batching Service result: {:?}", e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error_count += 1;
+                            tracing::error!("CDC Event Processor: Failed to submit other event projections to CDC Batching Service: {:?}", e);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Fallback to original processing method when CDC Batching Service is not available
+            tracing::info!("CDC Event Processor: CDC Batching Service not available, falling back to original processing method");
+            
+            // Recombine events for original processing
+            let mut all_events = HashMap::new();
+            all_events.extend(account_created_events);
+            all_events.extend(other_events);
+
+            match UltraOptimizedCDCEventProcessor::process_events_for_aggregates_optimized(all_events, &self.projection_cache, &self.cache_service, &self.projection_store, &self.metrics)
+                .await
+            {
+                Ok((projections, processed_aggregates)) => {
+                    success_count += processed_aggregates.len();
+
+                    if !projections.is_empty() {
+                        let projections_len = projections.len();
                         match self
                             .projection_store
                             .upsert_accounts_batch(projections)
@@ -1637,16 +1695,14 @@ impl UltraOptimizedCDCEventProcessor {
                             }
                         }
                     }
-                } else {
-                    tracing::debug!("CDC Event Processor: No projections to process in batch");
                 }
-            }
-            Err(e) => {
-                error_count += 1;
-                tracing::error!(
-                    "CDC Event Processor: Failed to process aggregates in batch: {:?}",
-                    e
-                );
+                Err(e) => {
+                    error_count += 1;
+                    tracing::error!(
+                        "CDC Event Processor: Failed to process aggregates in batch: {:?}",
+                        e
+                    );
+                }
             }
         }
 
@@ -2559,6 +2615,197 @@ impl UltraOptimizedCDCEventProcessor {
         }
 
         Ok((updated_projections, processed_aggregates))
+    }
+
+    /// NEW: Convert AccountCreated events to projections (no database load needed)
+    async fn convert_account_created_events_to_projections(
+        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
+    ) -> Result<Vec<(Uuid, crate::infrastructure::projections::AccountProjection)>> {
+        let mut projections = Vec::new();
+
+        for (aggregate_id, events) in events_by_aggregate {
+            // AccountCreated events should have exactly one event
+            if let Some(event) = events.first() {
+                if let Ok(domain_event) = event.get_domain_event() {
+                    if let crate::domain::AccountEvent::AccountCreated {
+                        owner_name,
+                        initial_balance,
+                        ..
+                    } = domain_event
+                    {
+                        let projection = crate::infrastructure::projections::AccountProjection {
+                            id: aggregate_id,
+                            owner_name: owner_name.clone(),
+                            balance: *initial_balance,
+                            is_active: true,
+                            created_at: event.timestamp,
+                            updated_at: event.timestamp,
+                        };
+                        projections.push((aggregate_id, projection));
+                    }
+                }
+            }
+        }
+
+        Ok(projections)
+    }
+
+    /// NEW: Convert other events to projections (requires database load and event application)
+    async fn convert_other_events_to_projections(
+        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
+        projection_store: &Arc<dyn ProjectionStoreTrait>,
+        projection_cache: &Arc<RwLock<ProjectionCache>>,
+        cache_service: &Arc<dyn CacheServiceTrait>,
+        metrics: &Arc<EnhancedCDCMetrics>,
+    ) -> Result<Vec<(Uuid, crate::infrastructure::projections::AccountProjection)>> {
+        let mut projections = Vec::new();
+        let mut processed_aggregates = Vec::new();
+
+        // CRITICAL OPTIMIZATION: Batch read all projections in single SQL query
+        let aggregate_ids: Vec<Uuid> = events_by_aggregate.keys().cloned().collect();
+        tracing::debug!(
+            "🔄 OTHER EVENTS: Batch loading projections for {} aggregates: {:?}",
+            aggregate_ids.len(),
+            aggregate_ids
+        );
+
+        // Single SQL query to load all projections - USE READ POOL
+        let db_projections = match projection_store.get_accounts_batch(&aggregate_ids).await {
+            Ok(projections) => {
+                tracing::debug!(
+                    "🔄 OTHER EVENTS: Successfully loaded {} projections from database",
+                    projections.len()
+                );
+                projections
+            }
+            Err(e) => {
+                tracing::error!("🔄 OTHER EVENTS: Failed to batch load projections: {:?}", e);
+                return Err(anyhow::anyhow!("Batch projection load failed: {:?}", e));
+            }
+        };
+
+        // Convert to HashMap for fast lookup
+        let mut projections_map: HashMap<Uuid, ProjectionCacheEntry> = HashMap::new();
+        for db_projection in db_projections {
+            let cache_entry = ProjectionCacheEntry {
+                balance: db_projection.balance,
+                owner_name: db_projection.owner_name.clone(),
+                is_active: db_projection.is_active,
+                version: 1, // We'll update this as we process events
+                cached_at: tokio::time::Instant::now(),
+                last_event_id: None,
+            };
+            projections_map.insert(db_projection.id, cache_entry);
+        }
+
+        // Calculate total events before consuming the HashMap
+        let total_events: usize = events_by_aggregate.values().map(|events| events.len()).sum();
+        
+        // Process each aggregate's events
+        for (aggregate_id, events) in events_by_aggregate.clone() {
+            // Get existing projection from batch-loaded data
+            let mut current_projection = match projections_map.get(&aggregate_id) {
+                Some(cache_entry) => {
+                    // Convert ProjectionCacheEntry back to AccountProjection
+                    crate::infrastructure::projections::AccountProjection {
+                        id: aggregate_id,
+                        owner_name: cache_entry.owner_name.clone(),
+                        balance: cache_entry.balance,
+                        is_active: cache_entry.is_active,
+                        created_at: chrono::Utc::now(), // We don't have this info, use current time
+                        updated_at: chrono::Utc::now(), // We don't have this info, use current time
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        "🔄 OTHER EVENTS: No existing projection found for aggregate {} with non-AccountCreated events",
+                        aggregate_id
+                    );
+                    continue; // Skip this aggregate
+                }
+            };
+
+            // Sort events by timestamp to ensure correct order
+            let mut sorted_events = events.clone();
+            sorted_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+            // Apply events to existing projection in chronological order
+            for event in sorted_events {
+                if let Ok(domain_event) = event.get_domain_event() {
+                    match domain_event {
+                        crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
+                            current_projection.balance += *amount;
+                            current_projection.updated_at = event.timestamp;
+                            
+                            tracing::debug!(
+                                "🔄 OTHER EVENTS: Applied MoneyDeposited event - aggregate: {}, amount: {}, new balance: {}",
+                                aggregate_id, amount, current_projection.balance
+                            );
+                        }
+                        crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
+                            // Business logic validation: check if sufficient balance
+                            if current_projection.balance < *amount {
+                                tracing::warn!(
+                                    "🔄 OTHER EVENTS: Insufficient balance for withdrawal - aggregate: {}, current: {}, requested: {}",
+                                    aggregate_id, current_projection.balance, amount
+                                );
+                                // Continue processing but log the issue
+                            }
+                            current_projection.balance -= *amount;
+                            current_projection.updated_at = event.timestamp;
+                            
+                            tracing::debug!(
+                                "🔄 OTHER EVENTS: Applied MoneyWithdrawn event - aggregate: {}, amount: {}, new balance: {}",
+                                aggregate_id, amount, current_projection.balance
+                            );
+                        }
+                        // Note: AccountActivated and AccountDeactivated variants don't exist in AccountEvent enum
+                        // These events are not supported in the current domain model
+                        _ => {
+                            tracing::debug!(
+                                "🔄 OTHER EVENTS: Ignoring event type for aggregate: {}",
+                                aggregate_id
+                            );
+                        }
+                    }
+                } else {
+                    tracing::error!(
+                        "🔄 OTHER EVENTS: Failed to get domain event for aggregate: {}",
+                        aggregate_id
+                    );
+                }
+            }
+
+            // Update cache with processed projection
+            {
+                let mut cache_guard = projection_cache.write().await;
+                let cache_entry = ProjectionCacheEntry {
+                    balance: current_projection.balance,
+                    owner_name: current_projection.owner_name.clone(),
+                    is_active: current_projection.is_active,
+                    version: 1,
+                    cached_at: tokio::time::Instant::now(),
+                    last_event_id: None,
+                };
+                cache_guard.put(aggregate_id, cache_entry);
+            }
+
+            projections.push((aggregate_id, current_projection));
+            processed_aggregates.push(aggregate_id);
+
+            // Update metrics
+            metrics
+                .events_processed
+                .fetch_add(events.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        tracing::info!(
+            "🔄 OTHER EVENTS: Successfully processed {} aggregates with {} total events",
+            processed_aggregates.len(),
+            total_events
+        );
+
+        Ok(projections)
     }
 
     /// NEW: Separate AccountCreated events from other events for optimized processing
