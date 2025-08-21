@@ -286,6 +286,10 @@ pub trait ProjectionStoreTrait: Send + Sync {
     ) -> Result<()>;
     async fn shutdown(&self) -> Result<()>;
     fn as_any(&self) -> &dyn std::any::Any;
+    async fn bulk_insert_transaction_projections(
+        &self,
+        projections: Vec<TransactionProjection>,
+    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -388,6 +392,32 @@ impl ProjectionStoreTrait for ProjectionStore {
         // Use the optimized direct COPY function for new accounts
         self.bulk_insert_new_accounts_with_copy_impl(accounts).await
     }
+    async fn bulk_insert_transaction_projections(
+        &self,
+        projections: Vec<TransactionProjection>,
+    ) -> Result<()> {
+        tracing::info!(
+            "ProjectionStore: bulk_insert_transaction_projections called with {} transactions. IDs: {:?}",
+            projections.len(),
+            projections.iter().map(|t| t.id).collect::<Vec<_>>()
+        );
+
+        if projections.is_empty() {
+            return Ok(());
+        }
+
+        let pool = self.pools.select_pool(OperationType::Write);
+        let mut tx = pool.begin().await?;
+
+        // Use the optimized COPY function for transaction insertions
+        if let Err(e) = Self::bulk_insert_transactions_direct_copy(&mut tx, &projections).await {
+            tx.rollback().await?;
+            return Err(anyhow::anyhow!("Bulk insert transactions failed: {:?}", e));
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
 
     async fn shutdown(&self) -> Result<()> {
         self.shutdown().await
@@ -415,22 +445,6 @@ impl ProjectionStore {
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .test_before_acquire(true)
-            // REMOVED: after_connect for performance - too slow
-            // .after_connect(|conn, _meta| {
-            //     Box::pin(async move {
-            //         // CRITICAL: Optimize for bulk operations
-            //         sqlx::query(
-            //             r#"
-            //             SET statement_timeout = 10000;
-            //             SET lock_timeout = 3000;
-            //             SET idle_in_transaction_session_timeout = 10000;
-            //         "#,
-            //         )
-            //         .execute(conn)
-            //         .await?;
-            //         Ok(())
-            //     })
-            // })
             .connect(&database_url)
             .await?;
 

@@ -4,7 +4,7 @@ use crate::infrastructure::cdc_event_processor::UltraOptimizedCDCEventProcessor;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::outbox_cleanup_service::{CleanupConfig, CleanupMetrics, OutboxCleaner}; // Added new cleanup service
 use crate::infrastructure::projections::ProjectionStoreTrait;
-use crate::infrastructure::PoolSelector;
+use crate::infrastructure::{PartitionedCDCBatching, PoolSelector};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -54,8 +54,7 @@ pub struct CDCServiceManager {
     outbox_cleaner: Option<Arc<OutboxCleaner>>,
 
     // CDC Batching Service for parallel projection updates
-    cdc_batching_service:
-        Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>>,
+    cdc_batching_service: Option<Arc<PartitionedCDCBatching>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -299,11 +298,8 @@ impl CDCServiceManager {
             .clone();
 
         let cdc_batching_service =
-            crate::infrastructure::cdc_batching_service::PartitionedCDCBatching::new(
-                projection_store.clone(),
-                Arc::new(write_pool.clone()),
-            )
-            .await;
+            PartitionedCDCBatching::new(projection_store.clone(), Arc::new(write_pool.clone()))
+                .await;
 
         let processor = Arc::new(UltraOptimizedCDCEventProcessor::new_with_write_pool(
             kafka_producer,
@@ -596,7 +592,7 @@ impl CDCServiceManager {
                 tracing::info!("CDCServiceManager: about to enter consumer main loop");
                 // Start consuming with unified shutdown token
                 let consumer_result = consumer
-                    .start_consuming_with_cancellation_token_copy_optimized(
+                    .start_consuming_with_cancellation_token(
                         processor.clone(),
                         shutdown_token.clone(),
                     )
@@ -959,9 +955,7 @@ impl CDCServiceManager {
     }
 
     /// Get the CDC Batching Service if available
-    pub fn get_cdc_batching_service(
-        &self,
-    ) -> Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>> {
+    pub fn get_cdc_batching_service(&self) -> Option<Arc<PartitionedCDCBatching>> {
         self.cdc_batching_service.clone()
     }
 

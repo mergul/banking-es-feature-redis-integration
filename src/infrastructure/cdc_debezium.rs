@@ -1164,315 +1164,315 @@ impl CDCConsumer {
     }
 
     /// Enhanced start_consuming method with COPY optimization integration
-    pub async fn start_consuming_with_cancellation_token_copy_optimized(
-        &mut self,
-        processor: Arc<UltraOptimizedCDCEventProcessor>,
-        shutdown_token: CancellationToken,
-    ) -> Result<()> {
-        // All existing initialization code remains the same...
-        static ACTIVE_CONSUMERS: AtomicUsize = AtomicUsize::new(0);
-        let current = ACTIVE_CONSUMERS.fetch_add(1, Ordering::SeqCst) + 1;
+    // pub async fn start_consuming_with_cancellation_token_copy_optimized(
+    //     &mut self,
+    //     processor: Arc<UltraOptimizedCDCEventProcessor>,
+    //     shutdown_token: CancellationToken,
+    // ) -> Result<()> {
+    //     // All existing initialization code remains the same...
+    //     static ACTIVE_CONSUMERS: AtomicUsize = AtomicUsize::new(0);
+    //     let current = ACTIVE_CONSUMERS.fetch_add(1, Ordering::SeqCst) + 1;
 
-        tracing::info!(
-            "CDCConsumer (COPY-optimized): Entering main polling loop. Active consumers: {}",
-            current
-        );
+    //     tracing::info!(
+    //         "CDCConsumer (COPY-optimized): Entering main polling loop. Active consumers: {}",
+    //         current
+    //     );
 
-        // Load COPY optimization configuration
-        let copy_config = CopyOptimizationConfig::from_env();
-        tracing::info!(
-            "CDCConsumer (COPY-optimized): Configuration - COPY enabled: {}, account threshold: {}, transaction threshold: {}, batch size: {}",
-            copy_config.enable_copy_optimization,
-            copy_config.projection_copy_threshold,
-            copy_config.transaction_copy_threshold,
-            copy_config.cdc_projection_batch_size
-        );
+    //     // Load COPY optimization configuration
+    //     let copy_config = CopyOptimizationConfig::from_env();
+    //     tracing::info!(
+    //         "CDCConsumer (COPY-optimized): Configuration - COPY enabled: {}, account threshold: {}, transaction threshold: {}, batch size: {}",
+    //         copy_config.enable_copy_optimization,
+    //         copy_config.projection_copy_threshold,
+    //         copy_config.transaction_copy_threshold,
+    //         copy_config.cdc_projection_batch_size
+    //     );
 
-        // Existing subscription and setup code...
-        let kafka_config = self.kafka_consumer.get_config();
-        if !kafka_config.enabled {
-            tracing::error!("CDCConsumer: Kafka consumer is disabled");
-            return Err(anyhow::anyhow!("Kafka consumer is disabled"));
-        }
+    //     // Existing subscription and setup code...
+    //     let kafka_config = self.kafka_consumer.get_config();
+    //     if !kafka_config.enabled {
+    //         tracing::error!("CDCConsumer: Kafka consumer is disabled");
+    //         return Err(anyhow::anyhow!("Kafka consumer is disabled"));
+    //     }
 
-        // Resolve CDC topic if empty or set to "auto"
-        let topic_to_subscribe = {
-            let configured = self.cdc_topic.trim().to_string();
-            if !configured.is_empty() && configured.to_lowercase() != "auto" {
-                configured
-            } else if let Ok(env_topic) = std::env::var("CDC_TOPIC") {
-                env_topic
-            } else {
-                let cfg = self.kafka_consumer.get_config();
-                if !cfg.topic_prefix.is_empty() {
-                    format!("{}.public.kafka_outbox_cdc", cfg.topic_prefix)
-                } else {
-                    "banking-es.public.kafka_outbox_cdc".to_string()
-                }
-            }
-        };
-        self.cdc_topic = topic_to_subscribe.clone();
-        tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
-        let max_subscription_retries = 5; // Increased retries
-        let mut subscription_retries = 0;
+    //     // Resolve CDC topic if empty or set to "auto"
+    //     let topic_to_subscribe = {
+    //         let configured = self.cdc_topic.trim().to_string();
+    //         if !configured.is_empty() && configured.to_lowercase() != "auto" {
+    //             configured
+    //         } else if let Ok(env_topic) = std::env::var("CDC_TOPIC") {
+    //             env_topic
+    //         } else {
+    //             let cfg = self.kafka_consumer.get_config();
+    //             if !cfg.topic_prefix.is_empty() {
+    //                 format!("{}.public.kafka_outbox_cdc", cfg.topic_prefix)
+    //             } else {
+    //                 "banking-es.public.kafka_outbox_cdc".to_string()
+    //             }
+    //         }
+    //     };
+    //     self.cdc_topic = topic_to_subscribe.clone();
+    //     tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
+    //     let max_subscription_retries = 5; // Increased retries
+    //     let mut subscription_retries = 0;
 
-        loop {
-            let subscribe_result = self
-                .kafka_consumer
-                .subscribe_to_topic(&self.cdc_topic)
-                .await;
+    //     loop {
+    //         let subscribe_result = self
+    //             .kafka_consumer
+    //             .subscribe_to_topic(&self.cdc_topic)
+    //             .await;
 
-            match &subscribe_result {
-                Ok(_) => {
-                    tracing::info!(
-                        "CDCConsumer (COPY-optimized): ✅ Successfully subscribed to topic: {}",
-                        self.cdc_topic
-                    );
+    //         match &subscribe_result {
+    //             Ok(_) => {
+    //                 tracing::info!(
+    //                     "CDCConsumer (COPY-optimized): ✅ Successfully subscribed to topic: {}",
+    //                     self.cdc_topic
+    //                 );
 
-                    // CRITICAL FIX: Force consumer group join by polling
-                    tracing::info!(
-                        "CDCConsumer (COPY-optimized): Forcing consumer group join by polling..."
-                    );
+    //                 // CRITICAL FIX: Force consumer group join by polling
+    //                 tracing::info!(
+    //                     "CDCConsumer (COPY-optimized): Forcing consumer group join by polling..."
+    //                 );
 
-                    // Poll a few times to trigger group join
-                    let mut join_attempts = 0;
-                    let max_join_attempts = 10;
+    //                 // Poll a few times to trigger group join
+    //                 let mut join_attempts = 0;
+    //                 let max_join_attempts = 10;
 
-                    while join_attempts < max_join_attempts {
-                        match self.kafka_consumer.stream().next().await {
-                            Some(Ok(_)) => {
-                                tracing::info!("CDCConsumer (COPY-optimized): ✅ Consumer group join successful after {} attempts", join_attempts + 1);
-                                break;
-                            }
-                            Some(Err(e)) => {
-                                tracing::warn!("CDCConsumer (COPY-optimized): Poll error during join attempt {}: {:?}", join_attempts + 1, e);
-                            }
-                            None => {
-                                tracing::debug!("CDCConsumer (COPY-optimized): No message during join attempt {}", join_attempts + 1);
-                            }
-                        }
-                        join_attempts += 1;
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
+    //                 while join_attempts < max_join_attempts {
+    //                     match self.kafka_consumer.stream().next().await {
+    //                         Some(Ok(_)) => {
+    //                             tracing::info!("CDCConsumer (COPY-optimized): ✅ Consumer group join successful after {} attempts", join_attempts + 1);
+    //                             break;
+    //                         }
+    //                         Some(Err(e)) => {
+    //                             tracing::warn!("CDCConsumer (COPY-optimized): Poll error during join attempt {}: {:?}", join_attempts + 1, e);
+    //                         }
+    //                         None => {
+    //                             tracing::debug!("CDCConsumer (COPY-optimized): No message during join attempt {}", join_attempts + 1);
+    //                         }
+    //                     }
+    //                     join_attempts += 1;
+    //                     tokio::time::sleep(Duration::from_millis(100)).await;
+    //                 }
 
-                    if join_attempts >= max_join_attempts {
-                        tracing::warn!("CDCConsumer (COPY-optimized): Consumer group join may not be complete after {} attempts", max_join_attempts);
-                    }
+    //                 if join_attempts >= max_join_attempts {
+    //                     tracing::warn!("CDCConsumer (COPY-optimized): Consumer group join may not be complete after {} attempts", max_join_attempts);
+    //                 }
 
-                    // Consumer is ready to start processing
-                    tracing::info!(
-                        "CDCConsumer (COPY-optimized): Consumer group join completed, ready to start processing"
-                    );
+    //                 // Consumer is ready to start processing
+    //                 tracing::info!(
+    //                     "CDCConsumer (COPY-optimized): Consumer group join completed, ready to start processing"
+    //                 );
 
-                    break;
-                }
-                Err(e) => {
-                    subscription_retries += 1;
-                    if subscription_retries >= max_subscription_retries {
-                        return Err(anyhow::anyhow!(
-                            "Failed to subscribe to CDC topic after {} attempts: {}",
-                            max_subscription_retries,
-                            e
-                        ));
-                    }
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
-            }
-        }
+    //                 break;
+    //             }
+    //             Err(e) => {
+    //                 subscription_retries += 1;
+    //                 if subscription_retries >= max_subscription_retries {
+    //                     return Err(anyhow::anyhow!(
+    //                         "Failed to subscribe to CDC topic after {} attempts: {}",
+    //                         max_subscription_retries,
+    //                         e
+    //                     ));
+    //                 }
+    //                 tokio::time::sleep(Duration::from_secs(30)).await;
+    //             }
+    //         }
+    //     }
 
-        // Enhanced polling configuration for COPY optimization
-        let poll_interval_ms = std::env::var("CDC_POLL_INTERVAL_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(5); // Optimized to 5ms for maximum responsiveness
+    //     // Enhanced polling configuration for COPY optimization
+    //     let poll_interval_ms = std::env::var("CDC_POLL_INTERVAL_MS")
+    //         .ok()
+    //         .and_then(|v| v.parse::<u64>().ok())
+    //         .unwrap_or(5); // Optimized to 5ms for maximum responsiveness
 
-        // Use COPY-optimized batch size
-        let batch_size = copy_config.cdc_projection_batch_size.max(
-            std::env::var("CDC_BATCH_SIZE")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(1000), // Optimized to 1000 for larger batches and better throughput
-        );
+    //     // Use COPY-optimized batch size
+    //     let batch_size = copy_config.cdc_projection_batch_size.max(
+    //         std::env::var("CDC_BATCH_SIZE")
+    //             .ok()
+    //             .and_then(|v| v.parse::<usize>().ok())
+    //             .unwrap_or(1000), // Optimized to 1000 for larger batches and better throughput
+    //     );
 
-        let batch_timeout_ms = std::env::var("CDC_BATCH_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(25); // Reduced from 50ms to 25ms
+    //     let batch_timeout_ms = std::env::var("CDC_BATCH_TIMEOUT_MS")
+    //         .ok()
+    //         .and_then(|v| v.parse::<u64>().ok())
+    //         .unwrap_or(25); // Reduced from 50ms to 25ms
 
-        tracing::info!(
-            "CDCConsumer (COPY-optimized): Polling config - interval: {}ms, batch_size: {}, batch_timeout: {}ms",
-            poll_interval_ms,
-            batch_size,
-            batch_timeout_ms
-        );
+    //     tracing::info!(
+    //         "CDCConsumer (COPY-optimized): Polling config - interval: {}ms, batch_size: {}, batch_timeout: {}ms",
+    //         poll_interval_ms,
+    //         batch_size,
+    //         batch_timeout_ms
+    //     );
 
-        // CRITICAL OPTIMIZATION: Adaptive polling based on load
-        let mut adaptive_poll_interval = poll_interval_ms;
-        let mut consecutive_empty_polls = 0;
-        let min_poll_interval = 5; // 5ms minimum
-        let max_poll_interval = 50; // 50ms maximum
-        let adaptive_threshold = 3; // After 3 empty polls, increase interval
+    //     // CRITICAL OPTIMIZATION: Adaptive polling based on load
+    //     let mut adaptive_poll_interval = poll_interval_ms;
+    //     let mut consecutive_empty_polls = 0;
+    //     let min_poll_interval = 5; // 5ms minimum
+    //     let max_poll_interval = 50; // 50ms maximum
+    //     let adaptive_threshold = 3; // After 3 empty polls, increase interval
 
-        // CRITICAL OPTIMIZATION: Memory pressure monitoring
-        let mut memory_pressure_monitor = MemoryPressureMonitor::new();
+    //     // CRITICAL OPTIMIZATION: Memory pressure monitoring
+    //     let mut memory_pressure_monitor = MemoryPressureMonitor::new();
 
-        // CRITICAL OPTIMIZATION: Adaptive batch sizing based on system load
-        let mut adaptive_batch_size = batch_size;
-        let min_batch_size = 500; // Increased from 100
-        let max_batch_size = 5000; // Increased from 2000
+    //     // CRITICAL OPTIMIZATION: Adaptive batch sizing based on system load
+    //     let mut adaptive_batch_size = batch_size;
+    //     let min_batch_size = 500; // Increased from 100
+    //     let max_batch_size = 5000; // Increased from 2000
 
-        // CRITICAL OPTIMIZATION: Global semaphore for concurrent batch processing
-        let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(10)); // Max 10 concurrent batches
+    //     // CRITICAL OPTIMIZATION: Global semaphore for concurrent batch processing
+    //     let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(10)); // Max 10 concurrent batches
 
-        // CRITICAL OPTIMIZATION: Batch processing buffer with pre-allocation
-        let mut message_batch = Vec::with_capacity(batch_size * 2); // Pre-allocate 2x capacity for better performance
-        let mut last_batch_time = std::time::Instant::now();
+    //     // CRITICAL OPTIMIZATION: Batch processing buffer with pre-allocation
+    //     let mut message_batch = Vec::with_capacity(batch_size * 2); // Pre-allocate 2x capacity for better performance
+    //     let mut last_batch_time = std::time::Instant::now();
 
-        loop {
-            tokio::select! {
-                _ = shutdown_token.cancelled() => {
-                    tracing::info!("CDCConsumer (COPY-optimized): Received shutdown signal");
-                    break;
-                }
-                _ = tokio::time::sleep(Duration::from_millis(adaptive_poll_interval)) => {
-                    // CRITICAL: Use non-blocking poll with timeout
-                    match tokio::time::timeout(
-                        Duration::from_millis(adaptive_poll_interval), // Use adaptive poll interval
-                        self.kafka_consumer.stream().next()
-                    ).await {
-                        Ok(Some(Ok(message))) => {
-                            consecutive_empty_polls = 0;
-                            adaptive_poll_interval = poll_interval_ms; // Reset to base interval
+    //     loop {
+    //         tokio::select! {
+    //             _ = shutdown_token.cancelled() => {
+    //                 tracing::info!("CDCConsumer (COPY-optimized): Received shutdown signal");
+    //                 break;
+    //             }
+    //             _ = tokio::time::sleep(Duration::from_millis(adaptive_poll_interval)) => {
+    //                 // CRITICAL: Use non-blocking poll with timeout
+    //                 match tokio::time::timeout(
+    //                     Duration::from_millis(adaptive_poll_interval), // Use adaptive poll interval
+    //                     self.kafka_consumer.stream().next()
+    //                 ).await {
+    //                     Ok(Some(Ok(message))) => {
+    //                         consecutive_empty_polls = 0;
+    //                         adaptive_poll_interval = poll_interval_ms; // Reset to base interval
 
-                            // Process message immediately - convert BorrowedMessage to KafkaMessage
-                            let kafka_message = crate::infrastructure::kafka_abstraction::KafkaMessage {
-                                topic: message.topic().to_string(),
-                                partition: message.partition(),
-                                offset: message.offset(),
-                                key: message.key().map(|k| k.to_vec()),
-                                payload: message.payload().unwrap_or_default().to_vec(),
-                                timestamp: message.timestamp().to_millis(),
-                            };
-                            message_batch.push(kafka_message);
+    //                         // Process message immediately - convert BorrowedMessage to KafkaMessage
+    //                         let kafka_message = crate::infrastructure::kafka_abstraction::KafkaMessage {
+    //                             topic: message.topic().to_string(),
+    //                             partition: message.partition(),
+    //                             offset: message.offset(),
+    //                             key: message.key().map(|k| k.to_vec()),
+    //                             payload: message.payload().unwrap_or_default().to_vec(),
+    //                             timestamp: message.timestamp().to_millis(),
+    //                         };
+    //                         message_batch.push(kafka_message);
 
-                            // CRITICAL: Adaptive batch sizing based on memory pressure
-                            if memory_pressure_monitor.should_reduce_batch_size() {
-                                adaptive_batch_size = (adaptive_batch_size / 2).max(min_batch_size);
-                                tracing::debug!("Memory pressure detected, reducing batch size to {}", adaptive_batch_size);
-                            } else if adaptive_batch_size < batch_size {
-                                adaptive_batch_size = (adaptive_batch_size * 2).min(max_batch_size);
-                                tracing::debug!("Memory pressure resolved, increasing batch size to {}", adaptive_batch_size);
-                            }
+    //                         // CRITICAL: Adaptive batch sizing based on memory pressure
+    //                         if memory_pressure_monitor.should_reduce_batch_size() {
+    //                             adaptive_batch_size = (adaptive_batch_size / 2).max(min_batch_size);
+    //                             tracing::debug!("Memory pressure detected, reducing batch size to {}", adaptive_batch_size);
+    //                         } else if adaptive_batch_size < batch_size {
+    //                             adaptive_batch_size = (adaptive_batch_size * 2).min(max_batch_size);
+    //                             tracing::debug!("Memory pressure resolved, increasing batch size to {}", adaptive_batch_size);
+    //                         }
 
-                            // CRITICAL: Process batch when full or timeout reached
-                            if message_batch.len() >= adaptive_batch_size ||
-                               last_batch_time.elapsed() >= Duration::from_millis(batch_timeout_ms) {
-                                tracing::debug!("CDCConsumer: Processing batch of {} messages (size: {}, timeout: {:?})",
-                                    message_batch.len(), adaptive_batch_size, last_batch_time.elapsed());
-                                let batch_to_process = std::mem::take(&mut message_batch);
-                                last_batch_time = std::time::Instant::now();
+    //                         // CRITICAL: Process batch when full or timeout reached
+    //                         if message_batch.len() >= adaptive_batch_size ||
+    //                            last_batch_time.elapsed() >= Duration::from_millis(batch_timeout_ms) {
+    //                             tracing::debug!("CDCConsumer: Processing batch of {} messages (size: {}, timeout: {:?})",
+    //                                 message_batch.len(), adaptive_batch_size, last_batch_time.elapsed());
+    //                             let batch_to_process = std::mem::take(&mut message_batch);
+    //                             last_batch_time = std::time::Instant::now();
 
-                                // CRITICAL FIX: Process batch in background with proper synchronization
-                                // Use global semaphore to limit concurrent processing and prevent race conditions
-                                let processor = processor.clone();
-                                let semaphore = processing_semaphore.clone();
+    //                             // CRITICAL FIX: Process batch in background with proper synchronization
+    //                             // Use global semaphore to limit concurrent processing and prevent race conditions
+    //                             let processor = processor.clone();
+    //                             let semaphore = processing_semaphore.clone();
 
-                                tokio::spawn(async move {
-                                    let _permit = semaphore.acquire().await.unwrap(); // Hold permit until processing completes
-                                    if let Err(e) = Self::process_message_batch(&batch_to_process, &processor).await {
-                                        tracing::error!("CDCConsumer (COPY-optimized): Failed to process batch: {}", e);
-                                    }
-                                });
-                            }
-                        }
-                        Ok(Some(Err(e))) => {
-                            // No messages available
-                            consecutive_empty_polls += 1;
+    //                             tokio::spawn(async move {
+    //                                 let _permit = semaphore.acquire().await.unwrap(); // Hold permit until processing completes
+    //                                 if let Err(e) = Self::process_message_batch(&batch_to_process, &processor).await {
+    //                                     tracing::error!("CDCConsumer (COPY-optimized): Failed to process batch: {}", e);
+    //                                 }
+    //                             });
+    //                         }
+    //                     }
+    //                     Ok(Some(Err(e))) => {
+    //                         // No messages available
+    //                         consecutive_empty_polls += 1;
 
-                            // Adaptive polling: increase interval if no messages
-                            if consecutive_empty_polls >= adaptive_threshold {
-                                adaptive_poll_interval = (adaptive_poll_interval * 2).min(max_poll_interval);
-                            }
+    //                         // Adaptive polling: increase interval if no messages
+    //                         if consecutive_empty_polls >= adaptive_threshold {
+    //                             adaptive_poll_interval = (adaptive_poll_interval * 2).min(max_poll_interval);
+    //                         }
 
-                            // CRITICAL FIX: Process any remaining messages with proper synchronization
-                            if !message_batch.is_empty() &&
-                               last_batch_time.elapsed() >= Duration::from_millis(batch_timeout_ms) {
-                                tracing::debug!("CDCConsumer: Processing remaining batch of {} messages (timeout: {:?})",
-                                    message_batch.len(), last_batch_time.elapsed());
-                                let batch_to_process = std::mem::take(&mut message_batch);
-                                last_batch_time = std::time::Instant::now();
+    //                         // CRITICAL FIX: Process any remaining messages with proper synchronization
+    //                         if !message_batch.is_empty() &&
+    //                            last_batch_time.elapsed() >= Duration::from_millis(batch_timeout_ms) {
+    //                             tracing::debug!("CDCConsumer: Processing remaining batch of {} messages (timeout: {:?})",
+    //                                 message_batch.len(), last_batch_time.elapsed());
+    //                             let batch_to_process = std::mem::take(&mut message_batch);
+    //                             last_batch_time = std::time::Instant::now();
 
-                                let processor = processor.clone();
-                                let semaphore = processing_semaphore.clone();
+    //                             let processor = processor.clone();
+    //                             let semaphore = processing_semaphore.clone();
 
-                                tokio::spawn(async move {
-                                    let _permit = semaphore.acquire().await.unwrap();
-                                    if let Err(e) = Self::process_message_batch(&batch_to_process, &processor).await {
-                                        tracing::error!("CDCConsumer (COPY-optimized): Failed to process batch: {}", e);
-                                    }
-                                });
-                            }
-                        }
-                        Ok(None) => {
-                            // Stream ended
-                            tracing::info!("CDCConsumer (COPY-optimized): Message stream ended");
+    //                             tokio::spawn(async move {
+    //                                 let _permit = semaphore.acquire().await.unwrap();
+    //                                 if let Err(e) = Self::process_message_batch(&batch_to_process, &processor).await {
+    //                                     tracing::error!("CDCConsumer (COPY-optimized): Failed to process batch: {}", e);
+    //                                 }
+    //                             });
+    //                         }
+    //                     }
+    //                     Ok(None) => {
+    //                         // Stream ended
+    //                         tracing::info!("CDCConsumer (COPY-optimized): Message stream ended");
 
-                            // CRITICAL FIX: Process remaining messages in batch before exit
-                            if !message_batch.is_empty() {
-                                tracing::info!("CDCConsumer (COPY-optimized): Processing final batch of {} messages", message_batch.len());
-                                let batch_to_process = std::mem::take(&mut message_batch);
-                                last_batch_time = std::time::Instant::now();
+    //                         // CRITICAL FIX: Process remaining messages in batch before exit
+    //                         if !message_batch.is_empty() {
+    //                             tracing::info!("CDCConsumer (COPY-optimized): Processing final batch of {} messages", message_batch.len());
+    //                             let batch_to_process = std::mem::take(&mut message_batch);
+    //                             last_batch_time = std::time::Instant::now();
 
-                                let processor = processor.clone();
-                                let semaphore = processing_semaphore.clone();
+    //                             let processor = processor.clone();
+    //                             let semaphore = processing_semaphore.clone();
 
-                                tokio::spawn(async move {
-                                    let _permit = semaphore.acquire().await.unwrap();
-                                    if let Err(e) = Self::process_message_batch(&batch_to_process, &processor).await {
-                                        tracing::error!("CDCConsumer (COPY-optimized): Failed to process final batch: {}", e);
-                                    }
-                                });
-                            }
-                            break;
-                        }
-                        Err(_) => {
-                            // Poll timeout - this is expected and not an error
-                            consecutive_empty_polls += 1;
+    //                             tokio::spawn(async move {
+    //                                 let _permit = semaphore.acquire().await.unwrap();
+    //                                 if let Err(e) = Self::process_message_batch(&batch_to_process, &processor).await {
+    //                                     tracing::error!("CDCConsumer (COPY-optimized): Failed to process final batch: {}", e);
+    //                                 }
+    //                             });
+    //                         }
+    //                         break;
+    //                     }
+    //                     Err(_) => {
+    //                         // Poll timeout - this is expected and not an error
+    //                         consecutive_empty_polls += 1;
 
-                            if consecutive_empty_polls >= adaptive_threshold {
-                                adaptive_poll_interval = (adaptive_poll_interval * 2).min(max_poll_interval);
-                            }
+    //                         if consecutive_empty_polls >= adaptive_threshold {
+    //                             adaptive_poll_interval = (adaptive_poll_interval * 2).min(max_poll_interval);
+    //                         }
 
-                            // CRITICAL FIX: Process any remaining messages in batch on timeout
-                            if !message_batch.is_empty() {
-                                tracing::debug!("CDCConsumer: Processing timeout batch of {} messages", message_batch.len());
-                                let batch_to_process = std::mem::take(&mut message_batch);
-                                last_batch_time = std::time::Instant::now();
+    //                         // CRITICAL FIX: Process any remaining messages in batch on timeout
+    //                         if !message_batch.is_empty() {
+    //                             tracing::debug!("CDCConsumer: Processing timeout batch of {} messages", message_batch.len());
+    //                             let batch_to_process = std::mem::take(&mut message_batch);
+    //                             last_batch_time = std::time::Instant::now();
 
-                                let processor = processor.clone();
-                                let semaphore = processing_semaphore.clone();
+    //                             let processor = processor.clone();
+    //                             let semaphore = processing_semaphore.clone();
 
-                                tokio::spawn(async move {
-                                    let _permit = semaphore.acquire().await.unwrap();
-                                    if let Err(e) = Self::process_message_batch(&batch_to_process, &processor).await {
-                                        tracing::error!("CDCConsumer (COPY-optimized): Failed to process timeout batch: {}", e);
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    //                             tokio::spawn(async move {
+    //                                 let _permit = semaphore.acquire().await.unwrap();
+    //                                 if let Err(e) = Self::process_message_batch(&batch_to_process, &processor).await {
+    //                                     tracing::error!("CDCConsumer (COPY-optimized): Failed to process timeout batch: {}", e);
+    //                                 }
+    //                             });
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
 
-        let current = ACTIVE_CONSUMERS.fetch_sub(1, Ordering::SeqCst) - 1;
-        tracing::info!(
-            "CDCConsumer (COPY-optimized): Exiting main polling loop. Active consumers: {}",
-            current
-        );
+    //     let current = ACTIVE_CONSUMERS.fetch_sub(1, Ordering::SeqCst) - 1;
+    //     tracing::info!(
+    //         "CDCConsumer (COPY-optimized): Exiting main polling loop. Active consumers: {}",
+    //         current
+    //     );
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     /// Get system load for adaptive batch sizing
     fn get_system_load() -> Option<f64> {
@@ -1843,18 +1843,18 @@ impl CDCConsumer {
         let poll_interval_ms = std::env::var("CDC_POLL_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(100); // CRITICAL FIX: Increased from 5ms to 100ms to prevent consumer group ejection
+            .unwrap_or(5); // CRITICAL FIX: Increased from 5ms to 100ms to prevent consumer group ejection
 
         // CRITICAL OPTIMIZATION: Batch processing configuration
         let batch_size = std::env::var("CDC_BATCH_SIZE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(10000);
+            .unwrap_or(5000);
 
         let batch_timeout_ms = std::env::var("CDC_BATCH_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(50); // 5x poll interval (5ms * 10 = 50ms)
+            .unwrap_or(25); // 5x poll interval (5ms * 5 = 25ms)
 
         tracing::info!(
             "CDCConsumer: Using polling interval: {}ms, batch_size: {}, batch_timeout: {}ms",
@@ -1872,8 +1872,24 @@ impl CDCConsumer {
 
         // CRITICAL OPTIMIZATION: Batch processing buffer
         let mut message_batch = Vec::with_capacity(batch_size);
+        let mut cdc_events_buffer: Vec<serde_json::Value> = Vec::with_capacity(batch_size);
         let mut last_batch_time = std::time::Instant::now();
+        let max_concurrent_batches = std::env::var("CDC_MAX_CONCURRENT_BATCHES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4); // Process up to 4 batches concurrently
+        let semaphore = Arc::new(Semaphore::new(max_concurrent_batches));
+        let commit_every_n_batches = std::env::var("CDC_COMMIT_EVERY_N_BATCHES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10); // Commit every 10 batches instead of every batch
+        let mut batch_count = 0;
+        let mut pending_offsets = Vec::new();
 
+        tracing::info!(
+        "CDCConsumer: Optimized config - batch_size: {}, timeout: {}ms, concurrent_batches: {}, commit_every: {} batches",
+        batch_size, batch_timeout_ms, max_concurrent_batches, commit_every_n_batches
+    );
         loop {
             tokio::select! {
                 _ = shutdown_token.cancelled() => {
@@ -1883,7 +1899,7 @@ impl CDCConsumer {
                     // Process remaining messages in batch before shutdown
                     if !message_batch.is_empty() {
                         tracing::info!("CDCConsumer: Processing final batch of {} messages before shutdown", message_batch.len());
-                        if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
+                        if let Err(e) = Self::process_message_batch_optimized(&message_batch, &processor, &mut cdc_events_buffer).await {
                             tracing::error!("CDCConsumer: Failed to process final batch: {:?}", e);
                         }
                     }
@@ -1910,6 +1926,12 @@ impl CDCConsumer {
                                 timestamp: message.timestamp().to_millis(),
                             };
                             message_batch.push(kafka_message);
+                            // Track offset for batched commit
+                            pending_offsets.push((
+                                message.topic().to_string(),
+                                message.partition(),
+                                message.offset(),
+                            ));
 
                             // Check if we should process the batch
                             let should_process_batch = message_batch.len() >= batch_size ||
@@ -1917,10 +1939,26 @@ impl CDCConsumer {
 
                             if should_process_batch {
                                 tracing::info!("CDCConsumer: Processing batch of {} messages", message_batch.len());
-                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
-                                    tracing::error!("CDCConsumer: Failed to process message batch: {:?}", e);
+                                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                                let batch_to_process = std::mem::take(&mut message_batch);
+                                let processor_clone = processor.clone();
+                                let mut buffer_clone = std::mem::take(&mut cdc_events_buffer);
+                                tokio::spawn(async move {
+                                    let _permit = permit; // Hold permit until processing is done
+                                    if let Err(e) = Self::process_message_batch_optimized(&batch_to_process, &processor_clone, &mut buffer_clone).await {
+                                        tracing::error!("Failed to process concurrent batch: {:?}", e);
+                                    }
+                                });
+                                batch_count += 1;
+                                // OPTIMIZATION 8: Batched offset commits
+                                if batch_count % commit_every_n_batches == 0 {
+                                    Self::commit_offsets_batch(&self.kafka_consumer, &pending_offsets).await?;
+                                    pending_offsets.clear();
                                 }
-                                message_batch.clear();
+
+                                // Reset buffers
+                                message_batch = Vec::with_capacity(batch_size);
+                                cdc_events_buffer = Vec::with_capacity(batch_size);
                                 last_batch_time = std::time::Instant::now();
                             }
                         }
@@ -1928,59 +1966,113 @@ impl CDCConsumer {
                             tracing::error!("CDCConsumer: Error receiving message: {:?}", e);
                         }
                         Ok(None) => {
-                            // Stream ended
-                            tracing::info!("CDCConsumer: Message stream ended");
-
-                            // Process remaining messages in batch
+                            // Stream ended - process remaining messages
                             if !message_batch.is_empty() {
-                                tracing::info!("CDCConsumer: Processing final batch of {} messages", message_batch.len());
-                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
-                                    tracing::error!("CDCConsumer: Failed to process final batch: {:?}", e);
-                                }
+                                Self::process_message_batch_optimized(&message_batch, &processor, &mut cdc_events_buffer).await?;
                             }
                             break;
                         }
                         Err(_) => {
-                            // Timeout - this is expected and normal
-                            poll_count += 1;
-                            consecutive_empty_polls += 1;
-
-                            // OPTIMIZATION: Adaptive polling based on empty polls
-                            if consecutive_empty_polls >= adaptive_threshold {
-                                adaptive_poll_interval = std::cmp::min(max_poll_interval, adaptive_poll_interval * 2);
-                                consecutive_empty_polls = 0; // Reset counter
-                                tracing::debug!("CDCConsumer: Adaptive polling - increased interval to {}ms", adaptive_poll_interval);
-                            }
-
-                            // Process any remaining messages in batch on timeout
-                            if !message_batch.is_empty() {
-                                tracing::debug!("CDCConsumer: Processing timeout batch of {} messages", message_batch.len());
-                                if let Err(e) = Self::process_message_batch(&message_batch, &processor).await {
-                                    tracing::error!("CDCConsumer: Failed to process timeout batch: {:?}", e);
-                                }
+                            // Timeout - check if we have messages to process
+                            if !message_batch.is_empty() && last_batch_time.elapsed() > Duration::from_millis(batch_timeout_ms) {
+                                Self::process_message_batch_optimized(&message_batch, &processor, &mut cdc_events_buffer).await?;
                                 message_batch.clear();
+                                cdc_events_buffer.clear();
                                 last_batch_time = std::time::Instant::now();
-                            }
-
-                            if poll_count % 1000 == 0 {
-                                tracing::debug!("CDCConsumer: Poll timeout (count: {}, interval: {}ms)", poll_count, adaptive_poll_interval);
                             }
                         }
                     }
                 }
             }
         }
+        // Final commit
+        if !pending_offsets.is_empty() {
+            Self::commit_offsets_batch(&self.kafka_consumer, &pending_offsets).await?;
+        }
+        Ok(())
+    }
+    // OPTIMIZATION 9: Optimized batch processing with buffer reuse
+    async fn process_message_batch_optimized(
+        messages: &[crate::infrastructure::kafka_abstraction::KafkaMessage],
+        processor: &Arc<UltraOptimizedCDCEventProcessor>,
+        cdc_events_buffer: &mut Vec<serde_json::Value>, // Reuse buffer
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
 
-        info!("CDC consumer stopped after {} polls", poll_count);
-        tracing::info!(
-            "CDCConsumer: Exiting start_consuming after {} polls",
-            poll_count
-        );
-        let current = ACTIVE_CONSUMERS.fetch_sub(1, Ordering::SeqCst) - 1;
-        tracing::info!(
-            "CDCConsumer: Exiting main polling loop. Active consumers: {}",
-            current
-        );
+        let start_time = std::time::Instant::now();
+        let batch_size = messages.len();
+
+        // OPTIMIZATION 10: Clear and reuse buffer instead of allocating new
+        cdc_events_buffer.clear();
+        cdc_events_buffer.reserve(batch_size);
+
+        // OPTIMIZATION 11: Use rayon for parallel JSON parsing if available
+        // Otherwise use efficient sequential parsing
+        for message in messages {
+            if let Ok(event) =
+                simd_json::from_slice::<serde_json::Value>(&mut message.payload.clone())
+            {
+                cdc_events_buffer.push(event);
+            }
+        }
+
+        if cdc_events_buffer.is_empty() {
+            tracing::warn!("No valid CDC events in batch of {} messages", batch_size);
+            return Ok(());
+        }
+
+        // OPTIMIZATION 12: Use optimized batch processing
+        match processor.process_cdc_events_batch(cdc_events_buffer).await {
+            Ok(_) => {
+                let duration = start_time.elapsed();
+                tracing::debug!(
+                    "Batch processed: {} messages in {:?} ({:.2} msg/sec)",
+                    batch_size,
+                    duration,
+                    batch_size as f64 / duration.as_secs_f64()
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("Batch processing failed: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    // OPTIMIZATION 13: Efficient batched offset commits
+    async fn commit_offsets_batch(
+        kafka_consumer: &crate::infrastructure::kafka_abstraction::KafkaConsumer,
+        offsets: &[(String, i32, i64)],
+    ) -> Result<()> {
+        if offsets.is_empty() {
+            return Ok(());
+        }
+
+        // Get highest offset per (topic, partition)
+        let mut highest: std::collections::HashMap<(String, i32), i64> =
+            std::collections::HashMap::new();
+        for (topic, partition, offset) in offsets {
+            let key = (topic.clone(), *partition);
+            highest
+                .entry(key)
+                .and_modify(|v| *v = (*v).max(*offset))
+                .or_insert(*offset);
+        }
+
+        let mut tpl = rdkafka::TopicPartitionList::new();
+        for ((topic, partition), offset) in highest.clone() {
+            tpl.add_partition_offset(&topic, partition, rdkafka::Offset::Offset(offset + 1))
+                .map_err(|e| anyhow::anyhow!("Failed to add partition offset: {}", e))?;
+        }
+
+        kafka_consumer
+            .commit(&tpl, rdkafka::consumer::CommitMode::Async)
+            .map_err(|e| anyhow::anyhow!("Failed to commit offsets: {}", e))?;
+
+        tracing::debug!("Committed {} partition offsets", highest.len());
         Ok(())
     }
 
@@ -1997,137 +2089,6 @@ impl CDCConsumer {
 
         Ok(())
     }
-
-    /// Optimized batch processing with true parallel execution and offset commit
-    async fn process_message_batch(
-        messages: &[crate::infrastructure::kafka_abstraction::KafkaMessage],
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-    ) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let start_time = std::time::Instant::now();
-        let batch_size = messages.len();
-
-        tracing::info!(
-            "CDCConsumer: process_message_batch starting batch of {} messages (COPY optimization: true)",
-            batch_size
-        );
-
-        // CRITICAL OPTIMIZATION: Convert messages to CDC events in parallel
-        let cdc_events: Vec<serde_json::Value> = messages
-            .iter() // Use regular iterator for conversion (rayon not available)
-            .filter_map(|message| {
-                serde_json::from_slice::<serde_json::Value>(&message.payload).ok()
-            })
-            .collect();
-
-        if cdc_events.is_empty() {
-            tracing::warn!(
-                "CDCConsumer: No valid CDC events found in batch of {} messages",
-                batch_size
-            );
-            return Ok(());
-        }
-
-        tracing::info!(
-            "CDCConsumer: Using COPY-optimized batch processing for {} events",
-            cdc_events.len()
-        );
-
-        // CRITICAL: Use COPY-optimized batch processing
-        let processing_start = std::time::Instant::now();
-        match processor.process_cdc_events_batch(cdc_events).await {
-            Ok(_) => {
-                let processing_duration = processing_start.elapsed();
-                let total_duration = start_time.elapsed();
-
-                tracing::info!(
-                    "CDCConsumer: Batch processing completed successfully - {} messages in {:?} (COPY: true)",
-                    batch_size,
-                    total_duration
-                );
-
-                // CRITICAL FIX: Commit offsets after successful processing to prevent duplicates
-                // This ensures messages are not reprocessed after consumer restart
-                // Note: Offset commit is handled by the consumer group coordinator
-                tracing::debug!("CDCConsumer: Successfully processed {} messages, offsets will be committed by consumer group", batch_size);
-
-                // Performance monitoring
-                if processing_duration.as_millis() > 5000 {
-                    tracing::warn!(
-                        "CDCConsumer (COPY-optimized): Slow batch processing detected: {} messages in {:?}",
-                        batch_size, processing_duration
-                    );
-                }
-
-                Ok(())
-            }
-            Err(e) => {
-                let total_duration = start_time.elapsed();
-                tracing::error!(
-                    "CDCConsumer (COPY-optimized): Failed to process COPY-optimized batch: Batch processing failed for {} messages: {}",
-                    batch_size, e
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// ✅ CDC Consumer Resilience: Process events directly from database when outbox is missing
-    pub async fn process_events_directly_from_database(
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-        event_store: &Arc<dyn crate::infrastructure::event_store::EventStoreTrait>,
-        batch_size: usize,
-    ) -> Result<()> {
-        tracing::info!("CDC Consumer Resilience: Starting direct events processing from database");
-
-        let start_time = std::time::Instant::now();
-        let mut processed_count = 0;
-        let mut error_count = 0;
-
-        // Get unprocessed events from database
-        let unprocessed_events =
-            Self::get_unprocessed_events_from_database(event_store, batch_size).await?;
-
-        if unprocessed_events.is_empty() {
-            tracing::info!("CDC Consumer Resilience: No unprocessed events found in database");
-            return Ok(());
-        }
-
-        tracing::info!(
-            "CDC Consumer Resilience: Found {} unprocessed events, processing directly",
-            unprocessed_events.len()
-        );
-
-        // Process events directly
-        for event in unprocessed_events {
-            match Self::process_single_event_directly(processor, event).await {
-                Ok(_) => {
-                    processed_count += 1;
-                }
-                Err(e) => {
-                    error_count += 1;
-                    tracing::error!(
-                        "CDC Consumer Resilience: Failed to process event directly: {:?}",
-                        e
-                    );
-                }
-            }
-        }
-
-        let duration = start_time.elapsed();
-        tracing::info!(
-            "CDC Consumer Resilience: Direct processing completed - {} processed, {} errors in {:?}",
-            processed_count,
-            error_count,
-            duration
-        );
-
-        Ok(())
-    }
-
     /// ✅ Get unprocessed events from database (events without corresponding outbox messages)
     async fn get_unprocessed_events_from_database(
         event_store: &Arc<dyn crate::infrastructure::event_store::EventStoreTrait>,
@@ -2146,20 +2107,6 @@ impl CDCConsumer {
         Ok(unprocessed_events)
     }
 
-    /// ✅ Process single event directly without outbox dependency
-    async fn process_single_event_directly(
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-        event: crate::domain::AccountEvent,
-    ) -> Result<()> {
-        // Convert domain event to CDC event format
-        let cdc_event = Self::convert_domain_event_to_cdc_format(event)?;
-
-        // Process using existing CDC processor
-        processor.process_cdc_events_batch(vec![cdc_event]).await?;
-
-        Ok(())
-    }
-
     /// ✅ Convert domain event to CDC event format
     fn convert_domain_event_to_cdc_format(
         event: crate::domain::AccountEvent,
@@ -2175,34 +2122,6 @@ impl CDCConsumer {
         });
 
         Ok(cdc_event)
-    }
-
-    /// ✅ Start resilient CDC consumer that can handle missing outbox messages
-    pub async fn start_resilient_cdc_consumer(
-        processor: Arc<UltraOptimizedCDCEventProcessor>,
-        event_store: Arc<dyn crate::infrastructure::event_store::EventStoreTrait>,
-        check_interval_minutes: u64,
-    ) -> Result<()> {
-        tracing::info!("Starting resilient CDC consumer with direct database processing");
-
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
-            check_interval_minutes * 60,
-        ));
-
-        loop {
-            interval.tick().await;
-
-            // Check for unprocessed events and process them directly
-            match Self::process_events_directly_from_database(&processor, &event_store, 1000).await
-            {
-                Ok(_) => {
-                    tracing::debug!("Resilient CDC consumer: Direct processing cycle completed");
-                }
-                Err(e) => {
-                    tracing::error!("Resilient CDC consumer: Direct processing failed: {:?}", e);
-                }
-            }
-        }
     }
 }
 

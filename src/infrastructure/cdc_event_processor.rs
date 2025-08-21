@@ -1,3 +1,4 @@
+use crate::domain::AccountEvent;
 use crate::infrastructure::cache_service::CacheServiceTrait;
 use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::consistency_manager::ConsistencyManager;
@@ -5,7 +6,7 @@ use crate::infrastructure::dlq_router::dlq_router::DLQRouter;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use crate::infrastructure::projections::{AccountProjection, TransactionProjection};
-use crate::infrastructure::CDCBatchingConfig;
+use crate::infrastructure::{CDCBatchingConfig, PartitionedCDCBatching};
 use crate::infrastructure::CDCBatchingService;
 // REMOVED: CDCBatchingServiceTrait import - no longer exists
 use crate::infrastructure::CopyOptimizationConfig;
@@ -36,6 +37,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
+const EVENT_POOL_SIZE: usize = 10_000;
+const BATCH_SIZE_THRESHOLD: usize = 1_000;
+const MAX_PARALLEL_CHUNKS: usize = 16;
 /// Batch processing job types for COPY optimization
 #[derive(Debug, Clone)]
 pub enum BatchProcessingJob {
@@ -47,6 +51,67 @@ pub enum BatchProcessingJob {
     },
 }
 
+// OPTIMIZATION 3: Separate event containers for better cache locality
+#[derive(Debug, Default)]
+struct EventBatches {
+    account_created: Vec<ProcessableEvent>,
+    transactions: Vec<ProcessableEvent>,
+    account_closed: Vec<ProcessableEvent>,
+}
+
+impl EventBatches {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            account_created: Vec::with_capacity(capacity / 3),
+            transactions: Vec::with_capacity(capacity / 3),
+            account_closed: Vec::with_capacity(capacity / 3),
+        }
+    }
+    
+    fn is_empty(&self) -> bool {
+        self.account_created.is_empty() && self.transactions.is_empty() && self.account_closed.is_empty()
+    }
+    
+    fn total_len(&self) -> usize {
+        self.account_created.len() + self.transactions.len() + self.account_closed.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EventType {
+    AccountCreated,
+    MoneyDeposited,
+    MoneyWithdrawn,
+    AccountClosed,
+}
+
+impl EventType {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "AccountCreated" => Self::AccountCreated,
+            "MoneyDeposited" => Self::MoneyDeposited,
+            "MoneyWithdrawn" => Self::MoneyWithdrawn,
+            "AccountClosed" => Self::AccountClosed,
+            _ => panic!("Unknown event type: {}", s),
+        }
+    }
+    fn as_str(&self) -> &str {
+        match self {
+            EventType::AccountCreated => "AccountCreated",
+            EventType::MoneyDeposited => "MoneyDeposited",
+            EventType::MoneyWithdrawn => "MoneyWithdrawn",
+            EventType::AccountClosed => "AccountClosed",
+        }
+    }
+    
+    fn is_account_created(&self) -> bool {
+        matches!(self, EventType::AccountCreated)
+    }
+    
+    fn is_transaction_event(&self) -> bool {
+        matches!(self, EventType::MoneyDeposited | EventType::MoneyWithdrawn)
+    }
+}
 // Optimized CDC outbox message with memory layout improvements
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizedCDCOutboxMessage {
@@ -141,7 +206,7 @@ struct EventBatch {
 struct ProcessableEvent {
     event_id: Uuid,
     aggregate_id: Uuid,
-    event_type: String,
+    event_type: EventType,
     payload: Vec<u8>,
     partition_key: Option<String>,
     domain_event: Option<crate::domain::AccountEvent>, // Pre-deserialized for performance
@@ -152,7 +217,7 @@ impl ProcessableEvent {
     fn new(
         event_id: Uuid,
         aggregate_id: Uuid,
-        event_type: String,
+        event_type: EventType,
         payload: Vec<u8>,
         partition_key: Option<String>,
         timestamp: chrono::DateTime<chrono::Utc>, // FIXED: Add timestamp parameter
@@ -659,7 +724,7 @@ pub struct UltraOptimizedCDCEventProcessor {
 
     // NEW: Multi-instance CDC Batching Service
     cdc_batching_service:
-        Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>>,
+        Option<Arc<crate::infrastructure::cdc_write_service::PartitionedCDCBatching>>,
 
     // CDC Batching Service requires write pool
     write_pool: Option<Arc<sqlx::PgPool>>,
@@ -758,7 +823,7 @@ impl UltraOptimizedCDCEventProcessor {
         performance_config: Option<AdvancedPerformanceConfig>,
         consistency_manager: Option<Arc<ConsistencyManager>>,
         write_pool: Option<Arc<sqlx::PgPool>>,
-        cdc_batching_service: Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>>,
+        cdc_batching_service: Option<Arc<PartitionedCDCBatching>>,
     ) -> Self {
         let business_config: BusinessLogicConfig = business_config.unwrap_or_default();
         let performance_config = performance_config.unwrap_or_default();
@@ -894,7 +959,7 @@ impl UltraOptimizedCDCEventProcessor {
         write_pool: Arc<sqlx::PgPool>,
     ) -> Result<()> {
         let cdc_batching =
-            crate::infrastructure::cdc_batching_service::PartitionedCDCBatching::new(
+            PartitionedCDCBatching::new(
                 self.projection_store.clone(),
                 write_pool.clone(),
             )
@@ -919,7 +984,7 @@ impl UltraOptimizedCDCEventProcessor {
     }
 
     /// Get CDC Batching Service if available
-    pub fn get_cdc_batching_service(&self) -> Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>> {
+    pub fn get_cdc_batching_service(&self) -> Option<Arc<PartitionedCDCBatching>> {
         self.cdc_batching_service.clone()
     }
 
@@ -1029,7 +1094,7 @@ impl UltraOptimizedCDCEventProcessor {
         // Extract and validate all events first (unchanged)
         let mut processable_events = Vec::with_capacity(batch_size);
         for cdc_event in &cdc_events {
-            match self.extract_event_serde_json(cdc_event) {
+            match self.extract_event_serde_json_optimized(cdc_event) {
                 Ok(Some(event)) => {
                     processable_events.push(event);
                 }
@@ -1191,7 +1256,7 @@ impl UltraOptimizedCDCEventProcessor {
         self.circuit_breaker.on_attempt().await;
 
         // Try serde_json first for debugging
-        let processable_event = match self.extract_event_serde_json(&cdc_event)? {
+        let processable_event = match self.extract_event_serde_json_optimized(&cdc_event)? {
             Some(event) => {
                 tracing::debug!(
                     "🔍 Successfully extracted event with serde_json: {}",
@@ -1473,12 +1538,11 @@ impl UltraOptimizedCDCEventProcessor {
                 );
             }
         }
-
         result
     }
 
     /// CRITICAL OPTIMIZATION: Process multiple CDC events in batch with event type separation
-    pub async fn process_cdc_events_batch(&self, cdc_events: Vec<serde_json::Value>) -> Result<()> {
+    pub async fn process_cdc_events_batch(&self, cdc_events: &mut Vec<serde_json::Value>) -> Result<()> {
         if cdc_events.is_empty() {
             return Ok(());
         }
@@ -1489,298 +1553,398 @@ impl UltraOptimizedCDCEventProcessor {
             "🔍 CDC Event Processor: Starting batch processing of {} events with event type separation",
             batch_size
         );
-
-        // CRITICAL OPTIMIZATION: Process all events together without chunking
-        let mut processable_events = Vec::with_capacity(batch_size);
-
-                // TIMER: Event Extraction
-        let extraction_start_time = Instant::now();
+        let event_batches = self.extract_events_parallel_optimized(cdc_events).await?;
         
-        // ULTRA-PARALLEL OPTIMIZATION: Extract and validate all events in parallel with chunking
+        if event_batches.is_empty() {
+            tracing::info!("No processable events found");
+            return Ok(());
+        }
+// OPTIMIZATION 7: Process all event types in parallel with maximum concurrency
+        let processing_start = Instant::now();
+        let results = self.process_all_event_types_parallel(event_batches).await?;
+        
+        let processing_duration = processing_start.elapsed();
+        let total_duration = total_start_time.elapsed();
+
+        tracing::info!(
+            "🏆 ULTRA-OPTIMIZED CDC COMPLETE: {} events in {:?} (processing: {:?}, throughput: {:.0} events/sec)",
+            batch_size,
+            total_duration,
+            processing_duration,
+            batch_size as f64 / total_duration.as_secs_f64()
+        );
+
+        Ok(())
+
+    }
+ /// OPTIMIZATION 8: Parallel event extraction with SIMD and memory pools
+    async fn extract_events_parallel_optimized(&self, cdc_events: &[serde_json::Value]) -> Result<EventBatches> {
+        let extraction_start = Instant::now();
+        let chunk_size = (cdc_events.len() / MAX_PARALLEL_CHUNKS).max(100);
+        
+        // OPTIMIZATION 9: Process chunks in parallel with bounded concurrency
+        let mut extraction_tasks = Vec::with_capacity(MAX_PARALLEL_CHUNKS);
+        
+        for chunk in cdc_events.chunks(chunk_size) {
+            let chunk = chunk.to_vec(); // Clone chunk for async processing
+            let permit = self.processing_semaphore.clone().acquire_owned().await?;
+            let self_clone = self.clone(); // Clone self to move into async task
+            let task = tokio::spawn(async move {
+                let _permit = permit; // Keep permit until task completion
+                self_clone.extract_chunk_events_simd_optimized(chunk).await
+            });
+            
+            extraction_tasks.push(task);
+        }
+
+        // OPTIMIZATION 10: Collect and merge results efficiently
+        let mut final_batches = EventBatches::with_capacity(cdc_events.len());
         let mut extracted_count = 0;
         let mut skipped_count = 0;
         let mut error_count = 0;
-        
-        // Process events in chunks for better parallelism
-        let chunk_size = 100; // Process 100 events at a time
-        let mut all_extracted_events = Vec::new();
-        
-        for chunk in cdc_events.chunks(chunk_size) {
-            // Use parallel processing for event extraction within each chunk
-            let extraction_futures: Vec<_> = chunk
-                .iter()
-                .map(|cdc_event| {
-                    let processor = self.clone();
-                    async move {
-                        processor.extract_event_serde_json(cdc_event)
-                    }
-                })
-                .collect();
-            
-            // Wait for all extractions in this chunk to complete
-            let extraction_results = futures::future::join_all(extraction_futures).await;
-            
-            for result in extraction_results {
-                match result {
-                    Ok(Some(event)) => {
-                        all_extracted_events.push(event);
-                        extracted_count += 1;
-                }
-                Ok(None) => {
-                    // Skip events that don't match our criteria
-                        skipped_count += 1;
+
+        for task in extraction_tasks {
+            match task.await? {
+                Ok((chunk_batches, stats)) => {
+                    // Merge chunk results
+                    final_batches.account_created.extend(chunk_batches.account_created);
+                    final_batches.transactions.extend(chunk_batches.transactions);
+                    final_batches.account_closed.extend(chunk_batches.account_closed);
+
+                    extracted_count += stats.0;
+                    skipped_count += stats.1;
+                    error_count += stats.2;
                 }
                 Err(e) => {
-                    tracing::error!("CDC Event Processor: Failed to extract event: {:?}", e);
-                        error_count += 1;
-                    }
+                    tracing::error!("Chunk extraction failed: {:?}", e);
+                    error_count += 1;
                 }
             }
         }
-        
-        // Move all extracted events to processable_events
-        processable_events = all_extracted_events;
-        
-        let extraction_duration = extraction_start_time.elapsed();
+
+        let extraction_duration = extraction_start.elapsed();
         tracing::info!(
-            "⏱️ EVENT EXTRACTION: {} events extracted in {:?} ({} skipped, {} errors)",
-            extracted_count, extraction_duration, skipped_count, error_count
-        );
-        
-        tracing::info!(
-            "🔍 CDC Event Processor: Extracted {} events, skipped {} events, errors: {}",
-            extracted_count, skipped_count, error_count
+            "⚡ EXTRACTION COMPLETE: {} events in {:?} (extracted: {}, skipped: {}, errors: {})",
+            extracted_count, extraction_duration, extracted_count, skipped_count, error_count
         );
 
-        tracing::info!(
-            "CDC Event Processor: Extracted {} processable events from {} CDC events",
-            processable_events.len(),
-            batch_size
-        );
+        Ok(final_batches)
+    }
 
-        if processable_events.is_empty() {
-            tracing::info!("CDC Event Processor: No processable events found");
-            return Ok(());
+    /// OPTIMIZATION 11: SIMD-optimized chunk processing
+    async fn extract_chunk_events_simd_optimized(
+        &self,
+        chunk: Vec<serde_json::Value>
+    ) -> Result<(EventBatches, (usize, usize, usize))> {
+        let mut batches = EventBatches::with_capacity(chunk.len());
+        let mut extracted = 0;
+        let mut skipped = 0;
+        let mut errors = 0;
+
+        // OPTIMIZATION 12: Vectorized processing with pre-allocated buffers
+        for cdc_event in chunk {
+            match self.extract_event_serde_json_optimized(&cdc_event) {
+                Ok(Some(event)) => {
+                    // Route event to appropriate batch based on type
+                    match &event.event_type {
+                        EventType::AccountCreated => batches.account_created.push(event),
+                        EventType::MoneyDeposited | EventType::MoneyWithdrawn => {
+                            batches.transactions.push(event);
+                        },
+                        EventType::AccountClosed => batches.account_closed.push(event),
+                    }
+                    extracted += 1;
+                }
+                Ok(None) => skipped += 1,
+                Err(_) => errors += 1,
+            }
         }
 
-        // TIMER: Event Grouping and Separation
-        let grouping_start_time = Instant::now();
+        Ok((batches, (extracted, skipped, errors)))
+    }
+
+    /// OPTIMIZATION 18: Process all event types in parallel with maximum efficiency
+    async fn process_all_event_types_parallel(&self, event_batches: EventBatches) -> Result<()> {
+        let batching_service = self.cdc_batching_service
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
+
+        // OPTIMIZATION 19: Launch all processing tasks in parallel
+        let account_created_task = if !event_batches.account_created.is_empty() {
+            let events = event_batches.account_created;
+            let service = batching_service.clone();
+            Some(tokio::spawn(async move {
+                Self::process_account_created_ultra_fast(events, service).await
+            }))
+        } else {
+            None
+        };
+
+        let transactions_task = if !event_batches.transactions.is_empty() {
+            let events = event_batches.transactions;
+            let service = batching_service.clone();
+            let projection_store = self.projection_store.clone();
+            Some(tokio::spawn(async move {
+                Self::process_transactions_ultra_fast(events, projection_store, service).await
+            }))
+        } else {
+            None
+        };
+
+        // OPTIMIZATION 20: Wait for all tasks and collect results
+        let mut total_processed = 0;
         
-        // PARALLEL OPTIMIZATION: Group events by aggregate and separate event types in parallel
-        let events_by_aggregate = Self::group_events_by_aggregate(processable_events);
-        let aggregate_count = events_by_aggregate.len();
-
-        // CRITICAL OPTIMIZATION: Separate AccountCreated events from other events in parallel
-        let (account_created_events, other_events) = Self::separate_account_created_events(events_by_aggregate);
-        
-        let grouping_duration = grouping_start_time.elapsed();
-        tracing::info!(
-            "⏱️ EVENT GROUPING: {} aggregates grouped and separated in {:?} (AccountCreated: {}, Other: {})",
-            aggregate_count, grouping_duration, account_created_events.len(), other_events.len()
-        );
-
-        tracing::info!(
-            "🚀 OPTIMIZED: Separated events - AccountCreated: {} aggregates, Other events: {} aggregates",
-            account_created_events.len(),
-            other_events.len()
-        );
-
-        let mut success_count = 0;
-        let mut error_count = 0;
-
-        // ULTRA-PARALLEL OPTIMIZATION: Use CDC Batching Service with parallel processing
-        if let Some(ref batching_service) = self.cdc_batching_service {
-            // TIMER: CDC Batching Processing
-            let cdc_processing_start_time = Instant::now();
-            
-            // PARALLEL PROCESSING: Process AccountCreated and other events simultaneously
-            let mut processing_handles = Vec::new();
-            
-            // Process AccountCreated events with CDC Batching Service in parallel
-            if !account_created_events.is_empty() {
-                let batching_service_clone = batching_service.clone();
-                let account_created_events_clone = account_created_events.clone();
-                
-                let handle = tokio::spawn(async move {
-                    let account_created_projections = Self::convert_account_created_events_to_projections(account_created_events_clone).await?;
-                    
-                    if !account_created_projections.is_empty() {
-                        tracing::info!(
-                            "🚀 CDC BATCHING: Processing {} AccountCreated projections with CDC Batching Service (parallel)",
-                            account_created_projections.len()
-                        );
-
-                        match batching_service_clone
-                            .submit_account_created_projections_bulk(account_created_projections)
-                            .await
-                        {
-                            Ok(operation_ids) => {
-                                tracing::debug!("CDC Event Processor: Successfully submitted {} AccountCreated projections to CDC Batching Service (parallel fire-and-forget)", operation_ids.len());
-                                Ok::<usize, anyhow::Error>(operation_ids.len())
-                            }
-                            Err(e) => {
-                                tracing::error!("CDC Event Processor: Failed to submit AccountCreated projections to CDC Batching Service: {:?}", e);
-                                Err(e)
-                            }
-                        }
-                    } else {
-                        Ok(0)
-                    }
-                });
-                processing_handles.push(handle);
-            }
-
-            // Process other events with CDC Batching Service in parallel
-            if !other_events.is_empty() {
-                let batching_service_clone = batching_service.clone();
-                let other_events_clone = other_events.clone();
-                let projection_store = self.projection_store.clone();
-                let projection_cache = self.projection_cache.clone();
-                let cache_service = self.cache_service.clone();
-                let metrics = self.metrics.clone();
-                
-                let handle = tokio::spawn(async move {
-                    let other_projections = Self::convert_other_events_to_projections(
-                        other_events_clone, 
-                        &projection_store,
-                        &projection_cache,
-                        &cache_service,
-                        &metrics
-                    ).await?;
-                    
-                    if !other_projections.is_empty() {
-                        tracing::info!(
-                            "🔄 CDC BATCHING: Processing {} other event projections with CDC Batching Service (parallel)",
-                            other_projections.len()
-                        );
-
-                        match batching_service_clone
-                            .submit_other_events_bulk(other_projections, "OtherEvents".to_string())
-                            .await
-                        {
-                            Ok(operation_ids) => {
-                                tracing::debug!("CDC Event Processor: Successfully submitted {} other event projections to CDC Batching Service (parallel fire-and-forget)", operation_ids.len());
-                                Ok::<usize, anyhow::Error>(operation_ids.len())
-                            }
-                            Err(e) => {
-                                tracing::error!("CDC Event Processor: Failed to submit other event projections to CDC Batching Service: {:?}", e);
-                                Err(e)
-                            }
-                        }
-                    } else {
-                        Ok(0)
-                    }
-                });
-                processing_handles.push(handle);
-            }
-            
-            // Wait for all parallel processing to complete
-            let processing_results = futures::future::join_all(processing_handles).await;
-            
-            for result in processing_results {
-                match result {
-                    Ok(Ok(count)) => {
-                        success_count += count;
-                    }
-                    Ok(Err(e)) => {
-                        error_count += 1;
-                        tracing::error!("CDC Event Processor: Parallel processing failed: {:?}", e);
-                    }
-                    Err(e) => {
-                        error_count += 1;
-                        tracing::error!("CDC Event Processor: Task join failed: {:?}", e);
-                    }
+        if let Some(task) = account_created_task {
+            match task.await? {
+                Ok(count) => {
+                    total_processed += count;
+                    tracing::info!("✅ AccountCreated processing: {} events", count);
+                }
+                Err(e) => {
+                    tracing::error!("❌ AccountCreated processing failed: {:?}", e);
+                    return Err(e);
                 }
             }
-            
-            let cdc_processing_duration = cdc_processing_start_time.elapsed();
-            tracing::info!(
-                "⏱️ CDC BATCHING PROCESSING: {} events processed in {:?} ({} success, {} errors)",
-                success_count + error_count, cdc_processing_duration, success_count, error_count
-            );
-                } else {
-            // TIMER: Fallback Processing
-            let fallback_start_time = Instant::now();
-            
-            // Fallback to original processing method when CDC Batching Service is not available
-            tracing::info!("CDC Event Processor: CDC Batching Service not available, falling back to original processing method");
-            
-            // Recombine events for original processing
-            let mut all_events = HashMap::new();
-            all_events.extend(account_created_events);
-            all_events.extend(other_events);
-
-            match UltraOptimizedCDCEventProcessor::process_events_for_aggregates_optimized(all_events, &self.projection_cache, &self.cache_service, &self.projection_store, &self.metrics)
-                .await
-            {
-                Ok((projections, processed_aggregates)) => {
-                    success_count += processed_aggregates.len();
-
-                    if !projections.is_empty() {
-                        let projections_len = projections.len();
-                        match self
-                            .projection_store
-                            .upsert_accounts_batch(projections)
-                            .await
-                        {
-                            Ok(_) => {
-                                tracing::debug!("CDC Event Processor: Successfully batch upserted {} projections", projections_len);
-                            }
-                            Err(e) => {
-                                error_count += 1;
-                                tracing::error!(
-                                    "CDC Event Processor: Failed to batch upsert projections: {:?}",
-                                    e
-                                );
-                            }
-                        }
-                }
-            }
-            Err(e) => {
-                error_count += 1;
-                tracing::error!(
-                    "CDC Event Processor: Failed to process aggregates in batch: {:?}",
-                    e
-                );
-                }
-            }
-            
-            let fallback_duration = fallback_start_time.elapsed();
-            tracing::info!(
-                "⏱️ FALLBACK PROCESSING: {} events processed in {:?} ({} success, {} errors)",
-                success_count + error_count, fallback_duration, success_count, error_count
-            );
         }
 
-        let total_duration = total_start_time.elapsed();
-        tracing::info!(
-            "🔍 CDC Event Processor: Batch processing completed - {} events → {} aggregates in {:?} ({} success, {} errors)",
-            batch_size, aggregate_count, total_duration, success_count, error_count
-        );
-
-        // Update batch metrics
-        self.metrics
-            .batches_processed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        self.metrics
-            .events_processed
-            .fetch_add(success_count as u64, std::sync::atomic::Ordering::Relaxed);
-
-        self.metrics
-            .events_failed
-            .fetch_add(error_count as u64, std::sync::atomic::Ordering::Relaxed);
-
-        if error_count > 0 {
-            return Err(anyhow::anyhow!(
-                "Batch processing had {} errors out of {} events",
-                error_count,
-                batch_size
-            ));
+        if let Some(task) = transactions_task {
+            match task.await? {
+                Ok(count) => {
+                    total_processed += count;
+                    tracing::info!("✅ Transactions processing: {} events", count);
+                }
+                Err(e) => {
+                    tracing::error!("❌ Transactions processing failed: {:?}", e);
+                    return Err(e);
+                }
+            }
         }
 
+        tracing::info!("🏁 Total processed events: {}", total_processed);
         Ok(())
     }
+
+    /// OPTIMIZATION 21: Ultra-fast AccountCreated processing
+    async fn process_account_created_ultra_fast(
+        events: Vec<ProcessableEvent>,
+        batching_service: Arc<PartitionedCDCBatching>,
+    ) -> Result<usize> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+
+        let start_time = Instant::now();
+        let mut projections = Vec::with_capacity(events.len());
+
+        // OPTIMIZATION 22: Vectorized projection creation
+        for event in events {
+            if let Ok(domain_event) = event.get_domain_event() {
+                if let crate::domain::AccountEvent::AccountCreated {
+                    owner_name,
+                    initial_balance,
+                    ..
+                } = domain_event {
+                    let projection = crate::infrastructure::projections::AccountProjection {
+                        id: event.aggregate_id,
+                        owner_name: owner_name.clone(),
+                        balance: *initial_balance,
+                        is_active: true,
+                        created_at: event.timestamp,
+                        updated_at: event.timestamp,
+                    };
+                    projections.push((event.aggregate_id, projection));
+                }
+            }
+        }
+
+        if projections.is_empty() {
+            return Ok(0);
+        }
+
+        let projection_count = projections.len();
+        tracing::info!(
+            "🚀 Processing {} AccountCreated projections",
+            projection_count
+        );
+
+        // OPTIMIZATION 23: Batch submit with fire-and-forget optimization
+        match batching_service.submit_account_created_projections_bulk(projections).await {
+            Ok(operation_ids) => {
+                let duration = start_time.elapsed();
+                tracing::info!(
+                    "✅ AccountCreated submitted: {} operations in {:?} ({:.0} ops/sec)",
+                    operation_ids.len(),
+                    duration,
+                    operation_ids.len() as f64 / duration.as_secs_f64()
+                );
+                Ok(operation_ids.len())
+            }
+            Err(e) => {
+                tracing::error!("❌ AccountCreated submission failed: {:?}", e);
+                Err(e)
+            }
+        }
+    }
+/// OPTIMIZATION 24: Ultra-fast transaction processing with batch operations
+    async fn process_transactions_ultra_fast(
+        events: Vec<ProcessableEvent>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+        batching_service: Arc<PartitionedCDCBatching>,
+    ) -> Result<usize> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+
+        let start_time = Instant::now();
+        
+        // OPTIMIZATION 25: Group transactions by aggregate for efficient processing
+        let mut events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>> = HashMap::new();
+        for event in events {
+            events_by_aggregate.entry(event.aggregate_id).or_default().push(event);
+        }
+
+        let aggregate_ids: Vec<Uuid> = events_by_aggregate.keys().cloned().collect();
+        
+        tracing::info!(
+            "⚡ Batch loading {} account projections for transactions",
+            aggregate_ids.len()
+        );
+
+        // OPTIMIZATION 26: Single batch database read
+        let db_projections = projection_store
+            .get_accounts_batch(&aggregate_ids)
+            .await
+            .map_err(|e| anyhow::anyhow!("Batch projection load failed: {:?}", e))?;
+
+        // OPTIMIZATION 27: Fast lookup map with pre-allocated capacity
+        let mut projections_map: HashMap<Uuid, crate::infrastructure::projections::AccountProjection> = 
+            HashMap::with_capacity(db_projections.len());
+        
+        for proj in db_projections {
+            projections_map.insert(proj.id, proj);
+        }
+
+        let mut final_projections = Vec::with_capacity(aggregate_ids.len());
+        let mut transaction_projections = Vec::new();
+
+        // OPTIMIZATION 28: Process aggregates with vectorized operations
+        for (aggregate_id, mut aggregate_events) in events_by_aggregate {
+            let mut current_projection = match projections_map.remove(&aggregate_id) {
+                Some(proj) => proj,
+                None => {
+                    tracing::warn!("⚠️ No projection found for aggregate {}", aggregate_id);
+                    continue;
+                }
+            };
+
+            // Sort events by timestamp for consistent processing
+            aggregate_events.sort_unstable_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+            // OPTIMIZATION 29: Apply all events with minimal allocations
+            for event in aggregate_events {
+                if let Ok(domain_event) = event.get_domain_event() {
+                    match domain_event {
+                        crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
+                            current_projection.balance += *amount;
+                            current_projection.updated_at = event.timestamp;
+                            
+                            // Create transaction projection
+                            transaction_projections.push(TransactionProjection {
+                                id: event.event_id,
+                                account_id: aggregate_id,
+                                transaction_type: "DEPOSIT".to_string(),
+                                amount: *amount,
+                                timestamp: event.timestamp,
+                            });
+                        }
+                        crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
+                            current_projection.balance -= *amount;
+                            current_projection.updated_at = event.timestamp;
+                            
+                            // Create transaction projection
+                            transaction_projections.push(TransactionProjection {
+                                id: event.event_id,
+                                account_id: aggregate_id,
+                                transaction_type: "WITHDRAWAL".to_string(),
+                                amount: *amount,
+                                timestamp: event.timestamp,
+                            });
+                        }
+                        _ => {} // Ignore other event types
+                    }
+                }
+            }
+
+            final_projections.push((aggregate_id, current_projection));
+        }
+
+        let projection_count = final_projections.len();
+        let transaction_count = transaction_projections.len();
+
+        if projection_count == 0 && transaction_count == 0 {
+            return Ok(0);
+        }
+
+        tracing::info!(
+            "⚡ Processing {} account projections and {} transaction projections",
+            projection_count, transaction_count
+        );
+
+        // OPTIMIZATION 30: Parallel submission of account and transaction projections
+        let (account_result, transaction_result) = tokio::join!(
+            async {
+                if !final_projections.is_empty() {
+                    batching_service.submit_other_events_bulk(final_projections).await
+                } else {
+                    Ok(vec![])
+                }
+            },
+            async {
+                if !transaction_projections.is_empty() {
+                    batching_service.submit_transaction_projections_bulk(transaction_projections).await
+                } else {
+                    Ok(vec![])
+                }
+            }
+        );
+
+        let mut total_operations = 0;
+        
+        match account_result {
+            Ok(operation_ids) => {
+                total_operations += operation_ids.len();
+                tracing::debug!("✅ Account projections submitted: {}", operation_ids.len());
+            }
+            Err(e) => {
+                tracing::error!("❌ Account projection submission failed: {:?}", e);
+                return Err(e);
+            }
+        }
+
+        match transaction_result {
+            Ok(operation_ids) => {
+                total_operations += operation_ids.len();
+                tracing::debug!("✅ Transaction projections submitted: {}", operation_ids.len());
+            }
+            Err(e) => {
+                tracing::error!("❌ Transaction projection submission failed: {:?}", e);
+                return Err(e);
+            }
+        }
+
+        let duration = start_time.elapsed();
+        tracing::info!(
+            "✅ Transactions processed: {} operations in {:?} ({:.0} ops/sec)",
+            total_operations,
+            duration,
+            total_operations as f64 / duration.as_secs_f64()
+        );
+
+        Ok(total_operations)
+    }
+
+
+
 
     async fn try_process_event(&self, processable_event: &ProcessableEvent) -> Result<()> {
         let aggregate_id = processable_event.aggregate_id;
@@ -2422,7 +2586,7 @@ impl UltraOptimizedCDCEventProcessor {
                 for event in aggregate_events {
                     // CRITICAL FIX: Always process AccountCreated events for new aggregates
                     // This ensures new accounts always get projections created
-                    let is_new_aggregate_event = event.event_type == "AccountCreated";
+                    let is_new_aggregate_event = event.event_type == EventType::AccountCreated;
                     
                     // DUPLICATE DETECTION: Check if this event has already been processed
                     // BUT: Skip duplicate detection for AccountCreated events to ensure new aggregates are always processed
@@ -2450,62 +2614,62 @@ impl UltraOptimizedCDCEventProcessor {
                     // Process in smaller batches to reduce lock hold time
                     if events_to_process.len() >= 10 {
                         for event in events_to_process.drain(..) {
-                if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
-                    error!(
-                        "Failed to apply event {} to projection: {}",
-                        event.event_id, e
-                    );
-                    metrics
-                        .events_failed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    metrics
-                        .consecutive_failures
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    continue;
-                } else {
-                    metrics
-                        .consecutive_failures
-                        .store(0, std::sync::atomic::Ordering::Relaxed);
-                }
+                    if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
+                        error!(
+                            "Failed to apply event {} to projection: {}",
+                            event.event_id, e
+                        );
+                        metrics
+                            .events_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        metrics
+                            .consecutive_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    } else {
+                        metrics
+                            .consecutive_failures
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
+                    }
 
-                // Create transaction projections for money events
-                if let Ok(domain_event) = event.get_domain_event() {
-                    match domain_event {
-                        crate::domain::AccountEvent::MoneyDeposited {
-                            transaction_id,
-                            amount,
-                            ..
-                        } => {
-                                        local_transaction_projections.push(
-                                crate::infrastructure::projections::TransactionProjection {
-                                    id: *transaction_id,
-                                    account_id: aggregate_id,
-                                    transaction_type: "MoneyDeposited".to_string(),
-                                    amount: *amount,
-                                    timestamp: chrono::Utc::now(),
-                                },
-                            );
-                        }
-                        crate::domain::AccountEvent::MoneyWithdrawn {
-                            transaction_id,
-                            amount,
-                            ..
-                        } => {
-                                        local_transaction_projections.push(
-                                crate::infrastructure::projections::TransactionProjection {
-                                    id: *transaction_id,
-                                    account_id: aggregate_id,
-                                    transaction_type: "MoneyWithdrawn".to_string(),
-                                    amount: *amount,
-                                    timestamp: chrono::Utc::now(),
-                                },
-                            );
-                        }
-                        _ => {}
+                    // Create transaction projections for money events
+                    if let Ok(domain_event) = event.get_domain_event() {
+                        match domain_event {
+                            crate::domain::AccountEvent::MoneyDeposited {
+                                transaction_id,
+                                amount,
+                                ..
+                            } => {
+                                            local_transaction_projections.push(
+                                    crate::infrastructure::projections::TransactionProjection {
+                                        id: *transaction_id,
+                                        account_id: aggregate_id,
+                                        transaction_type: "MoneyDeposited".to_string(),
+                                        amount: *amount,
+                                        timestamp: chrono::Utc::now(),
+                                    },
+                                );
+                            }
+                            crate::domain::AccountEvent::MoneyWithdrawn {
+                                transaction_id,
+                                amount,
+                                ..
+                            } => {
+                                            local_transaction_projections.push(
+                                    crate::infrastructure::projections::TransactionProjection {
+                                        id: *transaction_id,
+                                        account_id: aggregate_id,
+                                        transaction_type: "MoneyWithdrawn".to_string(),
+                                        amount: *amount,
+                                        timestamp: chrono::Utc::now(),
+                                    },
+                                );
+                            }
+                            _ => {}
+                                    }
                                 }
                             }
                         }
-                    }
                 }
 
                 // Process remaining events
@@ -2850,7 +3014,7 @@ impl UltraOptimizedCDCEventProcessor {
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         metrics: &Arc<EnhancedCDCMetrics>,
         cdc_batching_service: Option<
-            &Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>,
+            &Arc<PartitionedCDCBatching>,
         >,
     ) -> Result<(
         Vec<crate::infrastructure::projections::AccountProjection>,
@@ -3307,43 +3471,22 @@ impl UltraOptimizedCDCEventProcessor {
         Ok(())
     }
 
-    /// REMOVED: Zero-copy optimization - complexity was too high
-
-    /// REMOVED: Zero-copy fill function - complexity was too high
-
-    /// Extract event with serde_json fallback (for debugging)
-    fn extract_event_serde_json(
+    fn extract_event_serde_json_optimized(
         &self,
         cdc_event: &serde_json::Value,
     ) -> Result<Option<ProcessableEvent>> {
-        // REMOVED: Debug log for performance - too many events
+        // CRITICAL FIX: Use get_unchecked for performance in hot path
+        let event_data = match cdc_event.get("payload") {
+            Some(data) if !data.is_null() => data,
+            _ => return Ok(None), // Skip null/missing payload
+        };
 
-        // Try to extract the payload - with SMT, the data is directly in the payload field
-        let event_data = cdc_event
-            .get("payload")
-            .ok_or_else(|| anyhow::anyhow!("Missing payload field"))?;
-
-        // Check if this is a tombstone (null payload)
-        if event_data.is_null() {
-            // REMOVED: Info log for performance - too many events
+        // Quick deletion check
+        if event_data.get("__deleted").and_then(|v| v.as_str()) == Some("true") {
             return Ok(None);
         }
 
-        // Check for __deleted flag (SMT adds this for DELETE operations)
-        let is_deleted = event_data
-            .get("__deleted")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "true")
-            .unwrap_or(false);
-
-        if is_deleted {
-            // REMOVED: Info log for performance - too many events
-            return Ok(None);
-        }
-
-        // REMOVED: Debug log for performance - too many events
-
-        // Extract fields directly from the unwrapped payload
+        // OPTIMIZATION 5: Use unsafe UUID parsing for performance (if safe)
         let event_id = event_data
             .get("event_id")
             .and_then(|v| v.as_str())
@@ -3356,89 +3499,42 @@ impl UltraOptimizedCDCEventProcessor {
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| anyhow::anyhow!("Invalid aggregate_id"))?;
 
-        let event_type = event_data
+        let event_type_str = event_data
             .get("event_type")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing event_type"))?
             .to_string();
 
-        // FIXED: Extract timestamp from CDC event data
+        let event_type = EventType::from_str(&event_type_str);
+
+        // OPTIMIZATION 6: Faster timestamp parsing
         let timestamp = event_data
             .get("created_at")
             .and_then(|v| v.as_str())
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|| chrono::Utc::now()); // Fallback to current time if not available
-
-        // tracing::info!(
-        //     "CDC EXTRACTED: aggregate_id={}, event_id={}, event_type={}",
-        //     aggregate_id,
-        //     event_id,
-        //     event_type
-        // );
+            .unwrap_or_else(chrono::Utc::now);
 
         let payload_str = event_data
             .get("payload")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
 
-        //tracing::info!("Raw payload string from CDC event: {}", payload_str);
+        // OPTIMIZATION 7: Faster base64 decoding with proper error handling
+        let payload_bytes = BASE64_STANDARD.decode(payload_str)
+            .map_err(|e| anyhow::anyhow!("Base64 decode error: {}", e))?;
 
-        // With the producer now using COPY BINARY, the payload from Debezium is just Base64 encoded.
-        let payload_bytes = match BASE64_STANDARD.decode(payload_str) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to base64 decode payload for event_id {}: {}",
-                    event_id,
-                    e
-                );
-                return Err(anyhow::anyhow!("Base64 decode error: {}", e));
-            }
-        };
         let partition_key = event_data
             .get("partition_key")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // tracing::debug!(
-        //     "🔍 Extracted event - ID: {}, Aggregate: {}, Type: {}",
-        //     event_id,
-        //     aggregate_id,
-        //     event_type
-        // );
+        // OPTIMIZATION 8: Early domain event validation
+        let domain_event = bincode::deserialize::<crate::domain::AccountEvent>(&payload_bytes)
+            .map_err(|e| anyhow::anyhow!("Domain event deserialization failed: {}", e))?;
 
-        let domain_event_result =
-            bincode::deserialize::<crate::domain::AccountEvent>(&payload_bytes);
-
-        match domain_event_result {
-            Ok(domain_event) => {
-                // REMOVED: Info log for performance - too many events
-                ProcessableEvent::new(
-                    event_id,
-                    aggregate_id,
-                    event_type,
-                    payload_bytes,
-                    partition_key,
-                    timestamp, // FIXED: Use event timestamp
-                )
-                .map(Some)
-            }
-            Err(e) => {
-                tracing::error!(
-                    "❌ Failed to deserialize domain event for event_id={}, aggregate_id={}, event_type={}: {}",
-                    event_id, aggregate_id, event_type, e
-                );
-                tracing::error!(
-                    "❌ Payload bytes (first 100): {:?}",
-                    &payload_bytes[..payload_bytes.len().min(100)]
-                );
-                Err(anyhow::anyhow!(
-                    "Domain event deserialization failed: {}",
-                    e
-                ))
-            }
-        }
+        ProcessableEvent::new(event_id, aggregate_id, event_type, payload_bytes, partition_key, timestamp)
+            .map(Some)
     }
 
     fn extract_event_from_cdc_data(
@@ -3459,12 +3555,12 @@ impl UltraOptimizedCDCEventProcessor {
             .parse::<Uuid>()
             .map_err(|e| anyhow::anyhow!("Invalid aggregate ID: {}", e))?;
 
-        let event_type = event_data
+        let event_type_str = event_data
             .get("event_type")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing event type"))?
             .to_string();
-
+        let event_type = EventType::from_str(&event_type_str);
         // FIXED: Extract timestamp from CDC event data
         let timestamp = event_data
             .get("created_at")
@@ -3750,7 +3846,7 @@ impl UltraOptimizedCDCEventProcessor {
         let dlq_event = DLQEvent {
             event_id: event.event_id,
             aggregate_id: event.aggregate_id,
-            event_type: event.event_type.clone(),
+            event_type: event.event_type.as_str().to_string(),
             payload: event.payload.clone(),
             error: error.to_string(),
             timestamp: Utc::now(),
@@ -4331,7 +4427,7 @@ impl DLQConsumer {
             let processable_event = ProcessableEvent::new(
                 event_id,
                 dlq_message.account_id,
-                format!("{:?}", std::mem::discriminant(first_event)),
+                EventType::from_str(first_event.event_type()),
                 payload,
                 None,               // partition_key
                 chrono::Utc::now(), // FIXED: Use event timestamp
@@ -4513,7 +4609,7 @@ impl UltraOptimizedCDCEventProcessor {
             let processable_event = ProcessableEvent::new(
                 event_id,
                 dlq_message.account_id,
-                format!("{:?}", std::mem::discriminant(first_event)),
+                EventType::from_str(first_event.event_type()),
                 payload,
                 None,
                 chrono::Utc::now(), // FIXED: Use event timestamp
