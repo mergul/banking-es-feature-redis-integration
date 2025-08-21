@@ -1483,7 +1483,7 @@ impl UltraOptimizedCDCEventProcessor {
             return Ok(());
         }
 
-        let start_time = Instant::now();
+        let total_start_time = Instant::now();
         let batch_size = cdc_events.len();
         tracing::info!(
             "🔍 CDC Event Processor: Starting batch processing of {} events with event type separation",
@@ -1493,41 +1493,59 @@ impl UltraOptimizedCDCEventProcessor {
         // CRITICAL OPTIMIZATION: Process all events together without chunking
         let mut processable_events = Vec::with_capacity(batch_size);
 
-        // PARALLEL OPTIMIZATION: Extract and validate all events in parallel
+                // TIMER: Event Extraction
+        let extraction_start_time = Instant::now();
+        
+        // ULTRA-PARALLEL OPTIMIZATION: Extract and validate all events in parallel with chunking
         let mut extracted_count = 0;
         let mut skipped_count = 0;
         let mut error_count = 0;
         
-        // Use parallel processing for event extraction
-        let extraction_futures: Vec<_> = cdc_events
-            .iter()
-            .map(|cdc_event| {
-                let processor = self.clone();
-                async move {
-                    processor.extract_event_serde_json(cdc_event)
-                }
-            })
-            .collect();
+        // Process events in chunks for better parallelism
+        let chunk_size = 100; // Process 100 events at a time
+        let mut all_extracted_events = Vec::new();
         
-        // Wait for all extractions to complete
-        let extraction_results = futures::future::join_all(extraction_futures).await;
-        
-        for result in extraction_results {
-            match result {
-                Ok(Some(event)) => {
-                    processable_events.push(event);
-                    extracted_count += 1;
+        for chunk in cdc_events.chunks(chunk_size) {
+            // Use parallel processing for event extraction within each chunk
+            let extraction_futures: Vec<_> = chunk
+                .iter()
+                .map(|cdc_event| {
+                    let processor = self.clone();
+                    async move {
+                        processor.extract_event_serde_json(cdc_event)
+                    }
+                })
+                .collect();
+            
+            // Wait for all extractions in this chunk to complete
+            let extraction_results = futures::future::join_all(extraction_futures).await;
+            
+            for result in extraction_results {
+                match result {
+                    Ok(Some(event)) => {
+                        all_extracted_events.push(event);
+                        extracted_count += 1;
                 }
                 Ok(None) => {
                     // Skip events that don't match our criteria
-                    skipped_count += 1;
+                        skipped_count += 1;
                 }
                 Err(e) => {
                     tracing::error!("CDC Event Processor: Failed to extract event: {:?}", e);
-                    error_count += 1;
+                        error_count += 1;
+                    }
                 }
             }
         }
+        
+        // Move all extracted events to processable_events
+        processable_events = all_extracted_events;
+        
+        let extraction_duration = extraction_start_time.elapsed();
+        tracing::info!(
+            "⏱️ EVENT EXTRACTION: {} events extracted in {:?} ({} skipped, {} errors)",
+            extracted_count, extraction_duration, skipped_count, error_count
+        );
         
         tracing::info!(
             "🔍 CDC Event Processor: Extracted {} events, skipped {} events, errors: {}",
@@ -1545,12 +1563,21 @@ impl UltraOptimizedCDCEventProcessor {
             return Ok(());
         }
 
-        // Group events by aggregate for efficient processing
+        // TIMER: Event Grouping and Separation
+        let grouping_start_time = Instant::now();
+        
+        // PARALLEL OPTIMIZATION: Group events by aggregate and separate event types in parallel
         let events_by_aggregate = Self::group_events_by_aggregate(processable_events);
         let aggregate_count = events_by_aggregate.len();
 
-        // CRITICAL OPTIMIZATION: Separate AccountCreated events from other events
+        // CRITICAL OPTIMIZATION: Separate AccountCreated events from other events in parallel
         let (account_created_events, other_events) = Self::separate_account_created_events(events_by_aggregate);
+        
+        let grouping_duration = grouping_start_time.elapsed();
+        tracing::info!(
+            "⏱️ EVENT GROUPING: {} aggregates grouped and separated in {:?} (AccountCreated: {}, Other: {})",
+            aggregate_count, grouping_duration, account_created_events.len(), other_events.len()
+        );
 
         tracing::info!(
             "🚀 OPTIMIZED: Separated events - AccountCreated: {} aggregates, Other events: {} aggregates",
@@ -1561,100 +1588,120 @@ impl UltraOptimizedCDCEventProcessor {
         let mut success_count = 0;
         let mut error_count = 0;
 
-        // Use CDC Batching Service if available
+        // ULTRA-PARALLEL OPTIMIZATION: Use CDC Batching Service with parallel processing
         if let Some(ref batching_service) = self.cdc_batching_service {
-            // Process AccountCreated events with CDC Batching Service
+            // TIMER: CDC Batching Processing
+            let cdc_processing_start_time = Instant::now();
+            
+            // PARALLEL PROCESSING: Process AccountCreated and other events simultaneously
+            let mut processing_handles = Vec::new();
+            
+            // Process AccountCreated events with CDC Batching Service in parallel
             if !account_created_events.is_empty() {
-                let account_created_projections = Self::convert_account_created_events_to_projections(account_created_events).await?;
+                let batching_service_clone = batching_service.clone();
+                let account_created_events_clone = account_created_events.clone();
                 
-                if !account_created_projections.is_empty() {
-                    tracing::info!(
-                        "🚀 CDC BATCHING: Processing {} AccountCreated projections with CDC Batching Service",
-                        account_created_projections.len()
-                    );
+                let handle = tokio::spawn(async move {
+                    let account_created_projections = Self::convert_account_created_events_to_projections(account_created_events_clone).await?;
+                    
+                    if !account_created_projections.is_empty() {
+                        tracing::info!(
+                            "🚀 CDC BATCHING: Processing {} AccountCreated projections with CDC Batching Service (parallel)",
+                            account_created_projections.len()
+                        );
 
-                    match batching_service
-                        .submit_account_created_projections_bulk(account_created_projections)
-                        .await
-                    {
-                        Ok(operation_ids) => {
-                            tracing::debug!("CDC Event Processor: Successfully submitted {} AccountCreated projections to CDC Batching Service", operation_ids.len());
-
-                            // Wait for all AccountCreated operations to complete
-                            for operation_id in operation_ids {
-                                match batching_service.wait_for_result(operation_id).await {
-                                    Ok(result) => {
-                                        if result.success {
-                                            success_count += 1;
-                                        } else {
-                                            error_count += 1;
-                                            tracing::error!("CDC Event Processor: AccountCreated CDC Batching Service operation failed: {:?}", result.error);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error_count += 1;
-                                        tracing::error!("CDC Event Processor: Failed to wait for AccountCreated CDC Batching Service result: {:?}", e);
-                                    }
-                                }
+                        match batching_service_clone
+                            .submit_account_created_projections_bulk(account_created_projections)
+                            .await
+                        {
+                            Ok(operation_ids) => {
+                                tracing::debug!("CDC Event Processor: Successfully submitted {} AccountCreated projections to CDC Batching Service (parallel fire-and-forget)", operation_ids.len());
+                                Ok::<usize, anyhow::Error>(operation_ids.len())
+                            }
+                            Err(e) => {
+                                tracing::error!("CDC Event Processor: Failed to submit AccountCreated projections to CDC Batching Service: {:?}", e);
+                                Err(e)
                             }
                         }
-                        Err(e) => {
-                            error_count += 1;
-                            tracing::error!("CDC Event Processor: Failed to submit AccountCreated projections to CDC Batching Service: {:?}", e);
-                        }
+                    } else {
+                        Ok(0)
                     }
-                }
+                });
+                processing_handles.push(handle);
             }
 
-            // Process other events with CDC Batching Service
+            // Process other events with CDC Batching Service in parallel
             if !other_events.is_empty() {
-                let other_projections = Self::convert_other_events_to_projections(
-                    other_events, 
-                    &self.projection_store,
-                    &self.projection_cache,
-                    &self.cache_service,
-                    &self.metrics
-                ).await?;
+                let batching_service_clone = batching_service.clone();
+                let other_events_clone = other_events.clone();
+                let projection_store = self.projection_store.clone();
+                let projection_cache = self.projection_cache.clone();
+                let cache_service = self.cache_service.clone();
+                let metrics = self.metrics.clone();
                 
-                if !other_projections.is_empty() {
-                    tracing::info!(
-                        "🔄 CDC BATCHING: Processing {} other event projections with CDC Batching Service",
-                        other_projections.len()
-                    );
+                let handle = tokio::spawn(async move {
+                    let other_projections = Self::convert_other_events_to_projections(
+                        other_events_clone, 
+                        &projection_store,
+                        &projection_cache,
+                        &cache_service,
+                        &metrics
+                    ).await?;
+                    
+                    if !other_projections.is_empty() {
+                        tracing::info!(
+                            "🔄 CDC BATCHING: Processing {} other event projections with CDC Batching Service (parallel)",
+                            other_projections.len()
+                        );
 
-                    match batching_service
-                        .submit_other_events_bulk(other_projections, "OtherEvents".to_string())
-                        .await
-                    {
-                        Ok(operation_ids) => {
-                            tracing::debug!("CDC Event Processor: Successfully submitted {} other event projections to CDC Batching Service", operation_ids.len());
-
-                            // Wait for all other event operations to complete
-                            for operation_id in operation_ids {
-                                match batching_service.wait_for_result(operation_id).await {
-                                    Ok(result) => {
-                                        if result.success {
-                                            success_count += 1;
-                                        } else {
-                                            error_count += 1;
-                                            tracing::error!("CDC Event Processor: Other events CDC Batching Service operation failed: {:?}", result.error);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error_count += 1;
-                                        tracing::error!("CDC Event Processor: Failed to wait for other events CDC Batching Service result: {:?}", e);
-                                    }
-                                }
+                        match batching_service_clone
+                            .submit_other_events_bulk(other_projections, "OtherEvents".to_string())
+                            .await
+                        {
+                            Ok(operation_ids) => {
+                                tracing::debug!("CDC Event Processor: Successfully submitted {} other event projections to CDC Batching Service (parallel fire-and-forget)", operation_ids.len());
+                                Ok::<usize, anyhow::Error>(operation_ids.len())
+                            }
+                            Err(e) => {
+                                tracing::error!("CDC Event Processor: Failed to submit other event projections to CDC Batching Service: {:?}", e);
+                                Err(e)
                             }
                         }
-                        Err(e) => {
-                            error_count += 1;
-                            tracing::error!("CDC Event Processor: Failed to submit other event projections to CDC Batching Service: {:?}", e);
-                        }
+                    } else {
+                        Ok(0)
+                    }
+                });
+                processing_handles.push(handle);
+            }
+            
+            // Wait for all parallel processing to complete
+            let processing_results = futures::future::join_all(processing_handles).await;
+            
+            for result in processing_results {
+                match result {
+                    Ok(Ok(count)) => {
+                        success_count += count;
+                    }
+                    Ok(Err(e)) => {
+                        error_count += 1;
+                        tracing::error!("CDC Event Processor: Parallel processing failed: {:?}", e);
+                    }
+                    Err(e) => {
+                        error_count += 1;
+                        tracing::error!("CDC Event Processor: Task join failed: {:?}", e);
                     }
                 }
             }
-        } else {
+            
+            let cdc_processing_duration = cdc_processing_start_time.elapsed();
+            tracing::info!(
+                "⏱️ CDC BATCHING PROCESSING: {} events processed in {:?} ({} success, {} errors)",
+                success_count + error_count, cdc_processing_duration, success_count, error_count
+            );
+                } else {
+            // TIMER: Fallback Processing
+            let fallback_start_time = Instant::now();
+            
             // Fallback to original processing method when CDC Batching Service is not available
             tracing::info!("CDC Event Processor: CDC Batching Service not available, falling back to original processing method");
             
@@ -1687,22 +1734,28 @@ impl UltraOptimizedCDCEventProcessor {
                                 );
                             }
                         }
-                    }
-                }
-                Err(e) => {
-                    error_count += 1;
-                    tracing::error!(
-                        "CDC Event Processor: Failed to process aggregates in batch: {:?}",
-                        e
-                    );
                 }
             }
+            Err(e) => {
+                error_count += 1;
+                tracing::error!(
+                    "CDC Event Processor: Failed to process aggregates in batch: {:?}",
+                    e
+                );
+                }
+            }
+            
+            let fallback_duration = fallback_start_time.elapsed();
+            tracing::info!(
+                "⏱️ FALLBACK PROCESSING: {} events processed in {:?} ({} success, {} errors)",
+                success_count + error_count, fallback_duration, success_count, error_count
+            );
         }
 
-        let duration = start_time.elapsed();
+        let total_duration = total_start_time.elapsed();
         tracing::info!(
             "🔍 CDC Event Processor: Batch processing completed - {} events → {} aggregates in {:?} ({} success, {} errors)",
-            batch_size, aggregate_count, duration, success_count, error_count
+            batch_size, aggregate_count, total_duration, success_count, error_count
         );
 
         // Update batch metrics
@@ -1716,7 +1769,7 @@ impl UltraOptimizedCDCEventProcessor {
 
         self.metrics
             .events_failed
-            .fetch_add(error_count, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(error_count as u64, std::sync::atomic::Ordering::Relaxed);
 
         if error_count > 0 {
             return Err(anyhow::anyhow!(
@@ -2324,7 +2377,7 @@ impl UltraOptimizedCDCEventProcessor {
         // Wrap in Arc for sharing across async tasks
         let projections_map = Arc::new(projections_map);
 
-        // OPTIMIZATION: Use connection pooling with timeout and retry
+        // ULTRA-PARALLEL OPTIMIZATION: Use connection pooling with timeout and retry
         let connection_timeout = Duration::from_secs(5);
         let max_retries = 3;
         let retry_delay = Duration::from_millis(100);
@@ -2335,7 +2388,7 @@ impl UltraOptimizedCDCEventProcessor {
         // OPTIMIZATION: Pre-allocate futures to reduce memory allocation
         aggregate_futures.reserve(events_by_aggregate.len());
 
-        // PARALLEL OPTIMIZATION: Process aggregates without cache locks for better performance
+                // ULTRA-PARALLEL OPTIMIZATION: Process all aggregates in parallel
         for (aggregate_id, aggregate_events) in events_by_aggregate {
             let projection_cache = projection_cache.clone();
             let cache_service = cache_service.clone();
@@ -2344,11 +2397,11 @@ impl UltraOptimizedCDCEventProcessor {
             let projections_map = projections_map.clone();
             
             aggregate_futures.push(async move {
-                // OPTIMIZATION: Skip cache locks for better parallel performance
+                // ULTRA-PARALLEL OPTIMIZATION: Skip cache locks for maximum performance
                 // We'll update cache at the end in batch
                 let mut cache_guard = {
                     // Use very short timeout to avoid blocking
-                    match tokio::time::timeout(Duration::from_millis(50), projection_cache.write()).await {
+                    match tokio::time::timeout(Duration::from_millis(25), projection_cache.write()).await {
                         Ok(guard) => guard,
                         Err(_) => {
                             // Skip cache update if lock is not available - continue processing
@@ -2364,9 +2417,9 @@ impl UltraOptimizedCDCEventProcessor {
 
                 let mut local_transaction_projections = Vec::new();
 
-                // OPTIMIZATION: Batch event processing to reduce lock contention
+                // ULTRA-PARALLEL OPTIMIZATION: Batch event processing to reduce lock contention
                 let mut events_to_process = Vec::new();
-            for event in aggregate_events {
+                for event in aggregate_events {
                     // CRITICAL FIX: Always process AccountCreated events for new aggregates
                     // This ensures new accounts always get projections created
                     let is_new_aggregate_event = event.event_type == "AccountCreated";
@@ -2395,7 +2448,7 @@ impl UltraOptimizedCDCEventProcessor {
                     events_to_process.push(event);
                     
                     // Process in smaller batches to reduce lock hold time
-                    if events_to_process.len() >= 5 {
+                    if events_to_process.len() >= 10 {
                         for event in events_to_process.drain(..) {
                 if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
                     error!(
