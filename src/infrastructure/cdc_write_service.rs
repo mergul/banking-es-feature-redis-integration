@@ -10,6 +10,34 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+// CDC configuration functions that read from environment variables
+fn get_cdc_num_partitions() -> usize {
+    std::env::var("DB_BATCH_PROCESSOR_COUNT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(16) // Default to 8 if not set or invalid
+}
+
+fn get_cdc_default_batch_size() -> usize {
+    std::env::var("CDC_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1000) // Default to 1000 if not set or invalid
+}
+
+fn get_cdc_batch_timeout_ms() -> u64 {
+    std::env::var("CDC_BATCH_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(25) // Default to 25ms if not set or invalid
+}
+fn get_cdc_poll_interval_ms() -> u64 {
+    std::env::var("CDC_POLL_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(5) // Default to 5ms if not set or invalid
+}
+
 // OPTIMIZATION 1: Enhanced CDCBatch to support transaction projections
 #[derive(Debug)]
 pub struct CDCBatch {
@@ -348,7 +376,7 @@ impl CDCBatchingService {
         shutdown_token: CancellationToken,
     ) {
         // OPTIMIZATION 12: Adaptive batch timing based on load
-        let base_interval = Duration::from_millis(config.max_batch_wait_time_ms.min(25)); // Cap at 25ms
+        let base_interval = Duration::from_millis(config.max_poll_interval_ms.min(25)); // Cap at 25ms
         let mut interval = tokio::time::interval(base_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -1173,6 +1201,7 @@ pub struct HealthStatus {
 pub struct CDCBatchingConfig {
     pub max_batch_size: usize,
     pub max_batch_wait_time_ms: u64,
+    pub max_poll_interval_ms: u64,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
 
@@ -1186,8 +1215,9 @@ pub struct CDCBatchingConfig {
 impl Default for CDCBatchingConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 1000,       // Standard batch size
-            max_batch_wait_time_ms: 25, // Fast response time
+            max_batch_size: get_cdc_default_batch_size(), // Standard batch size
+            max_batch_wait_time_ms: get_cdc_batch_timeout_ms(), // Fast response time
+            max_poll_interval_ms: get_cdc_poll_interval_ms(), // Minimal poll interval
             max_retries: 3,
             retry_backoff_ms: 50,
 
@@ -1198,16 +1228,6 @@ impl Default for CDCBatchingConfig {
             load_threshold: 10000,      // Switch threshold
         }
     }
-}
-
-// Helper function placeholder
-fn get_cdc_num_partitions() -> usize {
-    // Should return the configured number of partitions
-    // For example: 16 partitions total
-    // - 1 for AccountCreated
-    // - 7 for transaction updates
-    // - 8 for transaction history
-    16
 }
 
 #[derive(Debug, Clone)]
