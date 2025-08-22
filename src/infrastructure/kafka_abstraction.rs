@@ -549,6 +549,7 @@ impl KafkaConsumer {
                 "max.poll.interval.ms",
                 config.consumer_max_poll_interval_ms.to_string(),
             )
+            .set("fetch.min.bytes", "1")
             .set(
                 "session.timeout.ms",
                 config.consumer_session_timeout_ms.to_string(),

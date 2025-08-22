@@ -1874,10 +1874,10 @@ impl CDCConsumer {
         let mut message_batch = Vec::with_capacity(batch_size);
         let mut cdc_events_buffer: Vec<serde_json::Value> = Vec::with_capacity(batch_size);
         let mut last_batch_time = std::time::Instant::now();
-        let max_concurrent_batches = std::env::var("CDC_MAX_CONCURRENT_BATCHES")
+        let max_concurrent_batches = std::env::var("CDC_MAX_CONCURRENT_TASKS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4); // Process up to 4 batches concurrently
+            .unwrap_or(16); // Process up to 16 tasks concurrently
         let semaphore = Arc::new(Semaphore::new(max_concurrent_batches));
         let commit_every_n_batches = std::env::var("CDC_COMMIT_EVERY_N_BATCHES")
             .ok()
@@ -1886,10 +1886,6 @@ impl CDCConsumer {
         let mut batch_count = 0;
         let mut pending_offsets = Vec::new();
 
-        tracing::info!(
-        "CDCConsumer: Optimized config - batch_size: {}, timeout: {}ms, concurrent_batches: {}, commit_every: {} batches",
-        batch_size, batch_timeout_ms, max_concurrent_batches, commit_every_n_batches
-    );
         loop {
             tokio::select! {
                 _ = shutdown_token.cancelled() => {
@@ -1939,27 +1935,34 @@ impl CDCConsumer {
 
                             if should_process_batch {
                                 tracing::info!("CDCConsumer: Processing batch of {} messages", message_batch.len());
-                                let permit = semaphore.clone().acquire_owned().await.unwrap();
-                                let batch_to_process = std::mem::take(&mut message_batch);
-                                let processor_clone = processor.clone();
-                                let mut buffer_clone = std::mem::take(&mut cdc_events_buffer);
-                                tokio::spawn(async move {
-                                    let _permit = permit; // Hold permit until processing is done
-                                    if let Err(e) = Self::process_message_batch_optimized(&batch_to_process, &processor_clone, &mut buffer_clone).await {
-                                        tracing::error!("Failed to process concurrent batch: {:?}", e);
+                                if let Ok(permit) = semaphore.clone().try_acquire_owned() {
+                                    let batch_to_process = std::mem::take(&mut message_batch);
+                                    let processor_clone = processor.clone();
+                                    let mut buffer_clone = std::mem::take(&mut cdc_events_buffer);
+                                    tokio::spawn(async move {
+                                        let _permit = permit; // Hold permit until processing is done
+                                        if let Err(e) = Self::process_message_batch_optimized(&batch_to_process, &processor_clone, &mut buffer_clone).await {
+                                            tracing::error!("Failed to process concurrent batch: {:?}", e);
+                                        }
+                                    });
+                                    batch_count += 1;
+                                    // OPTIMIZATION 8: Batched offset commits
+                                    if batch_count % commit_every_n_batches == 0 {
+                                        Self::commit_offsets_batch(&self.kafka_consumer, &pending_offsets).await?;
+                                        pending_offsets.clear();
                                     }
-                                });
-                                batch_count += 1;
-                                // OPTIMIZATION 8: Batched offset commits
-                                if batch_count % commit_every_n_batches == 0 {
-                                    Self::commit_offsets_batch(&self.kafka_consumer, &pending_offsets).await?;
-                                    pending_offsets.clear();
-                                }
 
-                                // Reset buffers
-                                message_batch = Vec::with_capacity(batch_size);
-                                cdc_events_buffer = Vec::with_capacity(batch_size);
-                                last_batch_time = std::time::Instant::now();
+                                    // Reset buffers
+                                    message_batch = Vec::with_capacity(batch_size);
+                                    cdc_events_buffer = Vec::with_capacity(batch_size);
+                                    last_batch_time = std::time::Instant::now();
+                                } else {
+                                    // If no permits available, process synchronously to avoid blocking
+                                    tracing::warn!("No permits available, processing batch synchronously");
+                                    Self::process_message_batch_optimized(&message_batch, &processor, &mut cdc_events_buffer).await?;
+                                    message_batch.clear();
+                                    cdc_events_buffer.clear();
+                                }
                             }
                         }
                         Ok(Some(Err(e))) => {

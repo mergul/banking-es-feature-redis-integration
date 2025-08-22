@@ -1413,7 +1413,7 @@ async fn test_write_batching_multi_row_inserts() {
     println!("\n📝 PHASE 1: Create New Test Accounts with Multi-Aggregate Batching");
     println!("===================================================================");
 
-    let account_count = 5000; // Use a smaller number for testing
+    let account_count = 10000; // Use a smaller number for testing
     println!(
         "🔧 Creating {} new test accounts with batching...",
         account_count
@@ -1568,7 +1568,7 @@ async fn test_write_batching_multi_row_inserts() {
     );
     // Wait for CDC/projection sync after account creation
     println!("⏳ Waiting for CDC/projection sync after account creation...");
-    tokio::time::sleep(Duration::from_secs(15)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
     println!("✅ Proceeding to write operations.");
     // Phase 2: Submit multiple operations per account to test batching
     println!("\n📝 PHASE 2: Submit Multiple Operations Per Account");
@@ -2014,7 +2014,7 @@ async fn test_write_batching_multi_row_inserts() {
     }
 
     // Add a small delay to allow the consumer to shut down completely
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     println!("✅ All background tasks (including CDC consumer) stopped. Test complete.");
     println!("✅ Write Batching Multi-Row Insert Test completed successfully!");
