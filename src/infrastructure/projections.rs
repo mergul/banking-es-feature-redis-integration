@@ -313,9 +313,8 @@ impl ProjectionStoreTrait for ProjectionStore {
     }
     async fn upsert_accounts_batch(&self, accounts: Vec<AccountProjection>) -> Result<()> {
         tracing::info!(
-            "ProjectionStore: upsert_accounts_batch called with {} accounts. IDs: {:?}",
-            accounts.len(),
-            accounts.iter().map(|a| a.id).collect::<Vec<_>>()
+            "ProjectionStore: upsert_accounts_batch called with {} accounts.",
+            accounts.len()
         );
         for acc in &accounts {
             tracing::info!(
@@ -357,9 +356,9 @@ impl ProjectionStoreTrait for ProjectionStore {
 
     async fn bulk_update_accounts_with_copy(&self, accounts: Vec<AccountProjection>) -> Result<()> {
         tracing::info!(
-            "ProjectionStore: bulk_update_accounts_with_copy called with {} accounts. IDs: {:?}",
+            "ProjectionStore: bulk_update_accounts_with_copy called with {} accounts.",
             accounts.len(),
-            accounts.iter().map(|a| a.id).collect::<Vec<_>>()
+            //  accounts.iter().map(|a| a.id).collect::<Vec<_>>()
         );
 
         if accounts.is_empty() {
@@ -384,9 +383,8 @@ impl ProjectionStoreTrait for ProjectionStore {
         accounts: Vec<AccountProjection>,
     ) -> Result<()> {
         tracing::info!(
-            "ProjectionStore: bulk_insert_new_accounts_with_copy called with {} accounts. IDs: {:?}",
-            accounts.len(),
-            accounts.iter().map(|a| a.id).collect::<Vec<_>>()
+            "ProjectionStore: bulk_insert_new_accounts_with_copy called with {} accounts.",
+            accounts.len()
         );
 
         // Use the optimized direct COPY function for new accounts
@@ -397,9 +395,8 @@ impl ProjectionStoreTrait for ProjectionStore {
         projections: Vec<TransactionProjection>,
     ) -> Result<()> {
         tracing::info!(
-            "ProjectionStore: bulk_insert_transaction_projections called with {} transactions. IDs: {:?}",
-            projections.len(),
-            projections.iter().map(|t| t.id).collect::<Vec<_>>()
+            "ProjectionStore: bulk_insert_transaction_projections called with {} transactions.",
+            projections.len()
         );
 
         if projections.is_empty() {
@@ -1078,9 +1075,9 @@ impl ProjectionStore {
 
         let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
         tracing::info!(
-            "[ProjectionStore] bulk_upsert_accounts_with_copy: about to COPY BINARY {} accounts: ids={:?}",
+            "[ProjectionStore] bulk_upsert_accounts_with_copy: about to COPY BINARY {} accounts:",
             accounts.len(),
-            account_ids
+            // account_ids
         );
 
         // Deduplicate accounts by ID (keep the latest version)
@@ -1412,9 +1409,8 @@ impl ProjectionStore {
         let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
 
         tracing::info!(
-            "ProjectionStore: upsert_accounts_batch_parallel_optimized processing {} accounts. IDs: {:?}",
-            account_count,
-            account_ids
+            "ProjectionStore: upsert_accounts_batch_parallel_optimized processing {} accounts.",
+            account_count
         );
 
         let pool = pools.select_pool(OperationType::Write).clone();
@@ -1454,9 +1450,8 @@ impl ProjectionStore {
             .batch_updates
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::info!(
-            "ProjectionStore: upsert_accounts_batch_parallel_optimized completed successfully for {} accounts. IDs: {:?}",
-            account_count,
-            account_ids
+            "ProjectionStore: upsert_accounts_batch_parallel_optimized completed successfully for {} accounts.",
+            account_count
         );
 
         Ok(())
@@ -2367,7 +2362,7 @@ impl ProjectionStore {
                             account_batch.extend(accounts);
                             // CRITICAL OPTIMIZATION: Process immediately if batch is large enough
                             if account_batch.len() >= config.batch_size { // Use config.batch_size instead of hardcoded 500
-                                tracing::info!("ProjectionStore: update_processor flushing account batch of size {}. IDs: {:?}", account_batch.len(), account_batch.iter().map(|a| a.id).collect::<Vec<_>>());
+                                tracing::info!("ProjectionStore: update_processor flushing account batch of size {}.", account_batch.len());
                                 let batch_to_process = std::mem::take(&mut account_batch);
                                 let pools = pools.clone();
                                 let metrics = metrics.clone();
@@ -2395,7 +2390,7 @@ impl ProjectionStore {
                 }
                 _ = interval.tick() => {
                     if !account_batch.is_empty() {
-                        tracing::info!("ProjectionStore: update_processor flushing account batch of size {}. IDs: {:?}", account_batch.len(), account_batch.iter().map(|a| a.id).collect::<Vec<_>>());
+                        tracing::info!("ProjectionStore: update_processor flushing account batch of size {}.", account_batch.len());
                         let batch_to_process = std::mem::take(&mut account_batch);
                         let pools = pools.clone();
                         let metrics = metrics.clone();
@@ -2427,9 +2422,8 @@ impl ProjectionStore {
         let account_count = accounts.len();
         let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
         tracing::info!(
-            "ProjectionStore: upsert_accounts_batch_parallel flushing {} accounts to DB. IDs: {:?}",
-            account_count,
-            account_ids
+            "ProjectionStore: upsert_accounts_batch_parallel flushing {} accounts to DB.",
+            account_count
         );
 
         // Use bulk upsert instead of individual transactions for better performance
@@ -2446,9 +2440,8 @@ impl ProjectionStore {
             .batch_updates
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::info!(
-            "ProjectionStore: upsert_accounts_batch_parallel DB upsert completed successfully for {} accounts. IDs: {:?}",
-            account_count,
-            account_ids
+            "ProjectionStore: upsert_accounts_batch_parallel DB upsert completed successfully for {} accounts.",
+            account_count
         );
         Ok(())
     }
