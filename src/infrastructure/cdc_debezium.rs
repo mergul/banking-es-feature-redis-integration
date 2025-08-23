@@ -1492,7 +1492,7 @@ impl CDCConsumer {
         None
     }
 
-    /// Start consuming CDC events with unified cancellation token
+    /*  /// Start consuming CDC events with unified cancellation token
     pub async fn start_consuming_with_cancellation_token(
         &mut self,
         processor: Arc<UltraOptimizedCDCEventProcessor>,
@@ -1962,6 +1962,7 @@ impl CDCConsumer {
                                     Self::process_message_batch_optimized(&message_batch, &processor, &mut cdc_events_buffer).await?;
                                     message_batch.clear();
                                     cdc_events_buffer.clear();
+                                    last_batch_time = std::time::Instant::now();
                                 }
                             }
                         }
@@ -1993,8 +1994,620 @@ impl CDCConsumer {
             Self::commit_offsets_batch(&self.kafka_consumer, &pending_offsets).await?;
         }
         Ok(())
-    }
+    } */
     // OPTIMIZATION 9: Optimized batch processing with buffer reuse
+
+    /// Start consuming CDC events with unified cancellation token
+    pub async fn start_consuming_with_cancellation_token(
+        &mut self,
+        processor: Arc<UltraOptimizedCDCEventProcessor>,
+        shutdown_token: CancellationToken,
+    ) -> Result<()> {
+        // Static counter for active polling loops
+        static ACTIVE_CONSUMERS: AtomicUsize = AtomicUsize::new(0);
+        let current = ACTIVE_CONSUMERS.fetch_add(1, Ordering::SeqCst) + 1;
+        tracing::info!(
+            "CDCConsumer: Entering main polling loop. Active consumers: {}",
+            current
+        );
+        tracing::info!(
+            "CDCConsumer::start_consuming_with_cancellation_token() called for topic: {}",
+            self.cdc_topic
+        );
+        info!("Starting CDC consumer for topic: {}", self.cdc_topic);
+        tracing::info!(
+            "CDCConsumer: Entered start_consuming async loop for topic: {}",
+            self.cdc_topic
+        );
+
+        // Validate Kafka consumer is properly configured
+        let kafka_config = self.kafka_consumer.get_config();
+        if !kafka_config.enabled {
+            tracing::error!("CDCConsumer: Kafka consumer is disabled");
+            return Err(anyhow::anyhow!("Kafka consumer is disabled"));
+        }
+
+        tracing::info!(
+            "CDCConsumer: Kafka consumer config - enabled: {}, group_id: {}, bootstrap_servers: {}",
+            kafka_config.enabled,
+            kafka_config.group_id,
+            kafka_config.bootstrap_servers
+        );
+
+        // Subscribe to CDC topic with retry logic (auto-detect if empty or "auto")
+        let topic_to_subscribe = {
+            let configured = self.cdc_topic.trim().to_string();
+            if !configured.is_empty() && configured.to_lowercase() != "auto" {
+                configured
+            } else if let Ok(env_topic) = std::env::var("CDC_TOPIC") {
+                env_topic
+            } else {
+                let cfg = self.kafka_consumer.get_config();
+                if !cfg.topic_prefix.is_empty() {
+                    format!("{}.public.kafka_outbox_cdc", cfg.topic_prefix)
+                } else {
+                    "banking-es.public.kafka_outbox_cdc".to_string()
+                }
+            }
+        };
+        self.cdc_topic = topic_to_subscribe.clone();
+        tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
+        let max_subscription_retries = 5; // Increased retries
+        let mut subscription_retries = 0;
+
+        loop {
+            let subscribe_result = self
+                .kafka_consumer
+                .subscribe_to_topic(&self.cdc_topic)
+                .await;
+
+            match &subscribe_result {
+                Ok(_) => {
+                    tracing::info!(
+                        "CDCConsumer: ✅ Successfully subscribed to topic: {}",
+                        self.cdc_topic
+                    );
+
+                    // CRITICAL FIX: Force consumer group join by polling
+                    tracing::info!("CDCConsumer: Forcing consumer group join by polling...");
+
+                    // Poll a few times to trigger group join
+                    let mut join_attempts = 0;
+                    let max_join_attempts = 10;
+
+                    while join_attempts < max_join_attempts {
+                        match self.kafka_consumer.stream().next().await {
+                            Some(Ok(_)) => {
+                                tracing::info!("CDCConsumer: ✅ Consumer group join successful after {} attempts", join_attempts + 1);
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    "CDCConsumer: Poll error during join attempt {}: {:?}",
+                                    join_attempts + 1,
+                                    e
+                                );
+                            }
+                            None => {
+                                tracing::debug!(
+                                    "CDCConsumer: No message during join attempt {}",
+                                    join_attempts + 1
+                                );
+                            }
+                        }
+                        join_attempts += 1;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+
+                    if join_attempts >= max_join_attempts {
+                        tracing::warn!("CDCConsumer: Consumer group join may not be complete after {} attempts", max_join_attempts);
+                    }
+
+                    // Consumer is ready to start processing
+                    tracing::info!(
+                        "CDCConsumer: Consumer group join completed, ready to start processing"
+                    );
+
+                    // Log consumer group status
+                    tracing::info!("CDCConsumer: Consumer group join completed");
+                    break;
+                }
+                Err(e) => {
+                    subscription_retries += 1;
+                    tracing::error!(
+                        "CDCConsumer: ❌ Failed to subscribe to topic: {} (attempt {}/{}): {}",
+                        self.cdc_topic,
+                        subscription_retries,
+                        max_subscription_retries,
+                        e
+                    );
+
+                    if subscription_retries >= max_subscription_retries {
+                        tracing::error!(
+                            "CDCConsumer: Failed to subscribe to CDC topic after {} attempts: {}",
+                            max_subscription_retries,
+                            e
+                        );
+                        return Err(anyhow::anyhow!(
+                            "Failed to subscribe to CDC topic after {} attempts: {}",
+                            max_subscription_retries,
+                            e
+                        ));
+                    }
+
+                    // Wait before retry
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            }
+        }
+
+        tracing::info!(
+            "CDCConsumer: Starting main consumption loop for topic: {}",
+            self.cdc_topic
+        );
+        let mut poll_count = 0;
+        let mut last_log_time = std::time::Instant::now();
+        let mut consecutive_empty_polls = 0;
+        let max_consecutive_empty_polls = 100; // Log warning after 100 empty polls
+        let max_concurrent = 32; // Tune as needed
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        let offsets = Arc::new(Mutex::new(Vec::<(String, i32, i64)>::new()));
+        let offsets_clone = offsets.clone();
+        let (dlq_tx, mut dlq_rx) =
+            mpsc::channel::<(String, i32, i64, Vec<u8>, Option<Vec<u8>>, String)>(1000);
+        let kafka_consumer = self.kafka_consumer.clone();
+        let shutdown_token_clone = shutdown_token.clone();
+
+        // Background offset committer
+        tokio::spawn(async move {
+            let mut last_commit_time = std::time::Instant::now();
+
+            // Read timing configuration from environment variables
+            // CRITICAL: Adjusted for Debezium's 5ms poll interval
+            let offset_commit_sleep_ms = std::env::var("CDC_OFFSET_COMMIT_SLEEP_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10); // Reduced from 50ms to 10ms to match Debezium's 5ms poll
+
+            let offset_commit_batch_size = std::env::var("CDC_OFFSET_COMMIT_BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(5000);
+
+            let offset_commit_timeout_ms = std::env::var("CDC_OFFSET_COMMIT_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(25); // Reduced from 100ms to 25ms to match Debezium's 5ms poll
+
+            tracing::info!(
+                "Offset committer config - sleep: {}ms, batch_size: {}, timeout: {}ms (optimized for Debezium 5ms poll)",
+                offset_commit_sleep_ms, offset_commit_batch_size, offset_commit_timeout_ms
+            );
+
+            loop {
+                tokio::select! {
+                    _ = shutdown_token_clone.cancelled() => {
+                        tracing::info!("Background offset committer: Received shutdown signal");
+                        break;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(offset_commit_sleep_ms)) => {
+                        let mut offsets = offsets_clone.lock().await;
+                        let should_commit = offsets.len() >= offset_commit_batch_size ||
+                                           last_commit_time.elapsed() > std::time::Duration::from_millis(offset_commit_timeout_ms);
+
+                        if should_commit && !offsets.is_empty() {
+                            // Only commit the highest offset per (topic, partition)
+                            let mut highest: HashMap<(String, i32), i64> = HashMap::new();
+                            for (topic, partition, offset) in offsets.drain(..) {
+                                let key = (topic.clone(), partition);
+                                highest
+                                    .entry(key)
+                                    .and_modify(|v| *v = (*v).max(offset))
+                                    .or_insert(offset);
+                            }
+                            let offset_count = highest.len(); // Store length before moving
+                            let mut tpl = TopicPartitionList::new();
+                            for ((topic, partition), offset) in highest {
+                                tpl.add_partition_offset(&topic, partition, Offset::Offset(offset + 1))
+                                    .unwrap();
+                            }
+                            if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
+                                tracing::error!("Failed to batch commit offsets: {}", e);
+                            } else {
+                                tracing::info!("✅ Successfully committed {} offsets", offset_count);
+                                last_commit_time = std::time::Instant::now();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Final commit on shutdown
+            let mut offsets = offsets_clone.lock().await;
+            if !offsets.is_empty() {
+                let mut highest: HashMap<(String, i32), i64> = HashMap::new();
+                for (topic, partition, offset) in offsets.drain(..) {
+                    let key = (topic.clone(), partition);
+                    highest
+                        .entry(key)
+                        .and_modify(|v| *v = (*v).max(offset))
+                        .or_insert(offset);
+                }
+                let mut tpl = TopicPartitionList::new();
+                for ((topic, partition), offset) in highest {
+                    tpl.add_partition_offset(&topic, partition, Offset::Offset(offset + 1))
+                        .unwrap();
+                }
+                if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
+                    tracing::error!("Failed to final commit offsets on shutdown: {}", e);
+                } else {
+                    tracing::info!("✅ Final commit on shutdown completed");
+                }
+            }
+        });
+
+        // Background DLQ handler (batch)
+        let dlq_producer = processor.clone();
+        let shutdown_token_dlq = shutdown_token.clone();
+        tokio::spawn(async move {
+            // Read DLQ configuration from environment variables
+            // CRITICAL: Adjusted for Debezium's 5ms poll interval
+            let dlq_batch_size = std::env::var("CDC_DLQ_BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(50); // Reduced from 500 to 50 for faster processing
+
+            let dlq_timeout_ms = std::env::var("CDC_DLQ_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(100); // Reduced from 500ms to 100ms for faster processing
+
+            tracing::info!(
+                "DLQ handler config - batch_size: {}, timeout: {}ms (optimized for Debezium 5ms poll)",
+                dlq_batch_size, dlq_timeout_ms
+            );
+
+            let mut batch = Vec::with_capacity(dlq_batch_size);
+            let mut last_send = std::time::Instant::now();
+            loop {
+                tokio::select! {
+                    _ = shutdown_token_dlq.cancelled() => {
+                        tracing::info!("Background DLQ handler: Received shutdown signal");
+                        break;
+                    }
+                    Some((topic, partition, offset, payload, key, error)) = dlq_rx.recv() => {
+                        batch.push((topic, partition, offset, payload, key, error));
+                        if batch.len() >= dlq_batch_size || last_send.elapsed() > std::time::Duration::from_millis(dlq_timeout_ms) {
+                            let to_send = std::mem::take(&mut batch);
+                            for (topic, partition, offset, payload, key, error) in to_send {
+                                if let Err(e) = dlq_producer
+                                    .send_to_dlq_from_cdc_parts(
+                                        &topic,
+                                        partition,
+                                        offset,
+                                        &payload,
+                                        key.as_deref(),
+                                        &error,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!("Failed to send to DLQ: {}", e);
+                                }
+                            }
+                            last_send = std::time::Instant::now();
+                        }
+                    }
+                    else => {
+                        if !batch.is_empty() {
+                            let to_send = std::mem::take(&mut batch);
+                            for (topic, partition, offset, payload, key, error) in to_send {
+                                if let Err(e) = dlq_producer
+                                    .send_to_dlq_from_cdc_parts(
+                                        &topic,
+                                        partition,
+                                        offset,
+                                        &payload,
+                                        key.as_deref(),
+                                        &error,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!("Failed to send to DLQ: {}", e);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Final DLQ processing on shutdown
+            if !batch.is_empty() {
+                let to_send = std::mem::take(&mut batch);
+                for (topic, partition, offset, payload, key, error) in to_send {
+                    if let Err(e) = dlq_producer
+                        .send_to_dlq_from_cdc_parts(
+                            &topic,
+                            partition,
+                            offset,
+                            &payload,
+                            key.as_deref(),
+                            &error,
+                        )
+                        .await
+                    {
+                        tracing::error!("Failed to send to DLQ on shutdown: {}", e);
+                    }
+                }
+            }
+        });
+        // SOLUTION 1: Create processing channel to decouple consumer from processor
+        let (batch_tx, mut batch_rx) = mpsc::channel::<Vec<serde_json::Value>>(100); // Buffer up to 100 batches
+
+        // SOLUTION 2: Spawn dedicated processing workers (multiple workers for parallel processing)
+        let max_concurrent_batches = std::env::var("CDC_MAX_CONCURRENT_TASKS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(16); // Process up to 16 tasks concurrently
+
+        tracing::info!("Starting {} CDC processing workers", max_concurrent_batches);
+
+        let mut worker_senders = Vec::new();
+        let worker_selector = Arc::new(AtomicUsize::new(0));
+
+        for worker_id in 0..max_concurrent_batches {
+            let (worker_tx, mut worker_rx) = mpsc::channel::<Vec<serde_json::Value>>(25); // Smaller buffer per worker
+            worker_senders.push(worker_tx);
+
+            let worker_processor = processor.clone();
+            let worker_shutdown = shutdown_token.clone();
+
+            tokio::spawn(async move {
+                tracing::info!("CDC Worker {} started with dedicated channel", worker_id);
+
+                loop {
+                    tokio::select! {
+                        _ = worker_shutdown.cancelled() => {
+                            tracing::info!("CDC Worker {} shutting down", worker_id);
+                            break;
+                        }
+                        Some(mut events) = worker_rx.recv() => {
+                            let start_time = std::time::Instant::now();
+
+                            match worker_processor.process_cdc_events_batch(&mut events).await {
+                                Ok(_) => {
+                                    let duration = start_time.elapsed();
+                                    tracing::debug!(
+                                        "Worker {} processed {} events in {:?}",
+                                        worker_id,
+                                        events.len(),
+                                        duration
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!("Worker {} processing failed: {}", worker_id, e);
+                                    // Optionally send to DLQ here
+                                }
+                            }
+                        }
+                        else => {
+                            tracing::debug!("Worker {} channel closed", worker_id);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        let mut message_stream = self.kafka_consumer.stream();
+
+        // Read CDC polling interval from environment variable
+        let poll_interval_ms = std::env::var("CDC_POLL_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5); // CRITICAL FIX: Increased from 5ms to 100ms to prevent consumer group ejection
+
+        // CRITICAL OPTIMIZATION: Batch processing configuration
+        let batch_size = std::env::var("CDC_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5000);
+
+        let batch_timeout_ms = std::env::var("CDC_BATCH_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(25); // 5x poll interval (5ms * 5 = 25ms)
+
+        tracing::info!(
+            "CDCConsumer: Using polling interval: {}ms, batch_size: {}, batch_timeout: {}ms",
+            poll_interval_ms,
+            batch_size,
+            batch_timeout_ms
+        );
+
+        // CRITICAL OPTIMIZATION: Batch processing buffer
+        let mut message_batch = Vec::with_capacity(batch_size);
+        let mut cdc_events_buffer: Vec<serde_json::Value> = Vec::with_capacity(batch_size);
+        let mut last_batch_time = std::time::Instant::now();
+        let commit_every_n_batches = std::env::var("CDC_COMMIT_EVERY_N_BATCHES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10); // Commit every 10 batches instead of every batch
+
+        tracing::info!("Starting ultra-fast consumer loop with round-robin distribution");
+
+        loop {
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    tracing::info!("Consumer received shutdown signal");
+
+                    // Process remaining messages
+                    if !message_batch.is_empty() {
+                        Self::parse_and_distribute_batch(
+                            &message_batch,
+                            &mut cdc_events_buffer,
+                            &worker_senders,
+                            &worker_selector
+                        ).await;
+                    }
+                    break;
+                }
+
+                message_result = tokio::time::timeout(
+                    Duration::from_millis(1),
+                    message_stream.next()
+                ) => {
+                    match message_result {
+                        Ok(Some(Ok(message))) => {
+                            let kafka_message = Self::convert_message_fast(message);
+                            message_batch.push(kafka_message);
+
+                            let should_process = message_batch.len() >= batch_size ||
+                                               last_batch_time.elapsed() > Duration::from_millis(batch_timeout_ms);
+
+                            if should_process {
+                                Self::parse_and_distribute_batch(
+                                    &message_batch,
+                                    &mut cdc_events_buffer,
+                                    &worker_senders,
+                                    &worker_selector
+                                ).await;
+
+                                message_batch.clear();
+                                cdc_events_buffer.clear();
+                                last_batch_time = std::time::Instant::now();
+                            }
+                        }
+                        Ok(Some(Err(e))) => {
+                            tracing::error!("Message receive error: {:?}", e);
+                        }
+                        Ok(None) => {
+                            tracing::info!("Message stream ended");
+                            break;
+                        }
+                        Err(_) => {
+                            if !message_batch.is_empty() &&
+                               last_batch_time.elapsed() > Duration::from_millis(batch_timeout_ms) {
+                                Self::parse_and_distribute_batch(
+                                    &message_batch,
+                                    &mut cdc_events_buffer,
+                                    &worker_senders,
+                                    &worker_selector
+                                ).await;
+                                message_batch.clear();
+                                cdc_events_buffer.clear();
+                                last_batch_time = std::time::Instant::now();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Round-robin distribution to workers (no mutex contention)
+    async fn parse_and_distribute_batch(
+        messages: &[crate::infrastructure::kafka_abstraction::KafkaMessage],
+        cdc_events_buffer: &mut Vec<serde_json::Value>,
+        worker_senders: &[mpsc::Sender<Vec<serde_json::Value>>],
+        worker_selector: &Arc<AtomicUsize>,
+    ) {
+        if messages.is_empty() {
+            return;
+        }
+
+        let parse_start = std::time::Instant::now();
+
+        // Parse JSON
+        cdc_events_buffer.clear();
+        cdc_events_buffer.reserve(messages.len());
+
+        for message in messages {
+            if let Ok(event) =
+                simd_json::from_slice::<serde_json::Value>(&mut message.payload.clone())
+            {
+                cdc_events_buffer.push(event);
+            }
+        }
+
+        if !cdc_events_buffer.is_empty() {
+            // Round-robin selection of worker
+            let worker_index =
+                worker_selector.fetch_add(1, Ordering::Relaxed) % worker_senders.len();
+            let selected_worker = &worker_senders[worker_index];
+
+            let events_to_send = cdc_events_buffer.clone();
+
+            // Try to send to selected worker
+            match selected_worker.try_send(events_to_send) {
+                Ok(_) => {
+                    let parse_duration = parse_start.elapsed();
+                    tracing::debug!(
+                        "Distributed {} events to worker {} (parse: {:?})",
+                        cdc_events_buffer.len(),
+                        worker_index,
+                        parse_duration
+                    );
+                }
+                Err(mpsc::error::TrySendError::Full(events)) => {
+                    // Worker is busy, try next worker
+                    tracing::warn!("Worker {} busy, trying next worker", worker_index);
+                    Self::try_distribute_to_available_worker(events, worker_senders, worker_index)
+                        .await;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::error!("Worker {} channel closed", worker_index);
+                }
+            }
+        }
+    }
+
+    // Fallback to find available worker
+    async fn try_distribute_to_available_worker(
+        events: Vec<serde_json::Value>,
+        worker_senders: &[mpsc::Sender<Vec<serde_json::Value>>],
+        skip_worker: usize,
+    ) {
+        for (i, sender) in worker_senders.iter().enumerate() {
+            if i == skip_worker {
+                continue; // Skip the busy worker
+            }
+
+            match sender.try_send(events.clone()) {
+                Ok(_) => {
+                    tracing::debug!("Successfully distributed to fallback worker {}", i);
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    continue; // Try next worker
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::error!("Fallback worker {} channel closed", i);
+                }
+            }
+        }
+
+        tracing::error!(
+            "All workers busy, dropping batch of {} events",
+            events.len()
+        );
+        // Consider sending to DLQ here instead of dropping
+    }
+
+    fn convert_message_fast(
+        message: rdkafka::message::BorrowedMessage,
+    ) -> crate::infrastructure::kafka_abstraction::KafkaMessage {
+        crate::infrastructure::kafka_abstraction::KafkaMessage {
+            topic: message.topic().to_string(),
+            partition: message.partition(),
+            offset: message.offset(),
+            key: message.key().map(|k| k.to_vec()),
+            payload: message.payload().unwrap_or(&[]).to_vec(),
+            timestamp: message.timestamp().to_millis(),
+        }
+    }
     async fn process_message_batch_optimized(
         messages: &[crate::infrastructure::kafka_abstraction::KafkaMessage],
         processor: &Arc<UltraOptimizedCDCEventProcessor>,

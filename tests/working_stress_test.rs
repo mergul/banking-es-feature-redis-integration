@@ -1997,7 +1997,8 @@ async fn test_write_batching_multi_row_inserts() {
             .projection_updates
             .load(std::sync::atomic::Ordering::Relaxed)
     );
-
+    // Add a small delay to allow the consumer to shut down completely
+    tokio::time::sleep(Duration::from_secs(15)).await;
     // Cleanup
     println!("\n🧹 Cleaning up test resources...");
 
@@ -2012,9 +2013,6 @@ async fn test_write_batching_multi_row_inserts() {
     if let Err(e) = cleanup_test_resources(&context).await {
         println!("⚠️  Warning: Cleanup failed: {}", e);
     }
-
-    // Add a small delay to allow the consumer to shut down completely
-    tokio::time::sleep(Duration::from_secs(5)).await;
 
     println!("✅ All background tasks (including CDC consumer) stopped. Test complete.");
     println!("✅ Write Batching Multi-Row Insert Test completed successfully!");
