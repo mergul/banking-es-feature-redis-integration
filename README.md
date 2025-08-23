@@ -116,4 +116,5 @@ cargo run --example bulk_insert_example
 
 ## Lisans
 
+sudo -u kafka ln -sf /home/mesut/RustroverProjects/cqrs-kafka/banking-es-feature-redis-integration/debezium-config.json $KAFKA_HOME/config/debezium-config.json
 Bu proje MIT lisansı altında lisanslanmıştır.
