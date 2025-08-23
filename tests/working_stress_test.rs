@@ -126,7 +126,11 @@ async fn setup_stress_test_environment(
     )
     .await?;
     println!("✅ All services initialized successfully");
-
+    for (key, value) in std::env::vars() {
+        if key.starts_with("KAFKA_") {
+            println!("ENV: {} = {}", key, value);
+        }
+    }
     // Create KafkaConfig instance (same as main.rs)
     let mut kafka_config = banking_es::infrastructure::kafka_abstraction::KafkaConfig::default();
 
@@ -171,7 +175,16 @@ async fn setup_stress_test_environment(
     let kafka_producer_for_cdc =
         banking_es::infrastructure::kafka_abstraction::KafkaProducer::new(kafka_config.clone())?;
     let kafka_consumer_for_cdc =
-        banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config.clone())?;
+        match banking_es::infrastructure::kafka_abstraction::KafkaConsumer::new(
+            kafka_config.clone(),
+        ) {
+            Ok(consumer) => consumer,
+            Err(e) => {
+                eprintln!("❌ Failed to create Kafka consumer: {:?}", e);
+                eprintln!("Config used: {:?}", kafka_config);
+                return Err(e.into());
+            }
+        };
 
     let cdc_config = DebeziumConfig::default();
     let metrics = Arc::new(EnhancedCDCMetrics::default());
@@ -1568,7 +1581,7 @@ async fn test_write_batching_multi_row_inserts() {
     );
     // Wait for CDC/projection sync after account creation
     println!("⏳ Waiting for CDC/projection sync after account creation...");
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // tokio::time::sleep(Duration::from_secs(5)).await;
     println!("✅ Proceeding to write operations.");
     // Phase 2: Submit multiple operations per account to test batching
     println!("\n📝 PHASE 2: Submit Multiple Operations Per Account");
@@ -1712,7 +1725,7 @@ async fn test_write_batching_multi_row_inserts() {
     );
     // Wait for CDC/projection sync after account creation
     println!("⏳ Waiting for CDC/projection sync after write operations...");
-    // tokio::time::sleep(Duration::from_secs(15)).await;
+    // tokio::time::sleep(Duration::from_secs(5)).await;
     println!("✅ Proceeding to read operations.");
     // Phase 3: Wait for CDC processing to complete
     println!("\n📝 PHASE 3: Wait for CDC Processing");
@@ -1998,7 +2011,7 @@ async fn test_write_batching_multi_row_inserts() {
             .load(std::sync::atomic::Ordering::Relaxed)
     );
     // Add a small delay to allow the consumer to shut down completely
-    tokio::time::sleep(Duration::from_secs(15)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
     // Cleanup
     println!("\n🧹 Cleaning up test resources...");
 

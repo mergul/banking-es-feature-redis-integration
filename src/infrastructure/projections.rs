@@ -2680,21 +2680,21 @@ impl ProjectionStore {
         let original_config = self.config.clone();
 
         // Apply bulk optimizations
-        self.config.cache_ttl_secs = 0; // Disable cache for bulk operations
-        self.config.batch_size = 2000; // Normal: 500
-        self.config.batch_timeout_ms = 25; // Normal: 100
+        // self.config.cache_ttl_secs = 0; // Disable cache for bulk operations
+        // self.config.batch_size = 2000; // Normal: 500
+        // self.config.batch_timeout_ms = 25; // Normal: 100
 
-        // Connection pool optimizations
-        self.config.max_connections = 150; // Normal: 50
-        self.config.min_connections = 30; // Normal: 5
-        self.config.acquire_timeout_secs = 30; // Normal: 10
-        self.config.idle_timeout_secs = 300; // Normal: 60
-        self.config.max_lifetime_secs = 1800; // Normal: 600
+        // // Connection pool optimizations
+        // self.config.max_connections = 150; // Normal: 50
+        // self.config.min_connections = 30; // Normal: 5
+        // self.config.acquire_timeout_secs = 30; // Normal: 10
+        // self.config.idle_timeout_secs = 300; // Normal: 60
+        // self.config.max_lifetime_secs = 1800; // Normal: 600
 
-        // Set PostgreSQL synchronous_commit = off for bulk operations
-        self.config.synchronous_commit = false;
-        // Set PostgreSQL full_page_writes = off for bulk operations
-        self.config.full_page_writes = false;
+        // // Set PostgreSQL synchronous_commit = off for bulk operations
+        // self.config.synchronous_commit = false;
+        // // Set PostgreSQL full_page_writes = off for bulk operations
+        // self.config.full_page_writes = false;
 
         original_config
     }

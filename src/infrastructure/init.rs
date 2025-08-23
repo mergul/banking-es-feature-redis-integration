@@ -437,7 +437,7 @@ pub async fn init_all_services(
         consumer_max_poll_interval_ms: std::env::var("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS")
             .unwrap_or_else(|_| "10000".to_string())
             .parse()
-            .unwrap_or(10000),
+            .unwrap_or(300000),
         consumer_session_timeout_ms: std::env::var("KAFKA_CONSUMER_SESSION_TIMEOUT_MS")
             .unwrap_or_else(|_| "10000".to_string())
             .parse()
@@ -465,6 +465,26 @@ pub async fn init_all_services(
             .unwrap_or_else(|_| "banking-es-cache-invalidation".to_string()),
         event_topic: std::env::var("KAFKA_EVENT_TOPIC")
             .unwrap_or_else(|_| "banking-es-events".to_string()),
+        fetch_max_wait_ms: std::env::var("KAFKA_FETCH_MAX_WAIT_MS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(25),
+        fetch_min_bytes: std::env::var("KAFKA_FETCH_MIN_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(1),
+        reconnect_backoff_max_ms: std::env::var("KAFKA_RECONNECT_BACKOFF_MAX_MS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(1000),
+        enable_auto_commit: std::env::var("KAFKA_ENABLE_AUTO_COMMIT")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false),
+        enable_auto_create_topics: std::env::var("KAFKA_ENABLE_AUTO_CREATE_TOPICS")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false),
     };
 
     // Initialize AccountRepository with Kafka producer

@@ -910,21 +910,55 @@ impl CDCServiceManager {
         // Create Kafka consumer with proper configuration
         let kafka_config = crate::infrastructure::kafka_abstraction::KafkaConfig {
             enabled: true,
-            bootstrap_servers: "127.0.0.1:9092".to_string(),
+            bootstrap_servers: std::env::var("KAFKA_BOOTSTRAP_SERVERS")
+                .unwrap_or_else(|_| "127.0.0.1:9092".to_string()),
             group_id,
             topic_prefix: config.topic_prefix.clone(),
             producer_acks: 1,
             producer_retries: 3,
-            consumer_max_poll_interval_ms: 10000,
-            consumer_session_timeout_ms: 10000,
-            consumer_heartbeat_interval_ms: 1000,
-            consumer_max_poll_records: 5000,
-            fetch_max_bytes: 5 * 1024 * 1024,
-            security_protocol: "PLAINTEXT".to_string(),
+            consumer_max_poll_interval_ms: std::env::var("KAFKA_MAX_POLL_INTERVAL_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(300000),
+            consumer_session_timeout_ms: std::env::var("KAFKA_SESSION_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30000),
+            consumer_heartbeat_interval_ms: std::env::var("KAFKA_HEARTBEAT_INTERVAL_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000),
+            consumer_max_poll_records: std::env::var("KAFKA_MAX_POLL_RECORDS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5000),
+            fetch_max_bytes: std::env::var("KAFKA_FETCH_MAX_BYTES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5 * 1024 * 1024),
+            security_protocol: std::env::var("KAFKA_SECURITY_PROTOCOL")
+                .unwrap_or_else(|_| "PLAINTEXT".to_string()),
             sasl_mechanism: "PLAIN".to_string(),
             ssl_ca_location: None,
             auto_offset_reset: "latest".to_string(),
             cache_invalidation_topic: "banking-es-cache-invalidation".to_string(),
+            fetch_max_wait_ms: std::env::var("KAFKA_FETCH_MAX_WAIT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(25),
+            fetch_min_bytes: std::env::var("KAFKA_FETCH_MIN_BYTES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1),
+            reconnect_backoff_max_ms: std::env::var("KAFKA_RECONNECT_BACKOFF_MAX_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000),
+            enable_auto_commit: std::env::var("KAFKA_ENABLE_AUTO_COMMIT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(false),
+            enable_auto_create_topics: false,
             event_topic: "banking-es-events".to_string(),
         };
 

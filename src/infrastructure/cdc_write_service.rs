@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -895,7 +895,7 @@ impl PartitionedCDCBatching {
     }
 
     // OPTIMIZATION 24: High-performance transaction projection submission
-    pub async fn submit_transaction_projections_bulk(
+    pub async fn submit_transaction_projections_ultra_parallel(
         &self,
         projections: Vec<TransactionProjection>,
     ) -> Result<Vec<Uuid>> {
@@ -903,107 +903,48 @@ impl PartitionedCDCBatching {
             return Ok(Vec::new());
         }
 
-        let processor_count = self.transaction_history_processors.len();
-        let mut operation_ids = Vec::with_capacity(projections.len());
-
+        let start_time = Instant::now();
         info!(
-            "💳 Submitting {} transaction projections across {} processors",
-            projections.len(),
-            processor_count
+            "🚀 ULTRA-PARALLEL: Processing {} transactions",
+            projections.len()
         );
 
-        // OPTIMIZATION 25: Smart partitioning for transaction history
-        // Partition by account_id AND timestamp for better write performance
-        let mut processor_groups: Vec<Vec<TransactionProjection>> =
-            vec![Vec::new(); processor_count];
+        // OPTION 1: Maximum concurrency with semaphore for rate limiting
+        let max_concurrent = 200; // Adjust based on your system capacity
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
-        for transaction in projections {
-            // Combine account_id hash with timestamp for even distribution
-            let account_hash = transaction.account_id.as_u128() as usize;
-            let time_hash = transaction.timestamp.timestamp() as usize;
-            let processor_idx = (account_hash.wrapping_add(time_hash)) % processor_count;
+        let processor_count = self.transaction_history_processors.len();
 
-            processor_groups[processor_idx].push(transaction);
-        }
+        // Create futures for ALL transactions at once
+        let transaction_futures = projections.into_iter().map(|transaction| {
+            let semaphore = semaphore.clone();
+            let processors = self.transaction_history_processors.clone();
 
-        // OPTIMIZATION 26: Parallel submission with batching
-        let mut submission_tasks = Vec::new();
+            async move {
+                let _permit = semaphore.acquire().await.unwrap();
 
-        for (processor_idx, processor_transactions) in processor_groups.into_iter().enumerate() {
-            if processor_transactions.is_empty() {
-                continue;
+                // Select processor using same hash logic
+                let account_hash = transaction.account_id.as_u128() as usize;
+                let time_hash = transaction.timestamp.timestamp() as usize;
+                let processor_idx = (account_hash.wrapping_add(time_hash)) % processor_count;
+
+                let processor = &processors[processor_idx];
+
+                processor
+                    .submit_transaction_projection(transaction.account_id, transaction)
+                    .await
             }
+        });
 
-            let processor = self.transaction_history_processors[processor_idx].clone();
-            let transaction_count = processor_transactions.len();
+        // Execute ALL transactions concurrently (with semaphore limiting)
+        let operation_ids = futures::future::try_join_all(transaction_futures).await?;
 
-            let task = tokio::spawn(async move {
-                let mut processor_operation_ids = Vec::with_capacity(transaction_count);
-
-                info!(
-                    "💳 Processor {} handling {} transactions",
-                    processor_idx, transaction_count
-                );
-
-                // Submit transactions in micro-batches for better performance
-                const MICRO_BATCH_SIZE: usize = 100;
-
-                for chunk in processor_transactions.chunks(MICRO_BATCH_SIZE) {
-                    let mut chunk_ids = Vec::new();
-
-                    for transaction in chunk {
-                        match processor
-                            .submit_transaction_projection(
-                                transaction.account_id,
-                                transaction.clone(),
-                            )
-                            .await
-                        {
-                            Ok(operation_id) => chunk_ids.push(operation_id),
-                            Err(e) => {
-                                error!("Failed to submit transaction: {}", e);
-                                return Err(e);
-                            }
-                        }
-                    }
-
-                    processor_operation_ids.extend(chunk_ids);
-
-                    // Small yield to prevent monopolizing the async runtime
-                    if processor_transactions.len() > MICRO_BATCH_SIZE {
-                        tokio::task::yield_now().await;
-                    }
-                }
-
-                info!(
-                    "✅ Processor {} submitted {} transaction operations",
-                    processor_idx,
-                    processor_operation_ids.len()
-                );
-
-                Ok(processor_operation_ids)
-            });
-
-            submission_tasks.push(task);
-        }
-
-        // Wait for all processor submissions
-        for (idx, task) in submission_tasks.into_iter().enumerate() {
-            match task.await? {
-                Ok(mut processor_ids) => {
-                    operation_ids.append(&mut processor_ids);
-                }
-                Err(e) => {
-                    error!("Transaction submission task {} failed: {}", idx, e);
-                    return Err(e);
-                }
-            }
-        }
-
+        let duration = start_time.elapsed();
         info!(
-            "🏆 TRANSACTION BULK SUBMIT: {} operations across {} processors",
+            "🏆 ULTRA-PARALLEL COMPLETE: {} operations in {:?} ({:.0} ops/sec)",
             operation_ids.len(),
-            processor_count
+            duration,
+            operation_ids.len() as f64 / duration.as_secs_f64()
         );
 
         Ok(operation_ids)

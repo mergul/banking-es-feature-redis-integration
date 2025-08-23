@@ -403,6 +403,10 @@ impl CDCOutboxRepository {
                 "transforms.outbox.table.field.event.timestamp": "deleted_at",
                 "transforms.outbox.route.tombstone.on.empty.payload": "true",
                 "tombstones.on.delete": "true",
+                "connector.max.sleep.time": "100",
+                "max.sleep.time": "50",
+                "flush.lsn.source": "true",
+                "publication.autocreate.mode": "filtered",
                 "max.queue.size": "16384", // Increased from 8192
                 "max.batch.size": "4096",  // Increased from 2048
                 "poll.interval.ms": "5",   // CRITICAL: Reduced to 5ms for ultra-low latency
@@ -2476,6 +2480,9 @@ impl CDCConsumer {
                                 message_batch.clear();
                                 cdc_events_buffer.clear();
                                 last_batch_time = std::time::Instant::now();
+                            } // IMPORTANT: Update last_batch_time when first message arrives
+                            else if message_batch.len() == 1 {
+                                last_batch_time = std::time::Instant::now();
                             }
                         }
                         Ok(Some(Err(e))) => {
@@ -2483,11 +2490,19 @@ impl CDCConsumer {
                         }
                         Ok(None) => {
                             tracing::info!("Message stream ended");
+                            // Process remaining messages before breaking
+                            if !message_batch.is_empty() {
+                                Self::parse_and_distribute_batch(
+                                    &message_batch,
+                                    &mut cdc_events_buffer,
+                                    &worker_senders,
+                                    &worker_selector
+                                ).await;
+                            }
                             break;
                         }
                         Err(_) => {
-                            if !message_batch.is_empty() &&
-                               last_batch_time.elapsed() > Duration::from_millis(batch_timeout_ms) {
+                            if !message_batch.is_empty() {
                                 Self::parse_and_distribute_batch(
                                     &message_batch,
                                     &mut cdc_events_buffer,

@@ -88,79 +88,124 @@ pub struct KafkaConfig {
     pub ssl_ca_location: Option<String>,
     pub auto_offset_reset: String,
     pub cache_invalidation_topic: String,
+    pub enable_auto_commit: bool,
+    pub enable_auto_create_topics: bool,
+    pub fetch_max_wait_ms: i32,
+    pub fetch_min_bytes: i32,
+    pub reconnect_backoff_max_ms: i32,
     pub event_topic: String,
 }
 
 impl Default for KafkaConfig {
     fn default() -> Self {
+        // Remove duplicate fetch_max_bytes declaration
         let fetch_max_bytes = std::env::var("KAFKA_FETCH_MAX_BYTES")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(5 * 1024 * 1024);
+
         let producer_acks = std::env::var("KAFKA_PRODUCER_ACKS")
             .ok()
             .and_then(|v| v.parse::<i16>().ok())
             .unwrap_or(1);
+
         let producer_retries = std::env::var("KAFKA_PRODUCER_RETRIES")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(3);
+
         let consumer_max_poll_interval_ms = std::env::var("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(20000);
+            .unwrap_or(300000);
+
         let consumer_session_timeout_ms = std::env::var("KAFKA_CONSUMER_SESSION_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(20000);
+
         let consumer_heartbeat_interval_ms = std::env::var("KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(5000);
+
         let consumer_max_poll_records = std::env::var("KAFKA_CONSUMER_MAX_POLL_RECORDS")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(5000);
-        let fetch_max_bytes = std::env::var("KAFKA_FETCH_MAX_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(5 * 1024 * 1024);
+
         let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
             .ok()
             .unwrap_or("127.0.0.1:9092".to_string());
+
         let group_id = std::env::var("KAFKA_GROUP_ID")
             .ok()
             .unwrap_or("banking-es-group".to_string());
+
         let topic_prefix = std::env::var("KAFKA_TOPIC_PREFIX")
             .ok()
             .unwrap_or("banking-es".to_string());
+
         let cache_invalidation_topic = std::env::var("KAFKA_CACHE_INVALIDATION_TOPIC")
             .ok()
             .unwrap_or("banking-es-cache-invalidation".to_string());
+
         let event_topic = std::env::var("KAFKA_EVENT_TOPIC")
             .ok()
             .unwrap_or("banking-es-events".to_string());
+
         let auto_offset_reset = std::env::var("KAFKA_AUTO_OFFSET_RESET")
             .ok()
             .unwrap_or("latest".to_string());
+
+        let fetch_max_wait_ms = std::env::var("KAFKA_FETCH_MAX_WAIT_MS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(25);
+
+        let fetch_min_bytes = std::env::var("KAFKA_FETCH_MIN_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(1);
+
+        let reconnect_backoff_max_ms = std::env::var("KAFKA_RECONNECT_BACKOFF_MAX_MS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(1000);
+
+        let enable_auto_commit = std::env::var("KAFKA_ENABLE_AUTO_COMMIT")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false);
+
+        let enable_auto_create_topics = std::env::var("KAFKA_ENABLE_AUTO_CREATE_TOPICS")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false);
+
         Self {
             enabled: true,
-            bootstrap_servers: bootstrap_servers,
-            group_id: group_id,
-            topic_prefix: topic_prefix,
-            producer_acks: producer_acks,
-            producer_retries: producer_retries,
-            consumer_max_poll_interval_ms: consumer_max_poll_interval_ms,
-            consumer_session_timeout_ms: consumer_session_timeout_ms,
-            consumer_heartbeat_interval_ms: consumer_heartbeat_interval_ms,
-            consumer_max_poll_records: consumer_max_poll_records,
-            fetch_max_bytes: fetch_max_bytes,
+            bootstrap_servers,
+            group_id,
+            topic_prefix,
+            producer_acks,
+            producer_retries,
+            consumer_max_poll_interval_ms,
+            consumer_session_timeout_ms,
+            consumer_heartbeat_interval_ms,
+            consumer_max_poll_records,
+            fetch_max_bytes,
             security_protocol: "PLAINTEXT".to_string(),
             sasl_mechanism: "PLAIN".to_string(),
             ssl_ca_location: None,
-            auto_offset_reset: auto_offset_reset,
-            cache_invalidation_topic: cache_invalidation_topic,
-            event_topic: event_topic,
+            auto_offset_reset,
+            cache_invalidation_topic,
+            enable_auto_commit,
+            enable_auto_create_topics,
+            fetch_max_wait_ms,
+            fetch_min_bytes,
+            reconnect_backoff_max_ms,
+            event_topic,
         }
     }
 }
@@ -531,12 +576,6 @@ impl KafkaConsumer {
 
         let context = LoggingConsumerContext;
 
-        // Read max poll records from environment variable (default 500)
-        let fetch_max_bytes = std::env::var("KAFKA_FETCH_MAX_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(5 * 1024 * 1024);
-
         let consumer: LoggingConsumer = ClientConfig::new()
             .set("bootstrap.servers", &config.bootstrap_servers)
             .set("group.id", &config.group_id)
@@ -549,7 +588,8 @@ impl KafkaConsumer {
                 "max.poll.interval.ms",
                 config.consumer_max_poll_interval_ms.to_string(),
             )
-            .set("fetch.min.bytes", "1")
+            .set("fetch.min.bytes", config.fetch_min_bytes.to_string())
+            .set("fetch.wait.max.ms", config.fetch_max_wait_ms.to_string())
             .set(
                 "session.timeout.ms",
                 config.consumer_session_timeout_ms.to_string(),
@@ -559,7 +599,11 @@ impl KafkaConsumer {
                 config.consumer_heartbeat_interval_ms.to_string(),
             )
             .set("partition.assignment.strategy", "cooperative-sticky")
-            .set("fetch.max.bytes", fetch_max_bytes.to_string())
+            .set("fetch.max.bytes", config.fetch_max_bytes.to_string())
+            .set(
+                "reconnect.backoff.max.ms",
+                config.reconnect_backoff_max_ms.to_string(),
+            )
             .create_with_context(context)?;
 
         tracing::info!(

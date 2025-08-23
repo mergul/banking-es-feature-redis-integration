@@ -22,6 +22,10 @@
     "transforms.unwrap.operation.header": "true",
 
     "poll.interval.ms": "5",
+    "connector.max.sleep.time": "50",
+    "max.sleep.time": "25",
+    "flush.lsn.source": "true",
+    "publication.autocreate.mode": "filtered",
     "max.queue.size": "16384",
     "max.batch.size": "4096",
     "snapshot.mode": "initial",
