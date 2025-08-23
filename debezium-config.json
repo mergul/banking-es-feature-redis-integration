@@ -40,6 +40,9 @@
     "database.history.store.only.captured.tables.ddl": "true",
     "database.history.skip.unparseable.ddl": "true",
     "transforms.outbox.table.field.event.timestamp": "deleted_at",
-    "transforms.outbox.route.tombstone.on.empty.payload": "true"
+    "transforms.outbox.route.tombstone.on.empty.payload": "true",
+    "min.row.count.to.stream.results": "1000",
+    "incremental.snapshot.chunk.size": "1024",
+    "signal.data.collection": "public.kafka_outbox_cdc"
   }
 }

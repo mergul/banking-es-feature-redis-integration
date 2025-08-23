@@ -2184,7 +2184,7 @@ impl ProjectionStore {
             SELECT id, owner_name, balance, is_active, created_at, updated_at
             FROM account_projections
             WHERE is_active = true
-            ORDER BY updated_at DESC
+            ORDER BY id DESC
             LIMIT 10000
             "#
         )
@@ -2305,7 +2305,7 @@ impl ProjectionStore {
             SELECT id, owner_name, balance, is_active, created_at, updated_at
             FROM account_projections
             WHERE id = ANY($1)
-            ORDER BY updated_at DESC
+            ORDER BY id DESC
             "#,
             &uncached_ids
         )

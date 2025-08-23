@@ -2352,7 +2352,7 @@ impl CDCConsumer {
         let max_concurrent_batches = std::env::var("CDC_MAX_CONCURRENT_TASKS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(16); // Process up to 16 tasks concurrently
+            .unwrap_or(32); // Process up to 32 tasks concurrently
 
         tracing::info!("Starting {} CDC processing workers", max_concurrent_batches);
 
@@ -2458,7 +2458,7 @@ impl CDCConsumer {
                 }
 
                 message_result = tokio::time::timeout(
-                    Duration::from_millis(1),
+                    Duration::from_millis(poll_interval_ms * 2), // Optimal: 2x poll interval (10ms)
                     message_stream.next()
                 ) => {
                     match message_result {
