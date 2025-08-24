@@ -1,11 +1,14 @@
 use crate::infrastructure::projections::{AccountProjection, ProjectionStoreTrait};
 use crate::infrastructure::TransactionProjection;
 use anyhow::Result;
+use crossbeam_queue::SegQueue;
+use dashmap::DashMap;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -37,7 +40,731 @@ fn get_cdc_poll_interval_ms() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(5) // Default to 5ms if not set or invalid
 }
+// OPTIMIZATION 1: Type-specific batch containers
+pub enum TypedBatch {
+    // Lock-free for unique operations
+    AccountCreation(LockFreeBatch<AccountProjection>),
+    TransactionCreation(LockFreeBatch<TransactionProjection>),
 
+    // Locked for potential conflicts
+    AccountUpdate(LockedBatch<AccountProjection>),
+}
+
+// OPTIMIZATION 2: Lock-free batch for unique operations (Account Creation & Transaction Creation)
+pub struct LockFreeBatch<T> {
+    // Lock-free concurrent queue
+    items: SegQueue<(Uuid, T, Uuid)>, // (entity_id, data, operation_id)
+
+    // Atomic counters
+    size: AtomicUsize,
+    created_at: Instant,
+    batch_type: String,
+}
+
+impl<T> LockFreeBatch<T> {
+    pub fn new(batch_type: String) -> Self {
+        Self {
+            items: SegQueue::new(),
+            size: AtomicUsize::new(0),
+            created_at: Instant::now(),
+            batch_type,
+        }
+    }
+
+    // OPTIMIZATION 3: Lock-free append (perfect for unique operations)
+    pub fn add_item(&self, entity_id: Uuid, item: T, operation_id: Uuid) {
+        self.items.push((entity_id, item, operation_id));
+        let new_size = self.size.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Log progress without locks
+        if new_size % 1000 == 0 {
+            tracing::info!("🚀 LOCKFREE {}: has {} items", self.batch_type, new_size);
+        }
+    }
+
+    // NEW: Bulk add items for better performance
+    pub fn add_items_bulk(&self, items: Vec<(Uuid, T, Uuid)>) {
+        let count = items.len();
+        for (entity_id, item, operation_id) in items {
+            self.items.push((entity_id, item, operation_id));
+        }
+        let new_size = self.size.fetch_add(count, Ordering::Relaxed) + count;
+
+        tracing::info!(
+            "🚀 LOCKFREE BULK {}: added {} items, total: {}",
+            self.batch_type,
+            count,
+            new_size
+        );
+    }
+
+    pub fn len(&self) -> usize {
+        self.size.load(Ordering::Relaxed)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn should_flush(&self, max_size: usize, max_age: Duration) -> bool {
+        self.len() >= max_size || self.created_at.elapsed() > max_age
+    }
+
+    // OPTIMIZATION 4: Drain all items efficiently
+    pub fn drain_all(&self) -> Vec<(Uuid, T, Uuid)> {
+        let mut items = Vec::new();
+        while let Some(item) = self.items.pop() {
+            items.push(item);
+        }
+        self.size.store(0, Ordering::Relaxed);
+        items
+    }
+}
+
+// OPTIMIZATION 5: Locked batch for operations that might conflict (Account Updates)
+pub struct LockedBatch<T> {
+    // Use RwLock for better read performance
+    items: RwLock<Vec<(Uuid, T, Uuid)>>,
+    created_at: Instant,
+    batch_type: String,
+}
+
+impl<T> LockedBatch<T> {
+    pub fn new(batch_type: String) -> Self {
+        Self {
+            items: RwLock::new(Vec::with_capacity(1000)),
+            created_at: Instant::now(),
+            batch_type,
+        }
+    }
+
+    // OPTIMIZATION 6: Fast read operations
+    pub async fn len(&self) -> usize {
+        self.items.read().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.items.read().await.is_empty()
+    }
+
+    pub async fn should_flush(&self, max_size: usize, max_age: Duration) -> bool {
+        let len = self.len().await;
+        len >= max_size || self.created_at.elapsed() > max_age
+    }
+
+    // OPTIMIZATION 7: Write operation only when necessary
+    pub async fn add_item(&self, entity_id: Uuid, item: T, operation_id: Uuid) {
+        let mut items = self.items.write().await;
+        items.push((entity_id, item, operation_id));
+
+        if items.len() % 500 == 0 {
+            tracing::info!("📝 LOCKED {}: has {} items", self.batch_type, items.len());
+        }
+    }
+
+    // NEW: Bulk add items for better performance
+    pub async fn add_items_bulk(&self, new_items: Vec<(Uuid, T, Uuid)>) {
+        let count = new_items.len();
+        let mut items = self.items.write().await;
+        items.extend(new_items);
+
+        tracing::info!(
+            "📝 LOCKED BULK {}: added {} items, total: {}",
+            self.batch_type,
+            count,
+            items.len()
+        );
+    }
+
+    pub async fn drain_all(&self) -> Vec<(Uuid, T, Uuid)> {
+        let mut items = self.items.write().await;
+        std::mem::take(&mut *items)
+    }
+}
+
+// OPTIMIZATION 8: Type-specific processors
+pub struct OptimizedCDCProcessor {
+    // Lock-free processors for unique operations
+    account_creation_batch: Arc<LockFreeBatch<AccountProjection>>,
+    transaction_creation_batch: Arc<LockFreeBatch<TransactionProjection>>,
+
+    // Locked processor for updates
+    account_update_batch: Arc<LockedBatch<AccountProjection>>,
+
+    // Shared resources
+    pending_results: Arc<DashMap<Uuid, mpsc::Sender<CDCOperationResult>>>,
+    projection_store: Arc<dyn ProjectionStoreTrait>,
+    // Metrics
+    metrics: ProcessorMetrics,
+}
+
+#[derive(Clone)]
+pub struct ProcessorMetrics {
+    pub accounts_created: Arc<AtomicUsize>,
+    pub accounts_updated: Arc<AtomicUsize>,
+    pub transactions_created: Arc<AtomicUsize>,
+    pub batches_processed: Arc<AtomicUsize>,
+}
+
+impl ProcessorMetrics {
+    pub fn new() -> Self {
+        Self {
+            accounts_created: Arc::new(AtomicUsize::new(0)),
+            accounts_updated: Arc::new(AtomicUsize::new(0)),
+            transactions_created: Arc::new(AtomicUsize::new(0)),
+            batches_processed: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn get_totals(&self) -> (usize, usize, usize, usize) {
+        (
+            self.accounts_created.load(Ordering::Relaxed),
+            self.accounts_updated.load(Ordering::Relaxed),
+            self.transactions_created.load(Ordering::Relaxed),
+            self.batches_processed.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl OptimizedCDCProcessor {
+    pub async fn new(projection_store: Arc<dyn ProjectionStoreTrait>) -> Self {
+        Self {
+            account_creation_batch: Arc::new(LockFreeBatch::new("ACCOUNT_CREATION".to_string())),
+            transaction_creation_batch: Arc::new(LockFreeBatch::new(
+                "TRANSACTION_CREATION".to_string(),
+            )),
+            account_update_batch: Arc::new(LockedBatch::new("ACCOUNT_UPDATE".to_string())),
+            pending_results: Arc::new(DashMap::new()),
+            projection_store,
+            metrics: ProcessorMetrics::new(),
+        }
+    }
+
+    // OPTIMIZATION 9: Lock-free account creation submission
+    pub async fn submit_account_creation(&self, account: AccountProjection) -> Result<Uuid> {
+        let operation_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(1);
+
+        // Lock-free operations
+        self.pending_results.insert(operation_id, tx);
+        self.account_creation_batch
+            .add_item(account.id, account, operation_id);
+        self.metrics
+            .accounts_created
+            .fetch_add(1, Ordering::Relaxed);
+
+        Ok(operation_id)
+    }
+
+    // NEW: Bulk account creation submission - OPTIMIZED
+    pub async fn submit_account_creations_bulk(
+        &self,
+        projections: Vec<(Uuid, AccountProjection)>,
+    ) -> Result<Vec<Uuid>> {
+        let batch_size = projections.len();
+        let mut operation_ids = Vec::with_capacity(batch_size);
+        let mut batch_items = Vec::with_capacity(batch_size);
+
+        // Single pass: generate IDs, create channels, and prepare batch items
+        for (entity_id, account) in projections {
+            let operation_id = Uuid::new_v4();
+            let (tx, _rx) = mpsc::channel(1);
+
+            // The for loop is ONLY needed for these two operations:
+            // 1. Store result channel for later notification
+            self.pending_results.insert(operation_id, tx);
+            // 2. Collect operation IDs to return to caller
+            operation_ids.push(operation_id);
+
+            // Prepare batch item (could be done in the loop above, but separated for clarity)
+            batch_items.push((entity_id, account, operation_id));
+        }
+
+        // Single atomic operation: add all items to lock-free batch
+        self.account_creation_batch.add_items_bulk(batch_items);
+        // Single atomic operation: update metrics
+        self.metrics
+            .accounts_created
+            .fetch_add(batch_size, Ordering::Relaxed);
+
+        tracing::info!(
+            "🚀 BULK ACCOUNT CREATION: Submitted {} accounts",
+            batch_size
+        );
+
+        Ok(operation_ids)
+    }
+
+    // OPTIMIZATION 10: Lock-free transaction creation submission
+    pub async fn submit_transaction_creation(
+        &self,
+        transaction: TransactionProjection,
+    ) -> Result<Uuid> {
+        let operation_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(1);
+
+        // Lock-free operations
+        self.pending_results.insert(operation_id, tx);
+        self.transaction_creation_batch
+            .add_item(transaction.account_id, transaction, operation_id);
+        self.metrics
+            .transactions_created
+            .fetch_add(1, Ordering::Relaxed);
+
+        Ok(operation_id)
+    }
+
+    // NEW: Bulk transaction creation submission
+    pub async fn submit_transaction_creations_bulk(
+        &self,
+        transactions: Vec<TransactionProjection>,
+    ) -> Result<Vec<Uuid>> {
+        let mut operation_ids = Vec::with_capacity(transactions.len());
+        let mut batch_items = Vec::with_capacity(transactions.len());
+
+        // Prepare all operations and channels
+        for transaction in transactions {
+            let operation_id = Uuid::new_v4();
+            let (tx, _rx) = mpsc::channel(1);
+
+            // Store the result channel
+            self.pending_results.insert(operation_id, tx);
+
+            // Prepare batch item
+            batch_items.push((transaction.account_id, transaction, operation_id));
+            operation_ids.push(operation_id);
+        }
+
+        // Add all items to batch at once (lock-free)
+        self.transaction_creation_batch.add_items_bulk(batch_items);
+        self.metrics
+            .transactions_created
+            .fetch_add(operation_ids.len(), Ordering::Relaxed);
+
+        tracing::info!(
+            "💳 BULK TRANSACTION CREATION: Submitted {} transactions",
+            operation_ids.len()
+        );
+
+        Ok(operation_ids)
+    }
+
+    // OPTIMIZATION 11: Locked account update submission (only when necessary)
+    pub async fn submit_account_update(&self, account: AccountProjection) -> Result<Uuid> {
+        let operation_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(1);
+
+        // Lock-free result tracking
+        self.pending_results.insert(operation_id, tx);
+
+        // Locked batch addition (necessary for potential conflicts)
+        self.account_update_batch
+            .add_item(account.id, account, operation_id)
+            .await;
+        self.metrics
+            .accounts_updated
+            .fetch_add(1, Ordering::Relaxed);
+
+        Ok(operation_id)
+    }
+
+    // NEW: Bulk account update submission
+    pub async fn submit_account_updates_bulk(
+        &self,
+        projections: Vec<(Uuid, AccountProjection)>,
+    ) -> Result<Vec<Uuid>> {
+        let mut operation_ids = Vec::with_capacity(projections.len());
+        let mut batch_items = Vec::with_capacity(projections.len());
+
+        // Prepare all operations and channels
+        for (entity_id, account) in projections {
+            let operation_id = Uuid::new_v4();
+            let (tx, _rx) = mpsc::channel(1);
+
+            // Store the result channel
+            self.pending_results.insert(operation_id, tx);
+
+            // Prepare batch item
+            batch_items.push((entity_id, account, operation_id));
+            operation_ids.push(operation_id);
+        }
+
+        // Add all items to batch at once (requires lock for updates)
+        self.account_update_batch.add_items_bulk(batch_items).await;
+        self.metrics
+            .accounts_updated
+            .fetch_add(operation_ids.len(), Ordering::Relaxed);
+
+        tracing::info!(
+            "🔄 BULK ACCOUNT UPDATE: Submitted {} account updates",
+            operation_ids.len()
+        );
+
+        Ok(operation_ids)
+    }
+
+    // OPTIMIZATION 12: Parallel processing of all batch types
+    pub async fn start_processing(&self) -> Result<()> {
+        let account_creation_batch = self.account_creation_batch.clone();
+        let transaction_creation_batch = self.transaction_creation_batch.clone();
+        let account_update_batch = self.account_update_batch.clone();
+        let pending_results = self.pending_results.clone();
+        let projection_store = self.projection_store.clone();
+        let metrics = self.metrics.clone();
+
+        // OPTIMIZATION 13: Spawn separate processors for each batch type
+        let account_creation_handle = tokio::spawn({
+            let batch = account_creation_batch.clone();
+            let store = projection_store.clone();
+            let results = pending_results.clone();
+            let metrics = metrics.clone();
+
+            async move { Self::process_account_creation_batches(batch, store, results, metrics).await }
+        });
+
+        let transaction_creation_handle = tokio::spawn({
+            let batch = transaction_creation_batch.clone();
+            let store = projection_store.clone();
+            let results = pending_results.clone();
+            let metrics = metrics.clone();
+
+            async move {
+                Self::process_transaction_creation_batches(batch, store, results, metrics).await
+            }
+        });
+
+        let account_update_handle = tokio::spawn({
+            let batch = account_update_batch.clone();
+            let store = projection_store.clone();
+            let results = pending_results.clone();
+            let metrics = metrics.clone();
+
+            async move { Self::process_account_update_batches(batch, store, results, metrics).await }
+        });
+
+        tracing::info!("🚀 Started optimized CDC processor with 3 specialized batch processors",);
+
+        // Wait for all processors (in production, you might handle this differently)
+        tokio::try_join!(
+            account_creation_handle,
+            transaction_creation_handle,
+            account_update_handle
+        )?;
+
+        Ok(())
+    }
+
+    // OPTIMIZATION 14: Ultra-fast account creation processing (lock-free)
+    async fn process_account_creation_batches(
+        batch: Arc<LockFreeBatch<AccountProjection>>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+        pending_results: Arc<DashMap<Uuid, mpsc::Sender<CDCOperationResult>>>,
+        metrics: ProcessorMetrics,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_millis(5)); // Aggressive for lock-free
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            if batch.should_flush(2000, Duration::from_millis(10)) && !batch.is_empty() {
+                let batch_start = Instant::now();
+                let items = batch.drain_all();
+                let batch_size = items.len();
+
+                if batch_size == 0 {
+                    continue;
+                }
+
+                tracing::info!("⚡ ACCOUNT CREATION: Processing {} items", batch_size);
+
+                // Extract projections for bulk insert
+                let projections: Vec<AccountProjection> = items
+                    .iter()
+                    .map(|(_, projection, _)| projection.clone())
+                    .collect();
+
+                // OPTIMIZATION 15: Single bulk INSERT (perfect for unique data)
+                match projection_store
+                    .bulk_insert_new_accounts_with_copy(projections)
+                    .await
+                {
+                    Ok(_) => {
+                        // Notify all successful operations
+                        for (aggregate_id, _, operation_id) in items {
+                            if let Some((_, sender)) = pending_results.remove(&operation_id) {
+                                let result = CDCOperationResult {
+                                    operation_id,
+                                    success: true,
+                                    aggregate_id: Some(aggregate_id),
+                                    error: None,
+                                    duration: batch_start.elapsed(),
+                                };
+                                let _ = sender.try_send(result);
+                            }
+                        }
+
+                        let duration = batch_start.elapsed();
+                        metrics.batches_processed.fetch_add(1, Ordering::Relaxed);
+
+                        tracing::info!(
+                            "✅ ACCOUNT CREATION: {} accounts created in {:?} ({:.0} accounts/sec)",
+                            batch_size,
+                            duration,
+                            batch_size as f64 / duration.as_secs_f64()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Account creation batch failed: {:?}", e);
+
+                        // Notify all failed operations
+                        for (aggregate_id, _, operation_id) in items {
+                            if let Some((_, sender)) = pending_results.remove(&operation_id) {
+                                let result = CDCOperationResult {
+                                    operation_id,
+                                    success: false,
+                                    error: Some(e.to_string()),
+                                    aggregate_id: Some(aggregate_id),
+                                    duration: batch_start.elapsed(),
+                                };
+                                let _ = sender.try_send(result);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Minimal sleep for empty batches
+            if batch.is_empty() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
+    // OPTIMIZATION 16: Ultra-fast transaction creation processing (lock-free)
+    async fn process_transaction_creation_batches(
+        batch: Arc<LockFreeBatch<TransactionProjection>>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+        pending_results: Arc<DashMap<Uuid, mpsc::Sender<CDCOperationResult>>>,
+        metrics: ProcessorMetrics,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_millis(5)); // Aggressive for lock-free
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            if batch.should_flush(3000, Duration::from_millis(10)) && !batch.is_empty() {
+                let batch_start = Instant::now();
+                let items = batch.drain_all();
+                let batch_size = items.len();
+
+                if batch_size == 0 {
+                    continue;
+                }
+
+                tracing::info!("💳 TRANSACTION CREATION: Processing {} items", batch_size);
+
+                // Extract transactions for bulk insert
+                let transactions: Vec<TransactionProjection> = items
+                    .iter()
+                    .map(|(_, transaction, _)| transaction.clone())
+                    .collect();
+
+                // OPTIMIZATION 17: Single bulk INSERT (perfect for unique transactions)
+                match projection_store
+                    .bulk_insert_transaction_projections(transactions)
+                    .await
+                {
+                    Ok(_) => {
+                        // Notify all successful operations
+                        for (aggregate_id, _, operation_id) in items {
+                            if let Some((_, sender)) = pending_results.remove(&operation_id) {
+                                let result = CDCOperationResult {
+                                    operation_id,
+                                    success: true,
+                                    error: None,
+                                    aggregate_id: Some(aggregate_id),
+                                    duration: batch_start.elapsed(),
+                                };
+                                let _ = sender.try_send(result);
+                            }
+                        }
+
+                        let duration = batch_start.elapsed();
+                        metrics.batches_processed.fetch_add(1, Ordering::Relaxed);
+
+                        tracing::info!(
+                            "✅ TRANSACTION CREATION: {} transactions created in {:?} ({:.0} tx/sec)",
+                            batch_size, duration,
+                            batch_size as f64 / duration.as_secs_f64()
+                        );
+                    }
+                    Err(e) => {
+                        let duration = batch_start.elapsed();
+                        metrics.batches_processed.fetch_add(1, Ordering::Relaxed);
+
+                        tracing::info!(
+                            "✅ TRANSACTION CREATION: {} transactions created in {:?} ({:.0} tx/sec)",
+                            batch_size, duration,
+                            batch_size as f64 / duration.as_secs_f64()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Transaction creation batch failed: {:?}", e);
+
+                        // Notify all failed operations
+                        for (aggregate_id, _, operation_id) in items {
+                            if let Some((_, sender)) = pending_results.remove(&operation_id) {
+                                let result = CDCOperationResult {
+                                    operation_id,
+                                    success: false,
+                                    error: Some(e.to_string()),
+                                    aggregate_id: Some(aggregate_id),
+                                    duration: batch_start.elapsed(),
+                                };
+                                let _ = sender.try_send(result);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Minimal sleep for empty batches
+            if batch.is_empty() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
+    // OPTIMIZATION 18: Careful account update processing (with conflict handling)
+    async fn process_account_update_batches(
+        batch: Arc<LockedBatch<AccountProjection>>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+        pending_results: Arc<DashMap<Uuid, mpsc::Sender<CDCOperationResult>>>,
+        metrics: ProcessorMetrics,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_millis(10)); // Slower for locked operations
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            if batch.should_flush(1000, Duration::from_millis(25)).await && !batch.is_empty().await
+            {
+                let batch_start = Instant::now();
+                let items = batch.drain_all().await;
+                let batch_size = items.len();
+
+                if batch_size == 0 {
+                    continue;
+                }
+                tracing::info!("🔄 ACCOUNT UPDATE: Processing {} items", batch_size);
+
+                // OPTIMIZATION 19: Detect and handle potential conflicts
+                let mut unique_accounts: std::collections::HashMap<
+                    Uuid,
+                    (AccountProjection, Vec<Uuid>),
+                > = std::collections::HashMap::new();
+
+                // Group by account ID to handle conflicts
+                for (account_id, projection, operation_id) in items {
+                    unique_accounts
+                        .entry(account_id)
+                        .and_modify(|(latest_proj, op_ids)| {
+                            // Keep the latest update
+                            if projection.updated_at > latest_proj.updated_at {
+                                *latest_proj = projection.clone();
+                            }
+                            op_ids.push(operation_id);
+                        })
+                        .or_insert((projection, vec![operation_id]));
+                }
+
+                let final_projections: Vec<AccountProjection> = unique_accounts
+                    .values()
+                    .map(|(proj, _)| proj.clone())
+                    .collect();
+
+                tracing::info!(
+                    "🔄 ACCOUNT UPDATE: Resolved {} updates to {} unique accounts",
+                    batch_size,
+                    final_projections.len()
+                );
+
+                // OPTIMIZATION 20: Bulk UPDATE with conflict resolution
+                match projection_store
+                    .bulk_update_accounts_with_copy(final_projections)
+                    .await
+                {
+                    Ok(_) => {
+                        // Notify all successful operations
+                        for (aggregate, operation_ids) in unique_accounts.values() {
+                            for operation_id in operation_ids {
+                                if let Some((_, sender)) = pending_results.remove(operation_id) {
+                                    let result = CDCOperationResult {
+                                        operation_id: *operation_id,
+                                        success: true,
+                                        error: None,
+                                        aggregate_id: Some(aggregate.id),
+                                        duration: batch_start.elapsed(),
+                                    };
+                                    let _ = sender.try_send(result);
+                                }
+                            }
+                        }
+
+                        let duration = batch_start.elapsed();
+                        metrics.batches_processed.fetch_add(1, Ordering::Relaxed);
+
+                        tracing::info!(
+                            "✅ ACCOUNT UPDATE: {} accounts updated in {:?} ({:.0} updates/sec)",
+                            batch_size,
+                            duration,
+                            batch_size as f64 / duration.as_secs_f64()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Account update batch failed: {:?}", e);
+
+                        // Notify all failed operations
+                        for (aggregate, operation_ids) in unique_accounts.values() {
+                            for operation_id in operation_ids {
+                                if let Some((_, sender)) = pending_results.remove(operation_id) {
+                                    let result = CDCOperationResult {
+                                        operation_id: *operation_id,
+                                        success: false,
+                                        error: Some(e.to_string()),
+                                        aggregate_id: Some(aggregate.id),
+                                        duration: batch_start.elapsed(),
+                                    };
+                                    let _ = sender.try_send(result);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sleep for empty batches
+            if batch.is_empty().await {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    }
+
+    // OPTIMIZATION 21: Get comprehensive metrics
+    pub fn get_performance_metrics(&self) -> String {
+        let (created, updated, transactions, batches) = self.metrics.get_totals();
+
+        format!(
+            "CDC Metrics: {} accounts created, {} accounts updated, {} transactions created, {} batches processed",
+            created, updated, transactions, batches
+        )
+    }
+}
+
+/*
 // OPTIMIZATION 1: Enhanced CDCBatch to support transaction projections
 #[derive(Debug)]
 pub struct CDCBatch {
@@ -57,7 +784,7 @@ pub struct CDCBatch {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CDCBatchType {
     AccountCreated, // INSERT only, no locking
-    OtherEvents,    // UPDATE, requires locking
+    UpdateEvents,   // UPDATE, requires locking
     Transactions,   // Transaction history INSERT only
 }
 
@@ -73,14 +800,14 @@ impl CDCBatch {
         }
     }
 
-    pub fn new_other_events_batch(partition_id: Option<usize>) -> Self {
+    pub fn new_update_events_batch(partition_id: Option<usize>) -> Self {
         Self {
             batch_id: Uuid::new_v4(),
             projections: Vec::with_capacity(1000), // Pre-allocate
             transaction_projections: Vec::new(),
             created_at: Instant::now(),
             partition_id,
-            batch_type: CDCBatchType::OtherEvents,
+            batch_type: CDCBatchType::UpdateEvents,
         }
     }
 
@@ -202,7 +929,7 @@ impl CDCBatchingService {
             config,
             projection_store,
             write_pool,
-            current_batch: Arc::new(Mutex::new(CDCBatch::new_other_events_batch(Some(
+            current_batch: Arc::new(Mutex::new(CDCBatch::new_update_events_batch(Some(
                 partition_id,
             )))),
             pending_results: Arc::new(Mutex::new(HashMap::with_capacity(10000))),
@@ -213,7 +940,7 @@ impl CDCBatchingService {
             projections_processed: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             processing_times: Arc::new(Mutex::new(Vec::with_capacity(1000))),
             partition_id: Some(partition_id),
-            processing_type: CDCBatchType::OtherEvents,
+            processing_type: CDCBatchType::UpdateEvents,
         }
     }
 
@@ -376,7 +1103,7 @@ impl CDCBatchingService {
         shutdown_token: CancellationToken,
     ) {
         // OPTIMIZATION 12: Adaptive batch timing based on load
-        let base_interval = Duration::from_millis(config.max_poll_interval_ms.min(25)); // Cap at 25ms
+        let base_interval = Duration::from_millis(config.max_poll_interval_ms.min(5)); // Cap at 5ms
         let mut interval = tokio::time::interval(base_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -418,7 +1145,7 @@ impl CDCBatchingService {
 
                             let new_batch = match processing_type {
                                 CDCBatchType::AccountCreated => CDCBatch::new_account_created_batch(partition_id),
-                                CDCBatchType::OtherEvents => CDCBatch::new_other_events_batch(partition_id),
+                                CDCBatchType::UpdateEvents => CDCBatch::new_update_events_batch(partition_id),
                                 CDCBatchType::Transactions => CDCBatch::new_transaction_batch(partition_id),
                             };
 
@@ -437,8 +1164,8 @@ impl CDCBatchingService {
                             CDCBatchType::AccountCreated => {
                                 Self::execute_account_created_batch(&batch, &projection_store, &config).await
                             }
-                            CDCBatchType::OtherEvents => {
-                                Self::execute_other_events_batch(&batch, &projection_store, &write_pool, &config).await
+                            CDCBatchType::UpdateEvents => {
+                                Self::execute_update_events_batch(&batch, &projection_store, &write_pool, &config).await
                             }
                             CDCBatchType::Transactions => {
                                 Self::execute_transaction_batch(&batch, &projection_store, &config).await
@@ -446,19 +1173,8 @@ impl CDCBatchingService {
                         };
 
                         let processing_duration = batch_start.elapsed();
-
-                        // Update metrics
                         batches_processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         projections_processed.fetch_add(last_batch_size as u64, std::sync::atomic::Ordering::Relaxed);
-
-                        // Store processing time for analysis
-                        {
-                            let mut times = processing_times.lock().await;
-                            times.push(processing_duration);
-                            if times.len() > 100 { // Keep only last 100 measurements
-                                times.remove(0);
-                            }
-                        }
 
                         info!(
                             "✅ BATCH COMPLETE: Partition {:?} processed {} items in {:?} ({:.0} items/sec)",
@@ -543,7 +1259,7 @@ impl CDCBatchingService {
     }
 
     // OPTIMIZATION 16: Enhanced other events batch execution
-    async fn execute_other_events_batch(
+    async fn execute_update_events_batch(
         batch: &CDCBatch,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         write_pool: &Arc<PgPool>,
@@ -698,9 +1414,22 @@ impl CDCBatchingService {
         pending_results: Arc<Mutex<HashMap<Uuid, mpsc::Sender<CDCOperationResult>>>>,
         completed_results: Arc<Mutex<HashMap<Uuid, CDCOperationResult>>>,
     ) {
+        let mut pending_guard = pending_results.lock().await;
         let mut completed_guard = completed_results.lock().await;
         for (operation_id, result) in results {
+            if let Some(sender) = pending_guard.remove(&result.operation_id) {
+                // Try to send result, but don't block if receiver is gone
+                let _ = sender.try_send(result.clone());
+            }
             completed_guard.insert(operation_id, result);
+        }
+        // Clean up old completed results to prevent memory leaks
+        if completed_guard.len() > 10000 {
+            let cutoff = completed_guard.len() - 5000;
+            let keys_to_remove: Vec<Uuid> = completed_guard.keys().take(cutoff).cloned().collect();
+            for key in keys_to_remove {
+                completed_guard.remove(&key);
+            }
         }
     }
 
@@ -830,7 +1559,7 @@ impl PartitionedCDCBatching {
         Ok(operation_ids)
     }
 
-    pub async fn submit_other_events_bulk(
+    pub async fn submit_update_events_bulk(
         &self,
         projections: Vec<(Uuid, AccountProjection)>,
     ) -> Result<Vec<Uuid>> {
@@ -1035,55 +1764,7 @@ impl PartitionedCDCBatching {
             }
         }
     }
-
-    // OPTIMIZATION 29: Health check for monitoring
-    pub async fn health_check(&self) -> HealthStatus {
-        let mut healthy_processors = 0;
-        let mut total_processors = 0;
-        let mut issues = Vec::new();
-
-        // Check account created processor
-        total_processors += 1;
-        if self
-            .account_created_processor
-            .batch_processor_handle
-            .lock()
-            .await
-            .is_some()
-        {
-            healthy_processors += 1;
-        } else {
-            issues.push("AccountCreated processor not running".to_string());
-        }
-
-        // Check transaction processors
-        for (idx, processor) in self.transaction_processors.iter().enumerate() {
-            total_processors += 1;
-            if processor.batch_processor_handle.lock().await.is_some() {
-                healthy_processors += 1;
-            } else {
-                issues.push(format!("Transaction processor {} not running", idx));
-            }
-        }
-
-        // Check transaction history processors
-        for (idx, processor) in self.transaction_history_processors.iter().enumerate() {
-            total_processors += 1;
-            if processor.batch_processor_handle.lock().await.is_some() {
-                healthy_processors += 1;
-            } else {
-                issues.push(format!("Transaction history processor {} not running", idx));
-            }
-        }
-
-        HealthStatus {
-            healthy: issues.is_empty(),
-            healthy_processors,
-            total_processors,
-            issues,
-        }
-    }
-}
+} */
 
 // OPTIMIZATION 30: Performance monitoring structures
 #[derive(Debug, Clone)]

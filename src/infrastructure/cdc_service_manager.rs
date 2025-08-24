@@ -4,7 +4,7 @@ use crate::infrastructure::cdc_event_processor::UltraOptimizedCDCEventProcessor;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::outbox_cleanup_service::{CleanupConfig, CleanupMetrics, OutboxCleaner}; // Added new cleanup service
 use crate::infrastructure::projections::ProjectionStoreTrait;
-use crate::infrastructure::{PartitionedCDCBatching, PoolSelector};
+use crate::infrastructure::{OptimizedCDCProcessor, PoolSelector};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -24,249 +24,17 @@ pub struct CDCServiceManager {
     config: DebeziumConfig,
     outbox_repo: Arc<CDCOutboxRepository>,
     processor: Arc<UltraOptimizedCDCEventProcessor>,
-
-    // Projection store for CDC Batching Service
     projection_store: Arc<dyn ProjectionStoreTrait>,
-
-    // Unified shutdown management
     shutdown_token: CancellationToken,
-
-    // Task management with proper handles
     tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
-
-    // Service state management
     state: Arc<RwLock<ServiceState>>,
-
-    // Enhanced metrics and monitoring
     metrics: Arc<EnhancedCDCMetrics>,
-
-    // Health checker
     health_checker: Arc<CDCHealthCheck>,
-
-    // Configuration for optimizations
     optimization_config: OptimizationConfig,
-
-    // Consistency manager for projection synchronization
     consistency_manager:
         Option<Arc<crate::infrastructure::consistency_manager::ConsistencyManager>>,
-
-    // New advanced outbox cleanup service
     outbox_cleaner: Option<Arc<OutboxCleaner>>,
-
-    // CDC Batching Service for parallel projection updates
-    cdc_batching_service: Option<Arc<PartitionedCDCBatching>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ServiceState {
-    Stopped,
-    Starting,
-    Running,
-    Stopping,
-    Migrating,
-    Failed(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct OptimizationConfig {
-    pub health_check_interval_secs: u64,
-    pub cleanup_interval_secs: u64,
-    pub metrics_flush_interval_secs: u64,
-    pub graceful_shutdown_timeout_secs: u64,
-    pub consumer_backoff_ms: u64,
-    pub max_retries: usize,
-    pub circuit_breaker_threshold: f64,
-    pub enable_compression: bool,
-    pub enable_batching: bool,
-}
-
-impl Default for OptimizationConfig {
-    fn default() -> Self {
-        Self {
-            health_check_interval_secs: 30,
-            cleanup_interval_secs: 3600,
-            metrics_flush_interval_secs: 60,
-            graceful_shutdown_timeout_secs: 30,
-            consumer_backoff_ms: 100,
-            max_retries: 3,
-            circuit_breaker_threshold: 0.1,
-            enable_compression: true,
-            enable_batching: true,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct EnhancedCDCMetrics {
-    // Existing metrics
-    pub events_processed: std::sync::atomic::AtomicU64,
-    pub events_failed: std::sync::atomic::AtomicU64,
-    pub processing_latency_ms: std::sync::atomic::AtomicU64,
-    pub total_latency_ms: std::sync::atomic::AtomicU64,
-    pub cache_invalidations: std::sync::atomic::AtomicU64,
-    pub projection_updates: std::sync::atomic::AtomicU64,
-
-    // New optimization metrics
-    pub batches_processed: std::sync::atomic::AtomicU64,
-    pub circuit_breaker_trips: std::sync::atomic::AtomicU64,
-    pub consumer_restarts: std::sync::atomic::AtomicU64,
-    pub cleanup_cycles: std::sync::atomic::AtomicU64,
-    pub memory_usage_bytes: std::sync::atomic::AtomicU64,
-    pub active_connections: std::sync::atomic::AtomicU64,
-    pub queue_depth: std::sync::atomic::AtomicU64,
-
-    // Performance metrics
-    pub avg_batch_size: std::sync::atomic::AtomicU64,
-    pub p95_processing_latency_ms: std::sync::atomic::AtomicU64,
-    pub p99_processing_latency_ms: std::sync::atomic::AtomicU64,
-    pub throughput_per_second: std::sync::atomic::AtomicU64,
-
-    // Error tracking
-    pub consecutive_failures: std::sync::atomic::AtomicU64,
-    pub last_error_time: std::sync::atomic::AtomicU64,
-    pub error_rate: std::sync::atomic::AtomicU64,
-
-    // Duplicate detection
-    pub duplicate_events_skipped: std::sync::atomic::AtomicU64,
-
-    // Batch processing metrics
-    pub batch_processing_duration: std::sync::atomic::AtomicU64,
-    pub batch_processing_errors: std::sync::atomic::AtomicU64,
-
-    // Integration helper status
-    pub integration_helper_initialized: std::sync::atomic::AtomicBool,
-}
-
-impl Clone for EnhancedCDCMetrics {
-    fn clone(&self) -> Self {
-        Self {
-            events_processed: std::sync::atomic::AtomicU64::new(
-                self.events_processed
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            events_failed: std::sync::atomic::AtomicU64::new(
-                self.events_failed
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            processing_latency_ms: std::sync::atomic::AtomicU64::new(
-                self.processing_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            total_latency_ms: std::sync::atomic::AtomicU64::new(
-                self.total_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            cache_invalidations: std::sync::atomic::AtomicU64::new(
-                self.cache_invalidations
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            projection_updates: std::sync::atomic::AtomicU64::new(
-                self.projection_updates
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            batches_processed: std::sync::atomic::AtomicU64::new(
-                self.batches_processed
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            circuit_breaker_trips: std::sync::atomic::AtomicU64::new(
-                self.circuit_breaker_trips
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            consumer_restarts: std::sync::atomic::AtomicU64::new(
-                self.consumer_restarts
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            cleanup_cycles: std::sync::atomic::AtomicU64::new(
-                self.cleanup_cycles
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            memory_usage_bytes: std::sync::atomic::AtomicU64::new(
-                self.memory_usage_bytes
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            active_connections: std::sync::atomic::AtomicU64::new(
-                self.active_connections
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            queue_depth: std::sync::atomic::AtomicU64::new(
-                self.queue_depth.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            avg_batch_size: std::sync::atomic::AtomicU64::new(
-                self.avg_batch_size
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            p95_processing_latency_ms: std::sync::atomic::AtomicU64::new(
-                self.p95_processing_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            p99_processing_latency_ms: std::sync::atomic::AtomicU64::new(
-                self.p99_processing_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            throughput_per_second: std::sync::atomic::AtomicU64::new(
-                self.throughput_per_second
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            consecutive_failures: std::sync::atomic::AtomicU64::new(
-                self.consecutive_failures
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            last_error_time: std::sync::atomic::AtomicU64::new(
-                self.last_error_time
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            error_rate: std::sync::atomic::AtomicU64::new(
-                self.error_rate.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            duplicate_events_skipped: std::sync::atomic::AtomicU64::new(
-                self.duplicate_events_skipped
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            batch_processing_duration: std::sync::atomic::AtomicU64::new(
-                self.batch_processing_duration
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            batch_processing_errors: std::sync::atomic::AtomicU64::new(
-                self.batch_processing_errors
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            integration_helper_initialized: std::sync::atomic::AtomicBool::new(
-                self.integration_helper_initialized
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-        }
-    }
-}
-
-impl Default for EnhancedCDCMetrics {
-    fn default() -> Self {
-        Self {
-            events_processed: std::sync::atomic::AtomicU64::new(0),
-            events_failed: std::sync::atomic::AtomicU64::new(0),
-            processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
-            total_latency_ms: std::sync::atomic::AtomicU64::new(0),
-            cache_invalidations: std::sync::atomic::AtomicU64::new(0),
-            projection_updates: std::sync::atomic::AtomicU64::new(0),
-            batches_processed: std::sync::atomic::AtomicU64::new(0),
-            circuit_breaker_trips: std::sync::atomic::AtomicU64::new(0),
-            consumer_restarts: std::sync::atomic::AtomicU64::new(0),
-            cleanup_cycles: std::sync::atomic::AtomicU64::new(0),
-            memory_usage_bytes: std::sync::atomic::AtomicU64::new(0),
-            active_connections: std::sync::atomic::AtomicU64::new(0),
-            queue_depth: std::sync::atomic::AtomicU64::new(0),
-            avg_batch_size: std::sync::atomic::AtomicU64::new(0),
-            p95_processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
-            p99_processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
-            throughput_per_second: std::sync::atomic::AtomicU64::new(0),
-            consecutive_failures: std::sync::atomic::AtomicU64::new(0),
-            last_error_time: std::sync::atomic::AtomicU64::new(0),
-            error_rate: std::sync::atomic::AtomicU64::new(0),
-            duplicate_events_skipped: std::sync::atomic::AtomicU64::new(0),
-            batch_processing_duration: std::sync::atomic::AtomicU64::new(0),
-            batch_processing_errors: std::sync::atomic::AtomicU64::new(0),
-            integration_helper_initialized: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
+    cdc_batching_service: Option<Arc<OptimizedCDCProcessor>>,
 }
 
 impl CDCServiceManager {
@@ -297,9 +65,7 @@ impl CDCServiceManager {
             .select_pool(crate::infrastructure::connection_pool_partitioning::OperationType::Write)
             .clone();
 
-        let cdc_batching_service =
-            PartitionedCDCBatching::new(projection_store.clone(), Arc::new(write_pool.clone()))
-                .await;
+        let cdc_batching_service = OptimizedCDCProcessor::new(projection_store.clone()).await;
 
         let processor = Arc::new(UltraOptimizedCDCEventProcessor::new_with_write_pool(
             kafka_producer,
@@ -442,7 +208,7 @@ impl CDCServiceManager {
 
             // Start CDC Batching Service
             tracing::info!("CDC Service Manager: Starting CDC Batching Service...");
-            cdc_batching_service.start().await?;
+            cdc_batching_service.start_processing().await?;
             tracing::info!("CDC Service Manager: ✅ CDC Batching Service started successfully");
         } else {
             tracing::warn!("CDC Service Manager: CDC Batching Service not available");
@@ -989,7 +755,7 @@ impl CDCServiceManager {
     }
 
     /// Get the CDC Batching Service if available
-    pub fn get_cdc_batching_service(&self) -> Option<Arc<PartitionedCDCBatching>> {
+    pub fn get_cdc_batching_service(&self) -> Option<Arc<OptimizedCDCProcessor>> {
         self.cdc_batching_service.clone()
     }
 
@@ -1128,5 +894,217 @@ impl CDCHealthCheck {
                 "memory_usage_mb": self.metrics.memory_usage_bytes.load(std::sync::atomic::Ordering::Relaxed) / 1024 / 1024
             }
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ServiceState {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+    Migrating,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct OptimizationConfig {
+    pub health_check_interval_secs: u64,
+    pub cleanup_interval_secs: u64,
+    pub metrics_flush_interval_secs: u64,
+    pub graceful_shutdown_timeout_secs: u64,
+    pub consumer_backoff_ms: u64,
+    pub max_retries: usize,
+    pub circuit_breaker_threshold: f64,
+    pub enable_compression: bool,
+    pub enable_batching: bool,
+}
+
+impl Default for OptimizationConfig {
+    fn default() -> Self {
+        Self {
+            health_check_interval_secs: 30,
+            cleanup_interval_secs: 3600,
+            metrics_flush_interval_secs: 60,
+            graceful_shutdown_timeout_secs: 30,
+            consumer_backoff_ms: 100,
+            max_retries: 3,
+            circuit_breaker_threshold: 0.1,
+            enable_compression: true,
+            enable_batching: true,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EnhancedCDCMetrics {
+    // Existing metrics
+    pub events_processed: std::sync::atomic::AtomicU64,
+    pub events_failed: std::sync::atomic::AtomicU64,
+    pub processing_latency_ms: std::sync::atomic::AtomicU64,
+    pub total_latency_ms: std::sync::atomic::AtomicU64,
+    pub cache_invalidations: std::sync::atomic::AtomicU64,
+    pub projection_updates: std::sync::atomic::AtomicU64,
+
+    // New optimization metrics
+    pub batches_processed: std::sync::atomic::AtomicU64,
+    pub circuit_breaker_trips: std::sync::atomic::AtomicU64,
+    pub consumer_restarts: std::sync::atomic::AtomicU64,
+    pub cleanup_cycles: std::sync::atomic::AtomicU64,
+    pub memory_usage_bytes: std::sync::atomic::AtomicU64,
+    pub active_connections: std::sync::atomic::AtomicU64,
+    pub queue_depth: std::sync::atomic::AtomicU64,
+
+    // Performance metrics
+    pub avg_batch_size: std::sync::atomic::AtomicU64,
+    pub p95_processing_latency_ms: std::sync::atomic::AtomicU64,
+    pub p99_processing_latency_ms: std::sync::atomic::AtomicU64,
+    pub throughput_per_second: std::sync::atomic::AtomicU64,
+
+    // Error tracking
+    pub consecutive_failures: std::sync::atomic::AtomicU64,
+    pub last_error_time: std::sync::atomic::AtomicU64,
+    pub error_rate: std::sync::atomic::AtomicU64,
+
+    // Duplicate detection
+    pub duplicate_events_skipped: std::sync::atomic::AtomicU64,
+
+    // Batch processing metrics
+    pub batch_processing_duration: std::sync::atomic::AtomicU64,
+    pub batch_processing_errors: std::sync::atomic::AtomicU64,
+
+    // Integration helper status
+    pub integration_helper_initialized: std::sync::atomic::AtomicBool,
+}
+
+impl Clone for EnhancedCDCMetrics {
+    fn clone(&self) -> Self {
+        Self {
+            events_processed: std::sync::atomic::AtomicU64::new(
+                self.events_processed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            events_failed: std::sync::atomic::AtomicU64::new(
+                self.events_failed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            total_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.total_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            cache_invalidations: std::sync::atomic::AtomicU64::new(
+                self.cache_invalidations
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            projection_updates: std::sync::atomic::AtomicU64::new(
+                self.projection_updates
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            batches_processed: std::sync::atomic::AtomicU64::new(
+                self.batches_processed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            circuit_breaker_trips: std::sync::atomic::AtomicU64::new(
+                self.circuit_breaker_trips
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            consumer_restarts: std::sync::atomic::AtomicU64::new(
+                self.consumer_restarts
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            cleanup_cycles: std::sync::atomic::AtomicU64::new(
+                self.cleanup_cycles
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            memory_usage_bytes: std::sync::atomic::AtomicU64::new(
+                self.memory_usage_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            active_connections: std::sync::atomic::AtomicU64::new(
+                self.active_connections
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            queue_depth: std::sync::atomic::AtomicU64::new(
+                self.queue_depth.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            avg_batch_size: std::sync::atomic::AtomicU64::new(
+                self.avg_batch_size
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            p95_processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.p95_processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            p99_processing_latency_ms: std::sync::atomic::AtomicU64::new(
+                self.p99_processing_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            throughput_per_second: std::sync::atomic::AtomicU64::new(
+                self.throughput_per_second
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            consecutive_failures: std::sync::atomic::AtomicU64::new(
+                self.consecutive_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            last_error_time: std::sync::atomic::AtomicU64::new(
+                self.last_error_time
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            error_rate: std::sync::atomic::AtomicU64::new(
+                self.error_rate.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            duplicate_events_skipped: std::sync::atomic::AtomicU64::new(
+                self.duplicate_events_skipped
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            batch_processing_duration: std::sync::atomic::AtomicU64::new(
+                self.batch_processing_duration
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            batch_processing_errors: std::sync::atomic::AtomicU64::new(
+                self.batch_processing_errors
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            integration_helper_initialized: std::sync::atomic::AtomicBool::new(
+                self.integration_helper_initialized
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
+}
+
+impl Default for EnhancedCDCMetrics {
+    fn default() -> Self {
+        Self {
+            events_processed: std::sync::atomic::AtomicU64::new(0),
+            events_failed: std::sync::atomic::AtomicU64::new(0),
+            processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
+            total_latency_ms: std::sync::atomic::AtomicU64::new(0),
+            cache_invalidations: std::sync::atomic::AtomicU64::new(0),
+            projection_updates: std::sync::atomic::AtomicU64::new(0),
+            batches_processed: std::sync::atomic::AtomicU64::new(0),
+            circuit_breaker_trips: std::sync::atomic::AtomicU64::new(0),
+            consumer_restarts: std::sync::atomic::AtomicU64::new(0),
+            cleanup_cycles: std::sync::atomic::AtomicU64::new(0),
+            memory_usage_bytes: std::sync::atomic::AtomicU64::new(0),
+            active_connections: std::sync::atomic::AtomicU64::new(0),
+            queue_depth: std::sync::atomic::AtomicU64::new(0),
+            avg_batch_size: std::sync::atomic::AtomicU64::new(0),
+            p95_processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
+            p99_processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
+            throughput_per_second: std::sync::atomic::AtomicU64::new(0),
+            consecutive_failures: std::sync::atomic::AtomicU64::new(0),
+            last_error_time: std::sync::atomic::AtomicU64::new(0),
+            error_rate: std::sync::atomic::AtomicU64::new(0),
+            duplicate_events_skipped: std::sync::atomic::AtomicU64::new(0),
+            batch_processing_duration: std::sync::atomic::AtomicU64::new(0),
+            batch_processing_errors: std::sync::atomic::AtomicU64::new(0),
+            integration_helper_initialized: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 }

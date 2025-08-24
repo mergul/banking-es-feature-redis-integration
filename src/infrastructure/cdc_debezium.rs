@@ -2038,7 +2038,7 @@ impl CDCConsumer {
             kafka_config.bootstrap_servers
         );
 
-        // Subscribe to CDC topic with retry logic (auto-detect if empty or "auto")
+        // Resolve CDC topic if empty or set to "auto"
         let topic_to_subscribe = {
             let configured = self.cdc_topic.trim().to_string();
             if !configured.is_empty() && configured.to_lowercase() != "auto" {
@@ -2055,95 +2055,29 @@ impl CDCConsumer {
             }
         };
         self.cdc_topic = topic_to_subscribe.clone();
+        // Subscribe to CDC topic and join consumer group
         tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
-        let max_subscription_retries = 5; // Increased retries
-        let mut subscription_retries = 0;
 
-        loop {
-            let subscribe_result = self
-                .kafka_consumer
-                .subscribe_to_topic(&self.cdc_topic)
-                .await;
+        // Subscribe to topic - this will trigger consumer group join
+        self.kafka_consumer
+            .subscribe_to_topic(&self.cdc_topic)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to subscribe to CDC topic: {}", e))?;
 
-            match &subscribe_result {
-                Ok(_) => {
-                    tracing::info!(
-                        "CDCConsumer: ✅ Successfully subscribed to topic: {}",
-                        self.cdc_topic
-                    );
+        // Give Kafka consumer time to join the group (subscription triggers join)
+        // Consumer group join is asynchronous and doesn't require polling
+        tracing::info!("CDCConsumer: Waiting for consumer group join to complete...");
 
-                    // CRITICAL FIX: Force consumer group join by polling
-                    tracing::info!("CDCConsumer: Forcing consumer group join by polling...");
+        // CRITICAL FIX: Don't wait for messages - just give Kafka client time to complete group join protocol
+        // The real issue was waiting for messages in an empty topic
+        tokio::time::sleep(Duration::from_millis(2000)).await; // 2 seconds is enough for group join
 
-                    // Poll a few times to trigger group join
-                    let mut join_attempts = 0;
-                    let max_join_attempts = 10;
+        tracing::info!("CDCConsumer: ✅ Consumer group join wait completed - consumer is ready");
 
-                    while join_attempts < max_join_attempts {
-                        match self.kafka_consumer.stream().next().await {
-                            Some(Ok(_)) => {
-                                tracing::info!("CDCConsumer: ✅ Consumer group join successful after {} attempts", join_attempts + 1);
-                                break;
-                            }
-                            Some(Err(e)) => {
-                                tracing::warn!(
-                                    "CDCConsumer: Poll error during join attempt {}: {:?}",
-                                    join_attempts + 1,
-                                    e
-                                );
-                            }
-                            None => {
-                                tracing::debug!(
-                                    "CDCConsumer: No message during join attempt {}",
-                                    join_attempts + 1
-                                );
-                            }
-                        }
-                        join_attempts += 1;
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-
-                    if join_attempts >= max_join_attempts {
-                        tracing::warn!("CDCConsumer: Consumer group join may not be complete after {} attempts", max_join_attempts);
-                    }
-
-                    // Consumer is ready to start processing
-                    tracing::info!(
-                        "CDCConsumer: Consumer group join completed, ready to start processing"
-                    );
-
-                    // Log consumer group status
-                    tracing::info!("CDCConsumer: Consumer group join completed");
-                    break;
-                }
-                Err(e) => {
-                    subscription_retries += 1;
-                    tracing::error!(
-                        "CDCConsumer: ❌ Failed to subscribe to topic: {} (attempt {}/{}): {}",
-                        self.cdc_topic,
-                        subscription_retries,
-                        max_subscription_retries,
-                        e
-                    );
-
-                    if subscription_retries >= max_subscription_retries {
-                        tracing::error!(
-                            "CDCConsumer: Failed to subscribe to CDC topic after {} attempts: {}",
-                            max_subscription_retries,
-                            e
-                        );
-                        return Err(anyhow::anyhow!(
-                            "Failed to subscribe to CDC topic after {} attempts: {}",
-                            max_subscription_retries,
-                            e
-                        ));
-                    }
-
-                    // Wait before retry
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
-            }
-        }
+        tracing::info!(
+            "CDCConsumer: ✅ Successfully subscribed to topic: {} and joined consumer group",
+            self.cdc_topic
+        );
 
         tracing::info!(
             "CDCConsumer: Starting main consumption loop for topic: {}",

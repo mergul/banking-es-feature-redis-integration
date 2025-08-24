@@ -577,158 +577,158 @@ impl ProjectionStore {
     }
 
     // DIAGNOSTIC BULK INSERT WITH EXTENSIVE LOGGING
-    async fn bulk_upsert_accounts_with_copy_diagnostic(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        accounts: &[AccountProjection],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if accounts.is_empty() {
-            return Ok(());
-        }
+    // async fn bulk_upsert_accounts_with_copy_diagnostic(
+    //     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    //     accounts: &[AccountProjection],
+    // ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    //     if accounts.is_empty() {
+    //         return Ok(());
+    //     }
 
-        tracing::info!(
-            "🚀 DIAGNOSTIC: Starting bulk upsert for {} accounts",
-            accounts.len()
-        );
+    //     tracing::info!(
+    //         "🚀 DIAGNOSTIC: Starting bulk upsert for {} accounts",
+    //         accounts.len()
+    //     );
 
-        // Log first account for inspection
-        if let Some(first_account) = accounts.first() {
-            tracing::info!("🔍 DIAGNOSTIC: First account sample:");
-            tracing::info!("  - ID: {}", first_account.id);
-            tracing::info!("  - Owner: '{}'", first_account.owner_name);
-            tracing::info!("  - Balance: {}", first_account.balance);
-            tracing::info!("  - Active: {}", first_account.is_active);
-            tracing::info!("  - Created: {}", first_account.created_at);
-            tracing::info!("  - Updated: {}", first_account.updated_at);
-        }
+    //     // Log first account for inspection
+    //     if let Some(first_account) = accounts.first() {
+    //         tracing::info!("🔍 DIAGNOSTIC: First account sample:");
+    //         tracing::info!("  - ID: {}", first_account.id);
+    //         tracing::info!("  - Owner: '{}'", first_account.owner_name);
+    //         tracing::info!("  - Balance: {}", first_account.balance);
+    //         tracing::info!("  - Active: {}", first_account.is_active);
+    //         tracing::info!("  - Created: {}", first_account.created_at);
+    //         tracing::info!("  - Updated: {}", first_account.updated_at);
+    //     }
 
-        // Create temporary table
-        tracing::info!("🔍 DIAGNOSTIC: Creating temporary table");
-        sqlx::query!(
-            r#"
-        CREATE TEMP TABLE temp_account_projections (
-            id UUID,
-            owner_name TEXT,
-            balance DECIMAL,
-            is_active BOOLEAN,
-            created_at TIMESTAMPTZ,
-            updated_at TIMESTAMPTZ
-        ) ON COMMIT DROP
-        "#
-        )
-        .execute(&mut **tx)
-        .await?;
+    //     // Create temporary table
+    //     tracing::info!("🔍 DIAGNOSTIC: Creating temporary table");
+    //     sqlx::query!(
+    //         r#"
+    //     CREATE TEMP TABLE temp_account_projections (
+    //         id UUID,
+    //         owner_name TEXT,
+    //         balance DECIMAL,
+    //         is_active BOOLEAN,
+    //         created_at TIMESTAMPTZ,
+    //         updated_at TIMESTAMPTZ
+    //     ) ON COMMIT DROP
+    //     "#
+    //     )
+    //     .execute(&mut **tx)
+    //     .await?;
 
-        // TEST WITH JUST ONE RECORD FIRST
-        let test_accounts = &accounts[..std::cmp::min(1, accounts.len())];
-        tracing::warn!(
-            "🔍 DIAGNOSTIC: Testing with only {} record(s) first",
-            test_accounts.len()
-        );
+    //     // TEST WITH JUST ONE RECORD FIRST
+    //     let test_accounts = &accounts[..std::cmp::min(1, accounts.len())];
+    //     tracing::warn!(
+    //         "🔍 DIAGNOSTIC: Testing with only {} record(s) first",
+    //         test_accounts.len()
+    //     );
 
-        // Create binary data with extensive logging
-        tracing::info!("🔍 DIAGNOSTIC: Creating binary data");
-        let mut writer = DiagnosticPgCopyBinaryWriter::new(true)?;
+    //     // Create binary data with extensive logging
+    //     tracing::info!("🔍 DIAGNOSTIC: Creating binary data");
+    //     let mut writer = DiagnosticPgCopyBinaryWriter::new(true)?;
 
-        for (i, account) in test_accounts.iter().enumerate() {
-            tracing::info!(
-                "🔍 DIAGNOSTIC: Processing account {} of {}",
-                i + 1,
-                test_accounts.len()
-            );
+    //     for (i, account) in test_accounts.iter().enumerate() {
+    //         tracing::info!(
+    //             "🔍 DIAGNOSTIC: Processing account {} of {}",
+    //             i + 1,
+    //             test_accounts.len()
+    //         );
 
-            writer.write_row(6)?; // 6 fields
-            writer.write_uuid(&account.id, "id")?;
-            writer.write_text(&account.owner_name, "owner_name")?;
-            writer.write_decimal(&account.balance, "balance")?;
-            writer.write_bool(account.is_active, "is_active")?;
-            writer.write_timestamp(&account.created_at, "created_at")?;
-            writer.write_timestamp(&account.updated_at, "updated_at")?;
-        }
+    //         writer.write_row(6)?; // 6 fields
+    //         writer.write_uuid(&account.id, "id")?;
+    //         writer.write_text(&account.owner_name, "owner_name")?;
+    //         writer.write_decimal(&account.balance, "balance")?;
+    //         writer.write_bool(account.is_active, "is_active")?;
+    //         writer.write_timestamp(&account.created_at, "created_at")?;
+    //         writer.write_timestamp(&account.updated_at, "updated_at")?;
+    //     }
 
-        let binary_data = writer.finish()?;
+    //     let binary_data = writer.finish()?;
 
-        tracing::info!(
-            "🔍 DIAGNOSTIC: Generated {} bytes of binary data",
-            binary_data.len()
-        );
-        let first_account = &test_accounts[0];
-        // Expected size calculation for verification
-        let expected_size_per_tuple = 2 +  // tuple header (field count)
-        20 + // UUID: 4-byte length + 16-byte data
-        4 + first_account.owner_name.len() + // TEXT: 4-byte length + data
-        4 + first_account.balance.to_string().len() + // DECIMAL as TEXT: 4-byte length + data  
-        5 +  // BOOLEAN: 4-byte length + 1-byte data
-        12 + // TIMESTAMP: 4-byte length + 8-byte data
-        12; // TIMESTAMP: 4-byte length + 8-byte data
+    //     tracing::info!(
+    //         "🔍 DIAGNOSTIC: Generated {} bytes of binary data",
+    //         binary_data.len()
+    //     );
+    //     let first_account = &test_accounts[0];
+    //     // Expected size calculation for verification
+    //     let expected_size_per_tuple = 2 +  // tuple header (field count)
+    //     20 + // UUID: 4-byte length + 16-byte data
+    //     4 + first_account.owner_name.len() + // TEXT: 4-byte length + data
+    //     4 + first_account.balance.to_string().len() + // DECIMAL as TEXT: 4-byte length + data
+    //     5 +  // BOOLEAN: 4-byte length + 1-byte data
+    //     12 + // TIMESTAMP: 4-byte length + 8-byte data
+    //     12; // TIMESTAMP: 4-byte length + 8-byte data
 
-        let expected_total_size = 19 + // header: 11-byte signature + 4-byte flags + 4-byte extension
-        expected_size_per_tuple * test_accounts.len() +
-        2; // trailer: 2-byte -1
+    //     let expected_total_size = 19 + // header: 11-byte signature + 4-byte flags + 4-byte extension
+    //     expected_size_per_tuple * test_accounts.len() +
+    //     2; // trailer: 2-byte -1
 
-        tracing::info!(
-            "🔍 DIAGNOSTIC: Expected size: ~{} bytes, actual: {} bytes",
-            expected_total_size,
-            binary_data.len()
-        );
+    //     tracing::info!(
+    //         "🔍 DIAGNOSTIC: Expected size: ~{} bytes, actual: {} bytes",
+    //         expected_total_size,
+    //         binary_data.len()
+    //     );
 
-        // Execute COPY with detailed error handling
-        tracing::info!("🔍 DIAGNOSTIC: Executing COPY command");
-        let copy_command = "COPY temp_account_projections FROM STDIN WITH (FORMAT BINARY)";
+    //     // Execute COPY with detailed error handling
+    //     tracing::info!("🔍 DIAGNOSTIC: Executing COPY command");
+    //     let copy_command = "COPY temp_account_projections FROM STDIN WITH (FORMAT BINARY)";
 
-        match tx.copy_in_raw(copy_command).await {
-            Ok(mut copy_in) => {
-                tracing::info!("🔍 DIAGNOSTIC: COPY command accepted, sending data");
+    //     match tx.copy_in_raw(copy_command).await {
+    //         Ok(mut copy_in) => {
+    //             tracing::info!("🔍 DIAGNOSTIC: COPY command accepted, sending data");
 
-                match copy_in.send(binary_data.as_slice()).await {
-                    Ok(_) => {
-                        tracing::info!("🔍 DIAGNOSTIC: Data sent successfully, finishing");
+    //             match copy_in.send(binary_data.as_slice()).await {
+    //                 Ok(_) => {
+    //                     tracing::info!("🔍 DIAGNOSTIC: Data sent successfully, finishing");
 
-                        match copy_in.finish().await {
-                            Ok(rows_affected) => {
-                                tracing::info!(
-                                    "✅ DIAGNOSTIC: COPY succeeded! {} rows inserted",
-                                    rows_affected
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!("❌ DIAGNOSTIC: COPY finish failed: {:?}", e);
-                                tracing::error!("❌ DIAGNOSTIC: Error details: {}", e);
+    //                     match copy_in.finish().await {
+    //                         Ok(rows_affected) => {
+    //                             tracing::info!(
+    //                                 "✅ DIAGNOSTIC: COPY succeeded! {} rows inserted",
+    //                                 rows_affected
+    //                             );
+    //                         }
+    //                         Err(e) => {
+    //                             tracing::error!("❌ DIAGNOSTIC: COPY finish failed: {:?}", e);
+    //                             tracing::error!("❌ DIAGNOSTIC: Error details: {}", e);
 
-                                // Log specific error information
-                                if let Some(db_error) = e.as_database_error() {
-                                    if let Some(code) = db_error.code() {
-                                        tracing::error!(
-                                            "❌ DIAGNOSTIC: Database error code: {}",
-                                            code
-                                        );
-                                    }
-                                    tracing::error!(
-                                        "❌ DIAGNOSTIC: Database error message: {}",
-                                        db_error.message()
-                                    );
-                                    // Note: detail() method may not be available depending on sqlx version
-                                    tracing::error!("❌ DIAGNOSTIC: Full error: {:?}", db_error);
-                                }
+    //                             // Log specific error information
+    //                             if let Some(db_error) = e.as_database_error() {
+    //                                 if let Some(code) = db_error.code() {
+    //                                     tracing::error!(
+    //                                         "❌ DIAGNOSTIC: Database error code: {}",
+    //                                         code
+    //                                     );
+    //                                 }
+    //                                 tracing::error!(
+    //                                     "❌ DIAGNOSTIC: Database error message: {}",
+    //                                     db_error.message()
+    //                                 );
+    //                                 // Note: detail() method may not be available depending on sqlx version
+    //                                 tracing::error!("❌ DIAGNOSTIC: Full error: {:?}", db_error);
+    //                             }
 
-                                return Err(e.into());
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("❌ DIAGNOSTIC: Failed to send data: {:?}", e);
-                        return Err(e.into());
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!("❌ DIAGNOSTIC: Failed to start COPY: {:?}", e);
-                return Err(e.into());
-            }
-        }
+    //                             return Err(e.into());
+    //                         }
+    //                     }
+    //                 }
+    //                 Err(e) => {
+    //                     tracing::error!("❌ DIAGNOSTIC: Failed to send data: {:?}", e);
+    //                     return Err(e.into());
+    //                 }
+    //             }
+    //         }
+    //         Err(e) => {
+    //             tracing::error!("❌ DIAGNOSTIC: Failed to start COPY: {:?}", e);
+    //             return Err(e.into());
+    //         }
+    //     }
 
-        tracing::info!("🎯 DIAGNOSTIC: Test completed successfully!");
-        Ok(())
-    }
+    //     tracing::info!("🎯 DIAGNOSTIC: Test completed successfully!");
+    //     Ok(())
+    // }
 
     // UPDATED BULK INSERT FUNCTIONS WITH FIXED BINARY WRITER
 

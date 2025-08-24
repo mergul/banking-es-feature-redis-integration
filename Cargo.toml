@@ -70,6 +70,7 @@ value-trait = "0.8"
 sysinfo = "0.36.1"
 tokio-util = "0.7.15"
 hex = "0.4.3"
+crossbeam-queue = "0.3.12"
 
 [features]
 default = []
@@ -105,3 +106,7 @@ warnings = "allow"
 [[bin]]
 name = "banking-es"
 path = "src/main.rs"
+
+[[bin]]
+name = "create_topics"
+path = "src/bin/create_topics.rs"

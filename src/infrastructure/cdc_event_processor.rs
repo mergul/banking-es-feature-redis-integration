@@ -6,9 +6,7 @@ use crate::infrastructure::dlq_router::dlq_router::DLQRouter;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use crate::infrastructure::projections::{AccountProjection, TransactionProjection};
-use crate::infrastructure::{CDCBatchingConfig, PartitionedCDCBatching};
-use crate::infrastructure::CDCBatchingService;
-// REMOVED: CDCBatchingServiceTrait import - no longer exists
+use crate::infrastructure::{CDCBatchingConfig, OptimizedCDCProcessor};
 use crate::infrastructure::CopyOptimizationConfig;
 use crate::infrastructure::ProjectionConfig;
 use crate::ProjectionStore;
@@ -543,12 +541,12 @@ pub struct DLQEvent {
 //         info!("🔍 EVENT CLASSIFIER: Processing {} mixed events", mixed_events.len());
 
 //         // STEP 1: Separate events by type
-//         let (account_created_events, other_events) = self.classify_events(mixed_events);
+//         let (account_created_events, update_events) = self.classify_events(mixed_events);
 
 //         info!(
 //             "📊 EVENT CLASSIFIER: Separated {} AccountCreated events and {} other events",
 //             account_created_events.len(),
-//             other_events.len()
+//             update_events.len()
 //         );
 
 //         // STEP 2: Process each type with its optimized path
@@ -570,12 +568,12 @@ pub struct DLQEvent {
 //         }
 
 //         // Process other events (if any)
-//         if !other_events.is_empty() {
+//         if !update_events.is_empty() {
 //             info!("🔄 EVENT CLASSIFIER: Routing {} other events to Partitions 1-N", 
-//                   other_events.len());
+//                   update_events.len());
                   
 //             let other_operation_ids = self
-//                 .process_other_events_by_type(other_events)
+//                 .process_update_events_by_type(update_events)
 //                 .await?;
                 
 //             results.other_operations = other_operation_ids;
@@ -599,36 +597,36 @@ pub struct DLQEvent {
 //         mixed_events: Vec<(Uuid, AccountProjection, String)>,
 //     ) -> (Vec<(Uuid, AccountProjection)>, HashMap<String, Vec<(Uuid, AccountProjection)>>) {
 //         let mut account_created_events = Vec::new();
-//         let mut other_events: HashMap<String, Vec<(Uuid, AccountProjection)>> = HashMap::new();
+//         let mut update_events: HashMap<String, Vec<(Uuid, AccountProjection)>> = HashMap::new();
 
 //         for (aggregate_id, projection, event_type) in mixed_events {
 //             if event_type == "AccountCreated" {
 //                 account_created_events.push((aggregate_id, projection));
 //             } else {
-//                 other_events
+//                 update_events
 //                     .entry(event_type)
 //                     .or_insert_with(Vec::new)
 //                     .push((aggregate_id, projection));
 //             }
 //         }
 
-//         (account_created_events, other_events)
+//         (account_created_events, update_events)
 //     }
 
 //     /// STEP 2: Process other events grouped by event type
-//     async fn process_other_events_by_type(
+//     async fn process_update_events_by_type(
 //         &self,
-//         other_events: HashMap<String, Vec<(Uuid, AccountProjection)>>,
+//         update_events: HashMap<String, Vec<(Uuid, AccountProjection)>>,
 //     ) -> Result<HashMap<String, Vec<Uuid>>> {
 //         let mut results = HashMap::new();
 
-//         for (event_type, projections) in other_events {
+//         for (event_type, projections) in update_events {
 //             info!("🔄 EVENT CLASSIFIER: Processing {} events of type '{}'", 
 //                   projections.len(), event_type);
 
 //             let operation_ids = self
 //                 .partitioned_cdc.as_ref().unwrap()
-//                 .submit_other_events_bulk(projections, event_type.clone())
+//                 .submit_update_events_bulk(projections, event_type.clone())
 //                 .await?;
 
 //             results.insert(event_type, operation_ids);
@@ -724,7 +722,7 @@ pub struct UltraOptimizedCDCEventProcessor {
 
     // NEW: Multi-instance CDC Batching Service
     cdc_batching_service:
-        Option<Arc<crate::infrastructure::cdc_write_service::PartitionedCDCBatching>>,
+        Option<Arc<OptimizedCDCProcessor>>,
 
     // CDC Batching Service requires write pool
     write_pool: Option<Arc<sqlx::PgPool>>,
@@ -823,7 +821,7 @@ impl UltraOptimizedCDCEventProcessor {
         performance_config: Option<AdvancedPerformanceConfig>,
         consistency_manager: Option<Arc<ConsistencyManager>>,
         write_pool: Option<Arc<sqlx::PgPool>>,
-        cdc_batching_service: Option<Arc<PartitionedCDCBatching>>,
+        cdc_batching_service: Option<Arc<OptimizedCDCProcessor>>,
     ) -> Self {
         let business_config: BusinessLogicConfig = business_config.unwrap_or_default();
         let performance_config = performance_config.unwrap_or_default();
@@ -955,37 +953,28 @@ impl UltraOptimizedCDCEventProcessor {
 
     /// Initialize CDC Batching Service with write pool
     pub async fn initialize_cdc_batching_service(
-        &mut self,
-        write_pool: Arc<sqlx::PgPool>,
+        &mut self
     ) -> Result<()> {
         let cdc_batching =
-            PartitionedCDCBatching::new(
-                self.projection_store.clone(),
-                write_pool.clone(),
+            OptimizedCDCProcessor::new(
+                self.projection_store.clone()
             )
             .await;
 
         self.cdc_batching_service = Some(Arc::new(cdc_batching));
-        self.write_pool = Some(write_pool);
         info!("CDC Batching Service initialized with 16 parallel processors");
         Ok(())
     }
 
-    /// Initialize CDC Batching Service if write pool is available
+    /// Initialize CDC Batching Service if projection store is available
     pub async fn initialize_cdc_batching_service_if_available(&mut self) -> Result<()> {
-        if let Some(write_pool) = &self.write_pool {
-            self.initialize_cdc_batching_service(write_pool.clone())
-                .await
-        } else {
-            Err(anyhow::anyhow!(
-                "Write pool not available for CDC Batching Service initialization"
-            ))
-        }
+            self.initialize_cdc_batching_service()
+                .await      
     }
 
     /// Get CDC Batching Service if available
-    pub fn get_cdc_batching_service(&self) -> Option<Arc<PartitionedCDCBatching>> {
-        self.cdc_batching_service.clone()
+    pub fn get_cdc_batching_service(&self) -> Option<&Arc<OptimizedCDCProcessor>> {
+        self.cdc_batching_service.as_ref()
     }
 
     pub async fn start_batch_processor(&mut self) -> Result<()> {
@@ -1663,144 +1652,144 @@ impl UltraOptimizedCDCEventProcessor {
         Ok((batches, (extracted, skipped, errors)))
     }
 
-    async fn process_all_event_types_parallel(&self, event_batches: EventBatches) -> Result<()> {
-        let batching_service = self.cdc_batching_service
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
-        let mut total_processed = 0;
-
-        // CRITICAL: Process AccountCreated asynchronously (fire and forget)
-        if !event_batches.account_created.is_empty() {
-            let account_count = event_batches.account_created.len();
-            let events = event_batches.account_created;
-            let service = batching_service.clone();
-
-            // FIRE AND FORGET: Spawn account creation processing but DON'T WAIT
-            tokio::spawn(async move {
-                let start_time = std::time::Instant::now();
-                match Self::process_account_created_ultra_fast(events, service).await {
-                    Ok(count) => {
-                        let duration = start_time.elapsed();
-                        tracing::info!(
-                            "🚀 BACKGROUND ACCOUNT_CREATED COMPLETE: {} events in {:?} ({:.0} events/sec)",
-                            count,
-                            duration,
-                            count as f64 / duration.as_secs_f64()
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("❌ Background account creation processing failed: {:?}", e);
-                        // TODO: Send to DLQ or retry mechanism
-                    }
-                }
-            });
-
-            // Count accounts as processed (even though they're background)
-            total_processed += account_count;
-            tracing::info!("📤 QUEUED AccountCreated processing: {} events (background)", account_count);
-        }
-
-        // CRITICAL: Process Transactions asynchronously (slow operations)
-        if !event_batches.transactions.is_empty() {
-        let transaction_count = event_batches.transactions.len();
-        let events = event_batches.transactions;
-        let projection_store = self.projection_store.clone();
-        let service = batching_service.clone();
-
-        // FIRE AND FORGET: Spawn transaction processing but DON'T WAIT
-        tokio::spawn(async move {
-            let start_time = std::time::Instant::now();
-            match Self::process_transactions_ultra_fast(events, projection_store, service).await {
-                Ok(count) => {
-                    let duration = start_time.elapsed();
-                    tracing::info!(
-                        "🚀 BACKGROUND TRANSACTIONS COMPLETE: {} events in {:?} ({:.0} events/sec)",
-                        count,
-                        duration,
-                        count as f64 / duration.as_secs_f64()
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("❌ Background transaction processing failed: {:?}", e);
-                    // TODO: Send to DLQ or retry mechanism
-                }
-            }
-        });
-
-        // Count transactions as processed (even though they're background)
-        total_processed += transaction_count;
-        tracing::info!("📤 QUEUED Transactions processing: {} events (background)", transaction_count);
-    }
-
-    tracing::info!("🏁 Total processed events: {} (all processing in background)", total_processed);
-        Ok(())
-    }
-
-    /// OPTIMIZATION 18: Process all event types in parallel with maximum efficiency
     // async fn process_all_event_types_parallel(&self, event_batches: EventBatches) -> Result<()> {
     //     let batching_service = self.cdc_batching_service
     //         .as_ref()
     //         .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
+    //     let mut total_processed = 0;
 
-    //     // OPTIMIZATION 19: Launch all processing tasks in parallel
-    //     let account_created_task = if !event_batches.account_created.is_empty() {
+    //     // CRITICAL: Process AccountCreated asynchronously (fire and forget)
+    //     if !event_batches.account_created.is_empty() {
+    //         let account_count = event_batches.account_created.len();
     //         let events = event_batches.account_created;
     //         let service = batching_service.clone();
-    //         Some(tokio::spawn(async move {
-    //             Self::process_account_created_ultra_fast(events, service).await
-    //         }))
-    //     } else {
-    //         None
-    //     };
 
-    //     let transactions_task = if !event_batches.transactions.is_empty() {
-    //         let events = event_batches.transactions;
-    //         let service = batching_service.clone();
-    //         let projection_store = self.projection_store.clone();
-    //         Some(tokio::spawn(async move {
-    //             Self::process_transactions_ultra_fast(events, projection_store, service).await
-    //         }))
-    //     } else {
-    //         None
-    //     };
+    //         // FIRE AND FORGET: Spawn account creation processing but DON'T WAIT
+    //         tokio::spawn(async move {
+    //             let start_time = std::time::Instant::now();
+    //             match Self::process_account_created_ultra_fast(events, service).await {
+    //                 Ok(count) => {
+    //                     let duration = start_time.elapsed();
+    //                     tracing::info!(
+    //                         "🚀 BACKGROUND ACCOUNT_CREATED COMPLETE: {} events in {:?} ({:.0} events/sec)",
+    //                         count,
+    //                         duration,
+    //                         count as f64 / duration.as_secs_f64()
+    //                     );
+    //                 }
+    //                 Err(e) => {
+    //                     tracing::error!("❌ Background account creation processing failed: {:?}", e);
+    //                     // TODO: Send to DLQ or retry mechanism
+    //                 }
+    //             }
+    //         });
 
-    //     // OPTIMIZATION 20: Wait for all tasks and collect results
-    //     let mut total_processed = 0;
-        
-    //     if let Some(task) = account_created_task {
-    //         match task.await? {
-    //             Ok(count) => {
-    //                 total_processed += count;
-    //                 tracing::info!("✅ AccountCreated processing: {} events", count);
-    //             }
-    //             Err(e) => {
-    //                 tracing::error!("❌ AccountCreated processing failed: {:?}", e);
-    //                 return Err(e);
-    //             }
-    //         }
+    //         // Count accounts as processed (even though they're background)
+    //         total_processed += account_count;
+    //         tracing::info!("📤 QUEUED AccountCreated processing: {} events (background)", account_count);
     //     }
 
-    //     if let Some(task) = transactions_task {
-    //         match task.await? {
+    //     // CRITICAL: Process Transactions asynchronously (slow operations)
+    //     if !event_batches.transactions.is_empty() {
+    //     let transaction_count = event_batches.transactions.len();
+    //     let events = event_batches.transactions;
+    //     let projection_store = self.projection_store.clone();
+    //     let service = batching_service.clone();
+
+    //     // FIRE AND FORGET: Spawn transaction processing but DON'T WAIT
+    //     tokio::spawn(async move {
+    //         let start_time = std::time::Instant::now();
+    //         match Self::process_transactions_ultra_fast(events, projection_store, service).await {
     //             Ok(count) => {
-    //                 total_processed += count;
-    //                 tracing::info!("✅ Transactions processing: {} events", count);
+    //                 let duration = start_time.elapsed();
+    //                 tracing::info!(
+    //                     "🚀 BACKGROUND TRANSACTIONS COMPLETE: {} events in {:?} ({:.0} events/sec)",
+    //                     count,
+    //                     duration,
+    //                     count as f64 / duration.as_secs_f64()
+    //                 );
     //             }
     //             Err(e) => {
-    //                 tracing::error!("❌ Transactions processing failed: {:?}", e);
-    //                 return Err(e);
+    //                 tracing::error!("❌ Background transaction processing failed: {:?}", e);
+    //                 // TODO: Send to DLQ or retry mechanism
     //             }
     //         }
-    //     }
+    //     });
 
-    //     tracing::info!("🏁 Total processed events: {}", total_processed);
+    //     // Count transactions as processed (even though they're background)
+    //     total_processed += transaction_count;
+    //     tracing::info!("📤 QUEUED Transactions processing: {} events (background)", transaction_count);
+    // }
+
+    // tracing::info!("🏁 Total processed events: {} (all processing in background)", total_processed);
     //     Ok(())
     // }
+
+    /// OPTIMIZATION 18: Process all event types in parallel with maximum efficiency
+    async fn process_all_event_types_parallel(&self, event_batches: EventBatches) -> Result<()> {
+        let batching_service = self.cdc_batching_service
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
+
+        // OPTIMIZATION 19: Launch all processing tasks in parallel
+        let account_created_task = if !event_batches.account_created.is_empty() {
+            let events = event_batches.account_created;
+            let service = batching_service.clone();
+            Some(tokio::spawn(async move {
+                Self::process_account_created_ultra_fast(events, service).await
+            }))
+        } else {
+            None
+        };
+
+        let transactions_task = if !event_batches.transactions.is_empty() {
+            let events = event_batches.transactions;
+            let service = batching_service.clone();
+            let projection_store = self.projection_store.clone();
+            Some(tokio::spawn(async move {
+                Self::process_transactions_ultra_fast(events, projection_store, service).await
+            }))
+        } else {
+            None
+        };
+
+        // OPTIMIZATION 20: Wait for all tasks and collect results
+        let mut total_processed = 0;
+        
+        if let Some(task) = account_created_task {
+            match task.await? {
+                Ok(count) => {
+                    total_processed += count;
+                    tracing::info!("✅ AccountCreated processing: {} events", count);
+                }
+                Err(e) => {
+                    tracing::error!("❌ AccountCreated processing failed: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        if let Some(task) = transactions_task {
+            match task.await? {
+                Ok(count) => {
+                    total_processed += count;
+                    tracing::info!("✅ Transactions processing: {} events", count);
+                }
+                Err(e) => {
+                    tracing::error!("❌ Transactions processing failed: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        tracing::info!("🏁 Total processed events: {}", total_processed);
+        Ok(())
+    }
 
     /// OPTIMIZATION 21: Ultra-fast AccountCreated processing
     async fn process_account_created_ultra_fast(
         events: Vec<ProcessableEvent>,
-        batching_service: Arc<PartitionedCDCBatching>,
+        batching_service: Arc<OptimizedCDCProcessor>,
     ) -> Result<usize> {
         if events.is_empty() {
             return Ok(0);
@@ -1841,7 +1830,7 @@ impl UltraOptimizedCDCEventProcessor {
         );
 
         // OPTIMIZATION 23: Batch submit with fire-and-forget optimization
-        match batching_service.submit_account_created_projections_bulk(projections).await {
+        match batching_service.submit_account_creations_bulk(projections).await {
             Ok(operation_ids) => {
                 let duration = start_time.elapsed();
                 tracing::info!(
@@ -1862,7 +1851,7 @@ impl UltraOptimizedCDCEventProcessor {
     async fn process_transactions_ultra_fast(
         events: Vec<ProcessableEvent>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
-        batching_service: Arc<PartitionedCDCBatching>,
+        batching_service: Arc<OptimizedCDCProcessor>,
     ) -> Result<usize> {
         if events.is_empty() {
             return Ok(0);
@@ -1967,14 +1956,14 @@ impl UltraOptimizedCDCEventProcessor {
         let (account_result, transaction_result) = tokio::join!(
             async {
                 if !final_projections.is_empty() {
-                    batching_service.submit_other_events_bulk(final_projections).await
+                    batching_service.submit_account_updates_bulk(final_projections).await
                 } else {
                     Ok(vec![])
                 }
             },
             async {
                 if !transaction_projections.is_empty() {
-                    batching_service.submit_transaction_projections_ultra_parallel(transaction_projections).await
+                    batching_service.submit_transaction_creations_bulk(transaction_projections).await
                 } else {
                     Ok(vec![])
                 }
@@ -2478,13 +2467,13 @@ impl UltraOptimizedCDCEventProcessor {
         let start_time = std::time::Instant::now();
 
         // CRITICAL OPTIMIZATION: Separate AccountCreated events from other events
-        let (account_created_events, other_events) =
+        let (account_created_events, update_events) =
             Self::separate_account_created_events(events_by_aggregate);
 
         tracing::info!(
             "🚀 OPTIMIZED: Separated events - AccountCreated: {} aggregates, Other events: {} aggregates",
             account_created_events.len(),
-            other_events.len()
+            update_events.len()
         );
 
         let mut all_projections = Vec::new();
@@ -2513,9 +2502,9 @@ impl UltraOptimizedCDCEventProcessor {
         }
 
         // Process other events with standard UPSERT approach
-        if !other_events.is_empty() {
-            let (updated_projections, updated_aggregates) = Self::process_other_events_with_upsert(
-                other_events,
+        if !update_events.is_empty() {
+            let (updated_projections, updated_aggregates) = Self::process_update_events_with_upsert(
+                update_events,
                 projection_cache,
                 cache_service,
                 projection_store,
@@ -2523,7 +2512,7 @@ impl UltraOptimizedCDCEventProcessor {
             )
             .await?;
 //             let operation_ids = batching_service               
-//                 .submit_other_events_bulk(projections, event_type.clone())
+//                 .submit_update_events_bulk(projections, event_type.clone())
 //                 .await?;
             let updated_aggregates_len = updated_aggregates.len();
             all_projections.extend(updated_projections);
@@ -2884,7 +2873,7 @@ impl UltraOptimizedCDCEventProcessor {
     }
 
     /// NEW: Convert other events to projections (requires database load and event application)
-    async fn convert_other_events_to_projections(
+    async fn convert_update_events_to_projections(
         events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         projection_cache: &Arc<RwLock<ProjectionCache>>,
@@ -3049,7 +3038,7 @@ impl UltraOptimizedCDCEventProcessor {
         HashMap<Uuid, Vec<ProcessableEvent>>,
     ) {
         let mut account_created_events = HashMap::new();
-        let mut other_events = HashMap::new();
+        let mut update_events = HashMap::new();
 
         for (aggregate_id, events) in events_by_aggregate {
             let mut has_account_created = false;
@@ -3074,15 +3063,15 @@ impl UltraOptimizedCDCEventProcessor {
                 }
             } else {
                 // This aggregate has only other events - process with UPSERT
-                other_events.insert(aggregate_id, events);
+                update_events.insert(aggregate_id, events);
             }
         }
 
-        (account_created_events, other_events)
+        (account_created_events, update_events)
     }
 
     /// NEW: Process AccountCreated events with direct COPY (INSERT) - no UPSERT needed
-    async fn process_account_created_events_direct_copy(
+    /* async fn process_account_created_events_direct_copy(
         account_created_events: HashMap<Uuid, Vec<ProcessableEvent>>,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
         metrics: &Arc<EnhancedCDCMetrics>,
@@ -3202,11 +3191,11 @@ impl UltraOptimizedCDCEventProcessor {
         }
 
         Ok((new_projections, processed_aggregates))
-    }
+    } */
 
     /// NEW: Process other events with standard UPSERT approach
-    async fn process_other_events_with_upsert(
-        other_events: HashMap<Uuid, Vec<ProcessableEvent>>,
+    async fn process_update_events_with_upsert(
+        update_events: HashMap<Uuid, Vec<ProcessableEvent>>,
         projection_cache: &Arc<RwLock<ProjectionCache>>,
         cache_service: &Arc<dyn CacheServiceTrait>,
         projection_store: &Arc<dyn ProjectionStoreTrait>,
@@ -3222,7 +3211,7 @@ impl UltraOptimizedCDCEventProcessor {
         let mut processed_aggregates = Vec::new();
 
         // CRITICAL OPTIMIZATION: Batch read all projections in single SQL query
-        let aggregate_ids: Vec<Uuid> = other_events.keys().cloned().collect();
+        let aggregate_ids: Vec<Uuid> = update_events.keys().cloned().collect();
         tracing::debug!(
             "🚀 OPTIMIZED: Batch loading projections for {} aggregates (non-AccountCreated)",
             aggregate_ids.len()
@@ -3258,7 +3247,7 @@ impl UltraOptimizedCDCEventProcessor {
         }
 
         // Process events for each aggregate
-        for (aggregate_id, events) in other_events {
+        for (aggregate_id, events) in update_events {
             let mut projection = if let Some(existing_projection) =
                 projections_map.get(&aggregate_id).cloned()
             {
