@@ -1738,8 +1738,8 @@ async fn test_write_batching_multi_row_inserts() {
     let cdc_start = Instant::now();
     let mut cdc_processed = false;
 
-    // Check CDC metrics every second for up to 15 seconds
-    for i in 0..15 {
+    // Check CDC metrics every second for up to 5 seconds
+    for i in 0..5 {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Get CDC metrics to check if processing is complete
@@ -2011,7 +2011,7 @@ async fn test_write_batching_multi_row_inserts() {
             .load(std::sync::atomic::Ordering::Relaxed)
     );
     // Add a small delay to allow the consumer to shut down completely
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // tokio::time::sleep(Duration::from_secs(5)).await;
     // Cleanup
     println!("\n🧹 Cleaning up test resources...");
 

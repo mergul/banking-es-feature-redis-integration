@@ -127,10 +127,14 @@ impl Default for ProjectionConfig {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(10000);
+        let batch_timeout_ms = std::env::var("PROJECTION_BATCH_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(50);
         Self {
             cache_ttl_secs: 600,
             batch_size: cdc_optimized_batch_size,
-            batch_timeout_ms: 25,
+            batch_timeout_ms,
             max_connections: 400,
             min_connections: 250,
             acquire_timeout_secs: 5,

@@ -25,11 +25,11 @@ fn get_cdc_default_batch_size() -> usize {
         .unwrap_or(1000) // Default to 1000 if not set or invalid
 }
 
-fn get_cdc_batch_timeout_ms() -> u64 {
-    std::env::var("CDC_BATCH_TIMEOUT_MS")
+fn get_cdc_write_batch_timeout_ms() -> u64 {
+    std::env::var("CDC_WRITE_BATCH_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(25) // Default to 25ms if not set or invalid
+        .unwrap_or(50) // Default to 50ms if not set or invalid
 }
 fn get_cdc_poll_interval_ms() -> u64 {
     std::env::var("CDC_POLL_INTERVAL_MS")
@@ -1157,7 +1157,7 @@ impl Default for CDCBatchingConfig {
     fn default() -> Self {
         Self {
             max_batch_size: get_cdc_default_batch_size(), // Standard batch size
-            max_batch_wait_time_ms: get_cdc_batch_timeout_ms(), // Fast response time
+            max_batch_wait_time_ms: get_cdc_write_batch_timeout_ms(), // Fast response time
             max_poll_interval_ms: get_cdc_poll_interval_ms(), // Minimal poll interval
             max_retries: 3,
             retry_backoff_ms: 50,
