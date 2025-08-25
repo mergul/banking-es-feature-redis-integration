@@ -2949,29 +2949,56 @@ impl Default for ProjectionStore {
     }
 }
 
+impl TransactionProjection {
+    pub fn from_domain_event(
+        event: &AccountEvent,
+        account_id: Uuid,
+        timestamp: DateTime<Utc>,
+    ) -> Option<Self> {
+        match event {
+            AccountEvent::MoneyDeposited {
+                transaction_id,
+                amount,
+                ..
+            } => Some(Self {
+                id: *transaction_id,
+                account_id,
+                transaction_type: "DEPOSIT".to_string(),
+                amount: *amount,
+                timestamp,
+            }),
+            AccountEvent::MoneyWithdrawn {
+                transaction_id,
+                amount,
+                ..
+            } => Some(Self {
+                id: *transaction_id,
+                account_id,
+                transaction_type: "WITHDRAWAL".to_string(),
+                amount: *amount,
+                timestamp,
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl AccountProjection {
-    pub fn apply_event(&self, event: &AccountEvent) -> Result<Self> {
-        let mut projection = self.clone();
+    pub fn apply_event(&mut self, event: &AccountEvent) -> Result<AccountProjection> {
         match event {
             AccountEvent::AccountCreated {
                 owner_name,
                 initial_balance,
                 ..
             } => {
-                projection.owner_name = owner_name.clone();
-                projection.balance = *initial_balance;
-                projection.is_active = true;
+                self.owner_name = owner_name.clone();
+                self.balance = *initial_balance;
+                self.is_active = true;
             }
-            AccountEvent::MoneyDeposited { amount, .. } => {
-                projection.balance += *amount;
-            }
-            AccountEvent::MoneyWithdrawn { amount, .. } => {
-                projection.balance -= *amount;
-            }
-            AccountEvent::AccountClosed { .. } => {
-                projection.is_active = false;
-            }
+            AccountEvent::MoneyDeposited { amount, .. } => self.balance += *amount,
+            AccountEvent::MoneyWithdrawn { amount, .. } => self.balance -= *amount,
+            AccountEvent::AccountClosed { .. } => self.is_active = false,
         }
-        Ok(projection)
+        Ok(self.clone())
     }
 }

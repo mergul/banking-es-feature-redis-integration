@@ -243,16 +243,6 @@ async fn setup_stress_test_environment(
     println!("🔍 Verifying CDC consumer is actively processing...");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Get the processor with batch processing enabled (same as main.rs)
-    let processor = cdc_service_manager
-        .get_processor_with_batch_enabled()
-        .await?;
-    println!("✅ CDC Event Processor with batch processing enabled retrieved");
-
-    // Verify batch processing is enabled (same as main.rs)
-    let is_batch_running = processor.is_batch_processor_running().await;
-    println!("✅ CDC Batch Processor running: {}", is_batch_running);
-
     Ok(StressTestContext {
         cqrs_service,
         db_pool: service_context.event_store.get_pool().clone(),
@@ -1581,7 +1571,7 @@ async fn test_write_batching_multi_row_inserts() {
     );
     // Wait for CDC/projection sync after account creation
     println!("⏳ Waiting for CDC/projection sync after account creation...");
-    // tokio::time::sleep(Duration::from_secs(5)).await;
+    // tokio::time::sleep(Duration::from_secs(15)).await;
     println!("✅ Proceeding to write operations.");
     // Phase 2: Submit multiple operations per account to test batching
     println!("\n📝 PHASE 2: Submit Multiple Operations Per Account");

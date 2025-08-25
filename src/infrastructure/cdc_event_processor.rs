@@ -6,9 +6,9 @@ use crate::infrastructure::dlq_router::dlq_router::DLQRouter;
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use crate::infrastructure::projections::{AccountProjection, TransactionProjection};
-use crate::infrastructure::{CDCBatchingConfig, OptimizedCDCProcessor};
 use crate::infrastructure::CopyOptimizationConfig;
 use crate::infrastructure::ProjectionConfig;
+use crate::infrastructure::{CDCBatchingConfig, OptimizedCDCProcessor};
 use crate::ProjectionStore;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,6 +18,8 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use futures::FutureExt;
 use hostname;
+use rayon::prelude::*;
+use rayon::prelude::*;
 use rdkafka::Message;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,12 @@ pub enum BatchProcessingJob {
     },
 }
 
+pub struct ProjectionBatches {
+    pub accounts_to_create: Vec<(Uuid, AccountProjection)>,
+    pub accounts_to_update: Vec<(Uuid, AccountProjection)>,
+    pub transactions_to_create: Vec<TransactionProjection>,
+}
+
 // OPTIMIZATION 3: Separate event containers for better cache locality
 #[derive(Debug, Default)]
 struct EventBatches {
@@ -65,11 +73,13 @@ impl EventBatches {
             account_closed: Vec::with_capacity(capacity / 3),
         }
     }
-    
+
     fn is_empty(&self) -> bool {
-        self.account_created.is_empty() && self.transactions.is_empty() && self.account_closed.is_empty()
+        self.account_created.is_empty()
+            && self.transactions.is_empty()
+            && self.account_closed.is_empty()
     }
-    
+
     fn total_len(&self) -> usize {
         self.account_created.len() + self.transactions.len() + self.account_closed.len()
     }
@@ -101,11 +111,11 @@ impl EventType {
             EventType::AccountClosed => "AccountClosed",
         }
     }
-    
+
     fn is_account_created(&self) -> bool {
         matches!(self, EventType::AccountCreated)
     }
-    
+
     fn is_transaction_event(&self) -> bool {
         matches!(self, EventType::MoneyDeposited | EventType::MoneyWithdrawn)
     }
@@ -223,10 +233,10 @@ impl ProcessableEvent {
         // Pre-deserialize domain event for better performance
         let domain_event = match bincode::deserialize(&payload) {
             Ok(event) => {
-                tracing::debug!(
-                    "Successfully deserialized domain event for event_id {}",
-                    event_id
-                );
+                // tracing::debug!(
+                //     "Successfully deserialized domain event for event_id {}",
+                //     event_id
+                // );
                 event
             }
             Err(e) => {
@@ -519,156 +529,6 @@ pub struct DLQEvent {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub retry_count: u32,
 }
-// /// Event Classifier - Separates events before CDC processing
-// pub struct CDCEventClassifier {
-//     partitioned_cdc: Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>>,
-// }
-
-// impl CDCEventClassifier {
-//     pub fn new(partitioned_cdc: Option<Arc<crate::infrastructure::cdc_batching_service::PartitionedCDCBatching>>) -> Self {
-//         Self { partitioned_cdc }
-//     }
-
-//     /// Main entry point: Classify and route events to appropriate processing
-//     pub async fn process_mixed_events(
-//         &self,
-//         mixed_events: Vec<(Uuid, AccountProjection, String)>, // (aggregate_id, projection, event_type)
-//     ) -> Result<ProcessingResults> {
-//         if mixed_events.is_empty() {
-//             return Ok(ProcessingResults::empty());
-//         }
-
-//         info!("🔍 EVENT CLASSIFIER: Processing {} mixed events", mixed_events.len());
-
-//         // STEP 1: Separate events by type
-//         let (account_created_events, update_events) = self.classify_events(mixed_events);
-
-//         info!(
-//             "📊 EVENT CLASSIFIER: Separated {} AccountCreated events and {} other events",
-//             account_created_events.len(),
-//             update_events.len()
-//         );
-
-//         // STEP 2: Process each type with its optimized path
-//         let mut results = ProcessingResults::new();
-
-//         // Process AccountCreated events (if any)
-//         if !account_created_events.is_empty() {
-//             info!("🚀 EVENT CLASSIFIER: Routing {} AccountCreated events to Partition 0", 
-//                   account_created_events.len());
-                  
-//             let account_created_operation_ids = self
-//                 .partitioned_cdc.as_ref().unwrap()
-//                 .submit_account_created_projections_bulk(account_created_events)
-//                 .await?;
-                
-//             results.account_created_operations = account_created_operation_ids;
-            
-//             info!("✅ EVENT CLASSIFIER: AccountCreated events submitted successfully");
-//         }
-
-//         // Process other events (if any)
-//         if !update_events.is_empty() {
-//             info!("🔄 EVENT CLASSIFIER: Routing {} other events to Partitions 1-N", 
-//                   update_events.len());
-                  
-//             let other_operation_ids = self
-//                 .process_update_events_by_type(update_events)
-//                 .await?;
-                
-//             results.other_operations = other_operation_ids;
-            
-//             info!("✅ EVENT CLASSIFIER: Other events submitted successfully");
-//         }
-
-//         info!(
-//             "🎯 EVENT CLASSIFIER: Completed processing {} total events ({} AccountCreated, {} others)",
-//             results.total_operations(),
-//             results.account_created_operations.len(),
-//             results.other_operations.len()
-//         );
-
-//         Ok(results)
-//     }
-
-//     /// STEP 1: Classify events into AccountCreated vs Others
-//     fn classify_events(
-//         &self,
-//         mixed_events: Vec<(Uuid, AccountProjection, String)>,
-//     ) -> (Vec<(Uuid, AccountProjection)>, HashMap<String, Vec<(Uuid, AccountProjection)>>) {
-//         let mut account_created_events = Vec::new();
-//         let mut update_events: HashMap<String, Vec<(Uuid, AccountProjection)>> = HashMap::new();
-
-//         for (aggregate_id, projection, event_type) in mixed_events {
-//             if event_type == "AccountCreated" {
-//                 account_created_events.push((aggregate_id, projection));
-//             } else {
-//                 update_events
-//                     .entry(event_type)
-//                     .or_insert_with(Vec::new)
-//                     .push((aggregate_id, projection));
-//             }
-//         }
-
-//         (account_created_events, update_events)
-//     }
-
-//     /// STEP 2: Process other events grouped by event type
-//     async fn process_update_events_by_type(
-//         &self,
-//         update_events: HashMap<String, Vec<(Uuid, AccountProjection)>>,
-//     ) -> Result<HashMap<String, Vec<Uuid>>> {
-//         let mut results = HashMap::new();
-
-//         for (event_type, projections) in update_events {
-//             info!("🔄 EVENT CLASSIFIER: Processing {} events of type '{}'", 
-//                   projections.len(), event_type);
-
-//             let operation_ids = self
-//                 .partitioned_cdc.as_ref().unwrap()
-//                 .submit_update_events_bulk(projections, event_type.clone())
-//                 .await?;
-
-//             results.insert(event_type, operation_ids);
-//         }
-
-//         Ok(results)
-//     }
-// }
-
-// /// Results container for tracking processing outcomes
-// #[derive(Debug)]
-// pub struct ProcessingResults {
-//     pub account_created_operations: Vec<Uuid>,
-//     pub other_operations: HashMap<String, Vec<Uuid>>, // event_type -> operation_ids
-// }
-
-// impl ProcessingResults {
-//     pub fn new() -> Self {
-//         Self {
-//             account_created_operations: Vec::new(),
-//             other_operations: HashMap::new(),
-//         }
-//     }
-
-//     pub fn empty() -> Self {
-//         Self::new()
-//     }
-
-//     pub fn total_operations(&self) -> usize {
-//         self.account_created_operations.len() + 
-//         self.other_operations.values().map(|ops| ops.len()).sum::<usize>()
-//     }
-
-//     pub fn all_operation_ids(&self) -> Vec<Uuid> {
-//         let mut all_ids = self.account_created_operations.clone();
-//         for operation_ids in self.other_operations.values() {
-//             all_ids.extend(operation_ids.iter().cloned());
-//         }
-//         all_ids
-//     }
-// }
-
 
 // Ultra-optimized CDC Event Processor with business logic validation
 pub struct UltraOptimizedCDCEventProcessor {
@@ -683,9 +543,9 @@ pub struct UltraOptimizedCDCEventProcessor {
 
     // High-performance processing
     processing_semaphore: Arc<Semaphore>,
-    batch_queue: Arc<Mutex<Vec<ProcessableEvent>>>,
-    batch_size: Arc<Mutex<usize>>, // Made mutable for adaptive sizing
-    batch_timeout: Duration,
+
+    // Semaphore to limit concurrent database access during projection preparation
+    prepare_semaphore: Arc<Semaphore>,
 
     // Circuit breaker
     circuit_breaker: AdvancedCircuitBreaker,
@@ -694,39 +554,15 @@ pub struct UltraOptimizedCDCEventProcessor {
     projection_cache: Arc<RwLock<ProjectionCache>>,
 
     // Batch processing coordination with interior mutability
-    batch_processor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    // batch_processor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     shutdown_token: CancellationToken,
 
     // Business logic configuration with interior mutability
-    business_config: Arc<Mutex<BusinessLogicConfig>>,
-
-    // Advanced performance features
-    performance_config: Arc<Mutex<AdvancedPerformanceConfig>>,
-    performance_profiler: Arc<Mutex<PerformanceProfiler>>,
-
-    // Adaptive concurrency control
+    business_config: Arc<Mutex<BusinessLogicConfig>>, // Adaptive concurrency control
     adaptive_concurrency: Arc<Mutex<usize>>,
     backpressure_signal: Arc<AtomicBool>,
 
-    // Memory management
-    memory_monitor: Arc<Mutex<MemoryMonitor>>,
-
-    // Performance monitoring
-    performance_monitor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-
-    // Placeholder for a real cluster manager implementation
-    cluster_manager: Arc<Mutex<Option<()>>>,
-
-    // Phase 2.3: Advanced Monitoring
-    monitoring_system: Arc<Mutex<Option<AdvancedMonitoringSystem>>>,
-
-    // NEW: Multi-instance CDC Batching Service
-    cdc_batching_service:
-        Option<Arc<OptimizedCDCProcessor>>,
-
-    // CDC Batching Service requires write pool
-    write_pool: Option<Arc<sqlx::PgPool>>,
-    // REMOVED: Accumulation batching - using ProjectionStore standard batching instead
+    cdc_batching_service: Option<Arc<OptimizedCDCProcessor>>,
 }
 
 #[derive(Debug, Clone)]
@@ -766,25 +602,14 @@ impl Clone for UltraOptimizedCDCEventProcessor {
             metrics: self.metrics.clone(),
             consistency_manager: self.consistency_manager.clone(),
             processing_semaphore: self.processing_semaphore.clone(),
-            batch_queue: self.batch_queue.clone(),
-            batch_size: self.batch_size.clone(),
-            batch_timeout: self.batch_timeout,
+            prepare_semaphore: self.prepare_semaphore.clone(),
             circuit_breaker: self.circuit_breaker.clone(),
             projection_cache: self.projection_cache.clone(),
-            batch_processor_handle: Arc::new(Mutex::new(None)), // Don't clone the handle
             shutdown_token: self.shutdown_token.clone(),
             business_config: Arc::new(Mutex::new(BusinessLogicConfig::default())), // Use default instead of trying to clone
-            performance_config: self.performance_config.clone(),
-            performance_profiler: self.performance_profiler.clone(),
+            cdc_batching_service: self.cdc_batching_service.clone(),
             adaptive_concurrency: self.adaptive_concurrency.clone(),
             backpressure_signal: self.backpressure_signal.clone(),
-            memory_monitor: self.memory_monitor.clone(),
-            performance_monitor_handle: Arc::new(Mutex::new(None)), // Don't clone the handle
-            cluster_manager: Arc::new(Mutex::new(None)), // Don't clone the cluster manager
-            monitoring_system: self.monitoring_system.clone(),
-            cdc_batching_service: self.cdc_batching_service.clone(),
-            write_pool: self.write_pool.clone(),
-            // REMOVED: Accumulation batching - using ProjectionStore standard batching instead
         }
     }
 }
@@ -796,8 +621,8 @@ impl UltraOptimizedCDCEventProcessor {
         projection_store: Arc<dyn ProjectionStoreTrait>,
         metrics: Arc<EnhancedCDCMetrics>,
         business_config: Option<BusinessLogicConfig>,
-        performance_config: Option<AdvancedPerformanceConfig>,
         consistency_manager: Option<Arc<ConsistencyManager>>,
+        cdc_batching_service: Option<Arc<OptimizedCDCProcessor>>,
     ) -> Self {
         Self::new_with_write_pool(
             kafka_producer,
@@ -805,10 +630,8 @@ impl UltraOptimizedCDCEventProcessor {
             projection_store,
             metrics,
             business_config,
-            performance_config,
             consistency_manager,
-            None,
-            None, // cdc_batching_service
+            cdc_batching_service,
         )
     }
 
@@ -818,28 +641,16 @@ impl UltraOptimizedCDCEventProcessor {
         projection_store: Arc<dyn ProjectionStoreTrait>,
         metrics: Arc<EnhancedCDCMetrics>,
         business_config: Option<BusinessLogicConfig>,
-        performance_config: Option<AdvancedPerformanceConfig>,
         consistency_manager: Option<Arc<ConsistencyManager>>,
-        write_pool: Option<Arc<sqlx::PgPool>>,
         cdc_batching_service: Option<Arc<OptimizedCDCProcessor>>,
     ) -> Self {
         let business_config: BusinessLogicConfig = business_config.unwrap_or_default();
-        let performance_config = performance_config.unwrap_or_default();
 
         // 1. Increase cache size and TTL with advanced configuration
         let projection_cache = Arc::new(RwLock::new(ProjectionCache::new(
             50000,                     // Max 50k cached projections
             Duration::from_secs(1800), // 30 minute TTL
         )));
-
-        let batch_timeout = Duration::from_millis(25); // Reduced from 50ms to 5ms for ultra-fast processing
-        let initial_batch_size = if business_config.batch_processing_enabled {
-            2000 // ✅ DÜZELTME: Batch size'ı 2000'e çıkar
-        } else {
-            // When batch processing is disabled, use a reasonable batch size
-            // to avoid processing single events immediately
-            performance_config.min_batch_size.max(10)
-        };
 
         Self {
             kafka_producer: kafka_producer.clone(),
@@ -854,122 +665,16 @@ impl UltraOptimizedCDCEventProcessor {
             projection_store,
             metrics,
             consistency_manager, // Use the provided consistency manager
-            processing_semaphore: Arc::new(Semaphore::new(performance_config.min_concurrency)),
-            batch_queue: Arc::new(Mutex::new(Vec::with_capacity(1000))),
-            batch_size: Arc::new(Mutex::new(initial_batch_size)),
-            batch_timeout,
+            processing_semaphore: Arc::new(Semaphore::new(32)),
+            prepare_semaphore: Arc::new(Semaphore::new(32)), // Limit concurrent DB reads to 32
             circuit_breaker: AdvancedCircuitBreaker::new(),
             projection_cache,
-            batch_processor_handle: Arc::new(Mutex::new(None)),
             shutdown_token: CancellationToken::new(),
             business_config: Arc::new(Mutex::new(business_config)),
-            performance_config: Arc::new(Mutex::new(performance_config.clone())),
-            performance_profiler: Arc::new(Mutex::new(PerformanceProfiler::new(100, true))),
-            adaptive_concurrency: Arc::new(Mutex::new(performance_config.min_concurrency)),
+            adaptive_concurrency: Arc::new(Mutex::new(32)),
             backpressure_signal: Arc::new(AtomicBool::new(false)),
-            memory_monitor: Arc::new(Mutex::new(MemoryMonitor::new(
-                performance_config.memory_pressure_threshold,
-                performance_config.gc_trigger_threshold,
-            ))),
-            performance_monitor_handle: Arc::new(Mutex::new(None)),
-
-            // Phase 2.2: Scalability Enhancements
-            cluster_manager: Arc::new(Mutex::new(None)),
-            monitoring_system: Arc::new(Mutex::new(None)),
             cdc_batching_service,
-            write_pool,
         }
-    }
-
-
-    /// NEW: Static version for AccountCreated events processing (without CDC Batching Service)
-    async fn process_account_created_events_direct_copy_static(
-        account_created_events: HashMap<Uuid, Vec<ProcessableEvent>>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) -> Result<(
-        Vec<crate::infrastructure::projections::AccountProjection>,
-        Vec<Uuid>,
-    )> {
-        let mut new_projections = Vec::new();
-        let mut processed_aggregates = Vec::new();
-
-        // CRITICAL OPTIMIZATION: Build projections directly from AccountCreated events
-        for (aggregate_id, events) in account_created_events {
-            // AccountCreated events should have exactly one event
-            if let Some(event) = events.first() {
-                if let Ok(domain_event) = event.get_domain_event() {
-                    if let crate::domain::AccountEvent::AccountCreated {
-                        owner_name,
-                        initial_balance,
-                        ..
-                    } = domain_event
-                    {
-                        // Create projection directly from AccountCreated event
-                        let projection = crate::infrastructure::projections::AccountProjection {
-                            id: aggregate_id,
-                            owner_name: owner_name.clone(),
-                            balance: *initial_balance,
-                            is_active: true,
-                            created_at: event.timestamp,
-                            updated_at: event.timestamp,
-                        };
-
-                        new_projections.push(projection);
-                        processed_aggregates.push(aggregate_id);
-
-                        tracing::debug!(
-                            "🚀 OPTIMIZED: Created projection from AccountCreated - account: {}, owner: {}, balance: {}",
-                            aggregate_id, owner_name, initial_balance
-                        );
-                    }
-                }
-            }
-        }
-
-        // Use direct COPY for all AccountCreated events in static context
-        if !new_projections.is_empty() {
-            let batch_size = new_projections.len();
-            tracing::info!(
-                "🚀 DIRECT COPY: Using direct COPY for {} AccountCreated projections (static context)",
-                batch_size
-            );
-            if let Some(projection_store_impl) = projection_store
-                .as_any()
-                .downcast_ref::<crate::infrastructure::projections::ProjectionStore>(
-            ) {
-                projection_store_impl
-                    .bulk_insert_new_accounts_with_copy(new_projections.clone())
-                    .await?;
-            } else {
-                projection_store
-                    .upsert_accounts_batch(new_projections.clone())
-                    .await?;
-            }
-        }
-
-        Ok((new_projections, processed_aggregates))
-    }
-
-    /// Initialize CDC Batching Service with write pool
-    pub async fn initialize_cdc_batching_service(
-        &mut self
-    ) -> Result<()> {
-        let cdc_batching =
-            OptimizedCDCProcessor::new(
-                self.projection_store.clone()
-            )
-            .await;
-
-        self.cdc_batching_service = Some(Arc::new(cdc_batching));
-        info!("CDC Batching Service initialized with 16 parallel processors");
-        Ok(())
-    }
-
-    /// Initialize CDC Batching Service if projection store is available
-    pub async fn initialize_cdc_batching_service_if_available(&mut self) -> Result<()> {
-            self.initialize_cdc_batching_service()
-                .await      
     }
 
     /// Get CDC Batching Service if available
@@ -977,561 +682,11 @@ impl UltraOptimizedCDCEventProcessor {
         self.cdc_batching_service.as_ref()
     }
 
-    pub async fn start_batch_processor(&mut self) -> Result<()> {
-        if self.batch_processor_handle.lock().await.is_some() {
-            return Ok(());
-        }
-        if !self.business_config.lock().await.batch_processing_enabled {
-            return Err(anyhow::anyhow!("Batch processing is disabled in configuration. Enable it first with update_business_config()"));
-        }
-        let shutdown_token = self.shutdown_token.clone();
-        let batch_queue = Arc::clone(&self.batch_queue);
-        let projection_store = Arc::clone(&self.projection_store);
-        let projection_cache = Arc::clone(&self.projection_cache);
-        let cache_service = Arc::clone(&self.cache_service);
-        let metrics = Arc::clone(&self.metrics);
-        let batch_size = *self.batch_size.lock().await;
-        let batch_timeout = self.batch_timeout;
-        let consistency_manager = self.consistency_manager.clone();
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(batch_timeout / 2);
-            let mut last_flush = tokio::time::Instant::now();
-
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        // Check if we have enough events to process immediately
-                        let queue_len = batch_queue.lock().await.len();
-                        if queue_len >= batch_size {
-                            // Process immediately when batch is full
-                            if let Err(e) = Self::process_batch_static(
-                                &batch_queue,
-                                &projection_store,
-                                &projection_cache,
-                                &cache_service,
-                                &metrics,
-                                consistency_manager.as_ref(),
-                                batch_size,
-                            ).await {
-                                error!("Batch processing failed: {}", e);
-                            }
-                            last_flush = tokio::time::Instant::now();
-                        } else if last_flush.elapsed() >= batch_timeout {
-                            // Process on timeout if we have any events
-                            if queue_len > 0 {
-                                if let Err(e) = Self::process_batch_static(
-                                    &batch_queue,
-                                    &projection_store,
-                                    &projection_cache,
-                                    &cache_service,
-                                    &metrics,
-                                    consistency_manager.as_ref(),
-                                    batch_size,
-                                ).await {
-                                    error!("Batch processing failed: {}", e);
-                                }
-                                last_flush = tokio::time::Instant::now();
-                            }
-                        }
-                    }
-                    _ = shutdown_token.cancelled() => {
-                        info!("Batch processor shutting down");
-                        break;
-                    }
-                }
-            }
-        });
-        *self.batch_processor_handle.lock().await = Some(handle);
-        self.start_performance_monitor().await?;
-        self.start_periodic_flush_task().await?;
-        info!("Batch processor started successfully");
-        Ok(())
-    }
-
-    /// Check if the batch processor is currently running
-    pub async fn is_batch_processor_running(&self) -> bool {
-        self.batch_processor_handle.lock().await.is_some()
-    }
-
-    /// Enable batch processing and start the processor
-    pub async fn enable_and_start_batch_processor(&mut self) -> Result<()> {
-        // Update configuration to enable batch processing
-        let mut config = self.business_config.lock().await.clone();
-        config.batch_processing_enabled = true;
-        *self.business_config.lock().await = config;
-
-        // Start the batch processor
-        self.start_batch_processor().await
-    }
-
-    /// Enhanced CDC batch processing with COPY optimization
-    pub async fn process_cdc_events_batch_with_copy(
-        &self,
-        cdc_events: Vec<serde_json::Value>,
-    ) -> Result<()> {
-        if cdc_events.is_empty() {
-            return Ok(());
-        }
-
-        let start_time = Instant::now();
-        let batch_size = cdc_events.len();
-        tracing::info!(
-            "🔍 CDC Event Processor (COPY-optimized): Starting batch processing of {} events",
-            batch_size
-        );
-
-        // Extract and validate all events first (unchanged)
-        let mut processable_events = Vec::with_capacity(batch_size);
-        for cdc_event in &cdc_events {
-            match self.extract_event_serde_json_optimized(cdc_event) {
-                Ok(Some(event)) => {
-                    processable_events.push(event);
-                }
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::error!("CDC Event Processor: Failed to extract event: {:?}", e);
-                    continue;
-                }
-            }
-        }
-
-        if processable_events.is_empty() {
-            return Ok(());
-        }
-
-        // Group events by aggregate (unchanged)
-        let events_by_aggregate = Self::group_events_by_aggregate(processable_events);
-
-        // Process events and get projections (unchanged)
-        let (projections, _processed_aggregates) = UltraOptimizedCDCEventProcessor::process_events_for_aggregates_optimized(events_by_aggregate, &self.projection_cache, &self.cache_service, &self.projection_store, &self.metrics)
-            .await?;
-
-        // CRITICAL OPTIMIZATION: Use COPY-optimized batch processing
-        if !projections.is_empty() {
-            let projections_len = projections.len();
-
-            // Convert to format expected by projection store
-            let transactions: Vec<crate::infrastructure::projections::TransactionProjection> =
-                Vec::new(); // Extract from domain events if needed
-
-            // Use COPY-optimized batch processing
-            if let Some(projection_store) =
-                self.projection_store
-                    .as_any()
-                    .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
-            {
-                match projection_store
-                    .process_cdc_batch_optimized(projections, transactions)
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(
-                            "🔍 CDC Event Processor (COPY-optimized): Successfully processed {} projections",
-                            projections_len
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "🔍 CDC Event Processor (COPY-optimized): Failed to process projections: {:?}",
-                            e
-                        );
-                        return Err(e);
-                    }
-                }
-            } else {
-                // Fallback to standard processing
-                tracing::warn!("🔍 CDC Event Processor: COPY optimization not available, using standard processing");
-                match self
-                    .projection_store
-                    .upsert_accounts_batch(projections)
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(
-                            "🔍 CDC Event Processor: Successfully batch upserted {} projections (fallback)",
-                            projections_len
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "🔍 CDC Event Processor: Failed to batch upsert projections: {:?}",
-                            e
-                        );
-                        return Err(e);
-                    }
-                }
-            }
-        }
-
-        let duration = start_time.elapsed();
-        tracing::info!(
-            "🔍 CDC Event Processor (COPY-optimized): Batch processing completed in {:?}",
-            duration
-        );
-
-        Ok(())
-    }
-
-    /// Enhanced initialization with COPY optimization setup
-    pub async fn initialize_with_copy_optimization(&self) -> Result<()> {
-        tracing::info!("UltraOptimizedCDCEventProcessor: Initializing with COPY optimization");
-
-        // Apply database optimizations for COPY operations
-        if let Some(projection_store) = self
-            .projection_store
-            .as_any()
-            .downcast_ref::<ProjectionStore>()
-        {
-            // Apply PostgreSQL optimizations
-            if let Err(e) = projection_store
-                .apply_postgres_bulk_settings(false, true)
-                .await
-            {
-                tracing::warn!("Failed to apply PostgreSQL COPY optimizations: {}", e);
-            } else {
-                tracing::info!("Successfully applied PostgreSQL COPY optimizations");
-            }
-
-            // Create optimized indexes if they don't exist
-            // let pool = &projection_store.pools.write_pool;
-            // if let Err(e) = sqlx::query(CREATE_OPTIMIZED_INDEXES_SQL).execute(pool).await {
-            //     tracing::warn!("Failed to create optimized indexes for COPY operations: {}", e);
-            // } else {
-            //     tracing::info!("Successfully verified/created optimized indexes for COPY operations");
-            // }
-        }
-
-        // Log final configuration
-        let copy_config = CopyOptimizationConfig::from_env();
-        tracing::info!(
-            "UltraOptimizedCDCEventProcessor: COPY optimization initialized - enabled: {}, account_threshold: {}, transaction_threshold: {}, batch_size: {}",
-            copy_config.enable_copy_optimization,
-            copy_config.projection_copy_threshold,
-            copy_config.transaction_copy_threshold,
-            copy_config.cdc_projection_batch_size
-        );
-
-        Ok(())
-    }
-
-    /// Performance monitoring for COPY operations
-    pub fn get_copy_performance_stats(&self) -> String {
-        if let Some(projection_store) = self
-            .projection_store
-            .as_any()
-            .downcast_ref::<ProjectionStore>()
-        {
-            let copy_metrics = &projection_store.metrics.copy_metrics;
-
-            format!(
-                "COPY Performance Stats - Success Rate: {:.2}%, Avg COPY Duration: {:.2}ms, Avg UNNEST Duration: {:.2}ms, Fallbacks: {}",
-                copy_metrics.get_copy_success_rate(),
-                copy_metrics.get_average_copy_duration(),
-                copy_metrics.get_average_unnest_duration(),
-                copy_metrics.copy_fallback_to_unnest.load(std::sync::atomic::Ordering::Relaxed)
-            )
-        } else {
-            "COPY optimization not available".to_string()
-        }
-    }
-
-    /// Ultra-fast event processing with business logic validation
-    #[instrument(skip(self, cdc_event))]
-    pub async fn process_cdc_event_ultra_fast(&self, cdc_event: serde_json::Value) -> Result<()> {
-        let start_time = Instant::now();
-        if !self.circuit_breaker.can_execute().await {
-            return Err(anyhow::anyhow!("Circuit breaker is open"));
-        }
-        self.circuit_breaker.on_attempt().await;
-
-        // Try serde_json first for debugging
-        let processable_event = match self.extract_event_serde_json_optimized(&cdc_event)? {
-            Some(event) => {
-                tracing::debug!(
-                    "🔍 Successfully extracted event with serde_json: {}",
-                    event.event_id
-                );
-                event
-            }
-            None => {
-                tracing::debug!("🔍 No event to process (tombstone or empty)");
-                return Ok(());
-            }
-        };
-
-        // ✅ DÜZELTME: Batch processing'i etkinleştir
-        let business_config = self.business_config.lock().await;
-        if business_config.batch_processing_enabled {
-            // REMOVED: Info logs for performance - too many events
-            // Store aggregate_id before moving processable_event
-            let aggregate_id = processable_event.aggregate_id;
-
-            // CRITICAL FIX: Ensure batch processor is running
-            if !self.is_batch_processor_running().await {
-                tracing::info!(
-                    "🔍 CDC Event Processor: Batch processor not running, will start on next event"
-                );
-                // Note: We can't start batch processor here due to borrow checker
-                // It will be started automatically when needed
-            }
-
-            // Add event to batch queue
-            {
-                let mut batch_queue = self.batch_queue.lock().await;
-                batch_queue.push(processable_event);
-                // REMOVED: Info log for performance - too many events
-            }
-
-            // Update queue depth metric
-            Self::update_queue_depth_metric(&self.batch_queue, &self.metrics).await;
-
-            // Mark as processed immediately for consistency
-            if let Some(consistency_manager) = &self.consistency_manager {
-                // REMOVED: Info logs for performance - too many events
-                consistency_manager
-                    .mark_projection_completed(aggregate_id)
-                    .await;
-
-                // Also mark CDC processing as completed
-                consistency_manager.mark_completed(aggregate_id).await;
-            }
-
-            self.circuit_breaker.on_success().await;
-            self.metrics
-                .events_processed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Ok(());
-        }
-
-        // Fallback to individual processing if batch processing is disabled
-        let mut retries = 0;
-        loop {
-            match self.try_process_event(&processable_event).await {
-                Ok(_) => {
-                    self.circuit_breaker.on_success().await;
-                    tracing::debug!(
-                        "🔍 Event processed successfully: {}",
-                        processable_event.event_id
-                    );
-
-                    // Mark projection completed immediately after successful processing
-                    if let Some(consistency_manager) = &self.consistency_manager {
-                        tracing::info!("CDC Event Processor: Marking projection completed for aggregate {} (immediate)", processable_event.aggregate_id);
-                        consistency_manager
-                            .mark_projection_completed(processable_event.aggregate_id)
-                            .await;
-                        tracing::info!("CDC Event Processor: Successfully marked projection completed for aggregate {} (immediate)", processable_event.aggregate_id);
-
-                        // Also mark CDC processing as completed
-                        tracing::info!("CDC Event Processor: Marking CDC completed for aggregate {} (immediate)", processable_event.aggregate_id);
-                        consistency_manager
-                            .mark_completed(processable_event.aggregate_id)
-                            .await;
-                        tracing::info!("CDC Event Processor: Successfully marked CDC completed for aggregate {} (immediate)", processable_event.aggregate_id);
-                    }
-
-                    break;
-                }
-                Err(e) => {
-                    retries += 1;
-                    if retries > self.max_retries {
-                        self.metrics
-                            .events_failed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        error!(
-                            "Failed to process event {} after {} retries: {}",
-                            processable_event.event_id, retries, e
-                        );
-                        return Err(e);
-                    }
-                    tokio::time::sleep(Duration::from_millis(self.retry_backoff_ms)).await;
-                }
-            }
-        }
-
-        let latency = start_time.elapsed().as_millis() as u64;
-        self.metrics
-            .processing_latency_ms
-            .fetch_add(latency, std::sync::atomic::Ordering::Relaxed);
-        self.metrics
-            .events_processed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    /// COPY-optimized batch processor
-    async fn batch_processor_with_copy_optimization(
-        mut batch_rx: mpsc::Receiver<BatchProcessingJob>,
-        projection_store: Arc<ProjectionStore>,
-        metrics: Arc<EnhancedCDCMetrics>,
-        circuit_breaker: Arc<AdvancedCircuitBreaker>,
-        performance_profiler: Arc<PerformanceProfiler>,
-        shutdown_token: CancellationToken,
-        copy_config: CopyOptimizationConfig,
-    ) {
-        tracing::info!("COPY-optimized batch processor started");
-
-        let mut batch_buffer = Vec::new();
-        let mut last_flush = std::time::Instant::now();
-        let flush_interval = Duration::from_millis(copy_config.cdc_projection_batch_size as u64);
-
-        loop {
-            tokio::select! {
-                _ = shutdown_token.cancelled() => {
-                    tracing::info!("COPY-optimized batch processor shutting down");
-
-                    // Process remaining batches
-                    if !batch_buffer.is_empty() {
-                        Self::process_accumulated_batch_with_copy(
-                            &batch_buffer,
-                            &projection_store,
-                            &metrics,
-                            &performance_profiler,
-                            &copy_config,
-                        ).await;
-                    }
-                    break;
-                }
-
-                Some(job) = batch_rx.recv() => {
-                    batch_buffer.push(job);
-
-                    // Process batch if it's large enough or timeout reached
-                    let should_flush = batch_buffer.len() >= copy_config.cdc_projection_batch_size ||
-                                     last_flush.elapsed() >= flush_interval;
-
-                    if should_flush && circuit_breaker.can_execute().await {
-                        let batch_to_process = std::mem::take(&mut batch_buffer);
-
-                        let result = Self::process_accumulated_batch_with_copy(
-                            &batch_to_process,
-                            &projection_store,
-                            &metrics,
-                            &performance_profiler,
-                            &copy_config,
-                        ).await;
-
-                        if result.is_err() {
-                            circuit_breaker.on_failure();
-                        } else {
-                            circuit_breaker.on_success();
-                        }
-
-                        last_flush = std::time::Instant::now();
-                    }
-                }
-
-                _ = tokio::time::sleep(flush_interval) => {
-                    if !batch_buffer.is_empty() && circuit_breaker.can_execute().await {
-                        let batch_to_process = std::mem::take(&mut batch_buffer);
-
-                        let result = Self::process_accumulated_batch_with_copy(
-                            &batch_to_process,
-                            &projection_store,
-                            &metrics,
-                            &performance_profiler,
-                            &copy_config,
-                        ).await;
-
-                        if result.is_err() {
-                            circuit_breaker.on_failure();
-                        } else {
-                            circuit_breaker.on_success();
-                        }
-
-                        last_flush = std::time::Instant::now();
-                    }
-                }
-            }
-        }
-
-        tracing::info!("COPY-optimized batch processor stopped");
-    }
-
-    /// Process accumulated batch with COPY optimization
-    async fn process_accumulated_batch_with_copy(
-        batch_jobs: &[BatchProcessingJob],
-        projection_store: &Arc<ProjectionStore>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-        performance_profiler: &Arc<PerformanceProfiler>,
-        copy_config: &CopyOptimizationConfig,
-    ) -> Result<()> {
-        if batch_jobs.is_empty() {
-            return Ok(());
-        }
-
-        let start_time = std::time::Instant::now();
-
-        // Aggregate all projections from batch jobs
-        let mut all_accounts = Vec::new();
-        let mut all_transactions = Vec::new();
-
-        for job in batch_jobs {
-            match job {
-                BatchProcessingJob::AccountProjections(accounts) => {
-                    all_accounts.extend_from_slice(accounts);
-                }
-                BatchProcessingJob::TransactionProjections(transactions) => {
-                    all_transactions.extend_from_slice(transactions);
-                }
-                BatchProcessingJob::Mixed {
-                    accounts,
-                    transactions,
-                } => {
-                    all_accounts.extend_from_slice(accounts);
-                    all_transactions.extend_from_slice(transactions);
-                }
-            }
-        }
-
-        tracing::info!(
-            "COPY-optimized batch processor: Processing {} accounts, {} transactions",
-            all_accounts.len(),
-            all_transactions.len()
-        );
-
-        // Use COPY-optimized processing
-        let result = projection_store
-            .process_cdc_batch_optimized(all_accounts, all_transactions)
-            .await;
-
-        let duration = start_time.elapsed();
-
-        match result {
-            Ok(_) => {
-                metrics.batch_processing_duration.fetch_add(
-                    duration.as_millis() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                metrics
-                    .batches_processed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                tracing::info!(
-                    "COPY-optimized batch processor: Successfully processed {} jobs in {:?}",
-                    batch_jobs.len(),
-                    duration
-                );
-            }
-            Err(ref e) => {
-                metrics
-                    .batch_processing_errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                tracing::error!(
-                    "COPY-optimized batch processor: Failed to process {} jobs in {:?}: {:?}",
-                    batch_jobs.len(),
-                    duration,
-                    e
-                );
-            }
-        }
-        result
-    }
-
     /// CRITICAL OPTIMIZATION: Process multiple CDC events in batch with event type separation
-    pub async fn process_cdc_events_batch(&self, cdc_events: &mut Vec<serde_json::Value>) -> Result<()> {
+    pub async fn process_cdc_events_batch(
+        &self,
+        cdc_events: &mut Vec<serde_json::Value>,
+    ) -> Result<()> {
         if cdc_events.is_empty() {
             return Ok(());
         }
@@ -1543,87 +698,328 @@ impl UltraOptimizedCDCEventProcessor {
             batch_size
         );
         let event_batches = self.extract_events_parallel_optimized(cdc_events).await?;
-        
+
         if event_batches.is_empty() {
             tracing::info!("No processable events found");
             return Ok(());
         }
-// OPTIMIZATION 7: Process all event types in parallel with maximum concurrency
+
+        // Acquire a permit to limit concurrent DB access during the prepare phase.
+        // This prevents overwhelming the database with read requests from all 32 workers at once.
+        let _permit = self.prepare_semaphore.acquire().await?;
+
+        // Prepare all projections by applying events
         let processing_start = Instant::now();
-        let results = self.process_all_event_types_parallel(event_batches).await?;
-        
+        let projection_batches = self.prepare_projection_batches(event_batches).await?;
         let processing_duration = processing_start.elapsed();
+
+        // Submit all prepared projections to the write service
+        let submission_start = Instant::now();
+        let batching_service = self
+            .cdc_batching_service
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
+
+        let create_count = projection_batches.accounts_to_create.len();
+        let update_count = projection_batches.accounts_to_update.len();
+        let tx_count = projection_batches.transactions_to_create.len();
+
+        let (create_res, update_res, tx_res) = tokio::join!(
+            async {
+                if create_count > 0 {
+                    batching_service
+                        .submit_account_creations_bulk(projection_batches.accounts_to_create)
+                        .await
+                } else {
+                    Ok(vec![])
+                }
+            },
+            async {
+                if update_count > 0 {
+                    batching_service
+                        .submit_account_updates_bulk(projection_batches.accounts_to_update)
+                        .await
+                } else {
+                    Ok(vec![])
+                }
+            },
+            async {
+                if tx_count > 0 {
+                    batching_service
+                        .submit_transaction_creations_bulk(
+                            projection_batches.transactions_to_create,
+                        )
+                        .await
+                } else {
+                    Ok(vec![])
+                }
+            }
+        );
+
+        // Handle submission errors
+        // create_res.context("Failed to submit account creations")?;
+        // update_res.context("Failed to submit account updates")?;
+        // tx_res.context("Failed to submit transaction creations")?;
+
+        let submission_duration = submission_start.elapsed();
         let total_duration = total_start_time.elapsed();
 
         tracing::info!(
-            "🏆 ULTRA-OPTIMIZED CDC COMPLETE: {} events in {:?} (processing: {:?}, throughput: {:.0} events/sec)",
+            "🏆 ULTRA-OPTIMIZED CDC COMPLETE: {} events in {:?} (prepare: {:?}, submit: {:?}, throughput: {:.0} events/sec)",
             batch_size,
             total_duration,
             processing_duration,
+            submission_duration,
             batch_size as f64 / total_duration.as_secs_f64()
         );
 
         Ok(())
-
     }
- /// OPTIMIZATION 8: Parallel event extraction with SIMD and memory pools
-    async fn extract_events_parallel_optimized(&self, cdc_events: &[serde_json::Value]) -> Result<EventBatches> {
-        let extraction_start = Instant::now();
-        let chunk_size = (cdc_events.len() / MAX_PARALLEL_CHUNKS).max(100);
-        
-        // OPTIMIZATION 9: Process chunks in parallel with bounded concurrency
-        let mut extraction_tasks = Vec::with_capacity(MAX_PARALLEL_CHUNKS);
-        
-        for chunk in cdc_events.chunks(chunk_size) {
-            let chunk = chunk.to_vec(); // Clone chunk for async processing
-            let permit = self.processing_semaphore.clone().acquire_owned().await?;
-            let self_clone = self.clone(); // Clone self to move into async task
-            let task = tokio::spawn(async move {
-                let _permit = permit; // Keep permit until task completion
-                self_clone.extract_chunk_events_simd_optimized(chunk).await
-            });
-            
-            extraction_tasks.push(task);
-        }
 
-        // OPTIMIZATION 10: Collect and merge results efficiently
-        let mut final_batches = EventBatches::with_capacity(cdc_events.len());
-        let mut extracted_count = 0;
-        let mut skipped_count = 0;
-        let mut error_count = 0;
-
-        for task in extraction_tasks {
-            match task.await? {
-                Ok((chunk_batches, stats)) => {
-                    // Merge chunk results
-                    final_batches.account_created.extend(chunk_batches.account_created);
-                    final_batches.transactions.extend(chunk_batches.transactions);
-                    final_batches.account_closed.extend(chunk_batches.account_closed);
-
-                    extracted_count += stats.0;
-                    skipped_count += stats.1;
-                    error_count += stats.2;
+    /// Prepares projection batches from classified events.
+    /// This method is now responsible for the "prepare" phase.
+    async fn prepare_projection_batches(
+        &self,
+        event_batches: EventBatches,
+    ) -> Result<ProjectionBatches> {
+        let (created_projections_res, updated_data_res) = tokio::join!(
+            async {
+                if !event_batches.account_created.is_empty() {
+                    Self::prepare_account_creations(event_batches.account_created).await
+                } else {
+                    Ok(vec![])
                 }
-                Err(e) => {
-                    tracing::error!("Chunk extraction failed: {:?}", e);
-                    error_count += 1;
+            },
+            async {
+                if !event_batches.transactions.is_empty() {
+                    Self::prepare_account_updates_and_transactions(
+                        event_batches.transactions,
+                        self.projection_store.clone(),
+                    )
+                    .await
+                } else {
+                    Ok((vec![], vec![]))
+                }
+            }
+        );
+
+        let accounts_to_create = created_projections_res?;
+        let (accounts_to_update, transactions_to_create) = updated_data_res?;
+
+        Ok(ProjectionBatches {
+            accounts_to_create,
+            accounts_to_update,
+            transactions_to_create,
+        })
+    }
+
+    /// Prepares projections for `AccountCreated` events. This is a pure transformation function.
+    async fn prepare_account_creations(
+        events: Vec<ProcessableEvent>,
+    ) -> Result<Vec<(Uuid, AccountProjection)>> {
+        let mut projections = Vec::with_capacity(events.len());
+
+        for event in events {
+            if let Ok(domain_event) = event.get_domain_event() {
+                if let crate::domain::AccountEvent::AccountCreated {
+                    owner_name,
+                    initial_balance,
+                    ..
+                } = domain_event
+                {
+                    let projection = crate::infrastructure::projections::AccountProjection {
+                        id: event.aggregate_id,
+                        owner_name: owner_name.clone(),
+                        balance: *initial_balance,
+                        is_active: true,
+                        created_at: event.timestamp,
+                        updated_at: event.timestamp,
+                    };
+                    projections.push((event.aggregate_id, projection));
                 }
             }
         }
+        Ok(projections)
+    }
+
+    /// Prepares projections for account updates and creates transaction projections.
+    /// This function fetches the current state and applies new events.
+    async fn prepare_account_updates_and_transactions(
+        events: Vec<ProcessableEvent>,
+        projection_store: Arc<dyn ProjectionStoreTrait>,
+    ) -> Result<(Vec<(Uuid, AccountProjection)>, Vec<TransactionProjection>)> {
+        if events.is_empty() {
+            return Ok((vec![], vec![]));
+        }
+
+        let events_by_aggregate = Self::group_events_by_aggregate(events);
+        let aggregate_ids: Vec<Uuid> = events_by_aggregate.keys().cloned().collect();
+
+        // Batch load existing projections
+        let db_projections = projection_store.get_accounts_batch(&aggregate_ids).await?;
+        let mut projections_map: HashMap<Uuid, AccountProjection> =
+            db_projections.into_iter().map(|p| (p.id, p)).collect();
+
+        let mut updated_projections = Vec::with_capacity(events_by_aggregate.len());
+        let mut transaction_projections = Vec::new();
+
+        for (aggregate_id, aggregate_events) in events_by_aggregate {
+            if let Some(mut projection) = projections_map.remove(&aggregate_id) {
+                for event in aggregate_events {
+                    if let Ok(domain_event) = event.get_domain_event() {
+                        projection.apply_event(domain_event)?;
+                        projection.updated_at = event.timestamp;
+
+                        if let Some(tx_proj) = TransactionProjection::from_domain_event(
+                            domain_event,
+                            aggregate_id,
+                            event.timestamp,
+                        ) {
+                            transaction_projections.push(tx_proj);
+                        }
+                    }
+                }
+                updated_projections.push((aggregate_id, projection));
+            } else {
+                warn!("No projection found for aggregate_id: {}", aggregate_id);
+            }
+        }
+
+        Ok((updated_projections, transaction_projections))
+    }
+
+    /// Groups a vector of events by their aggregate ID and sorts them by timestamp.
+    fn group_events_by_aggregate(
+        events: Vec<ProcessableEvent>,
+    ) -> HashMap<Uuid, Vec<ProcessableEvent>> {
+        let mut events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>> = HashMap::new();
+
+        // Group events by aggregate ID
+        for event in events {
+            events_by_aggregate
+                .entry(event.aggregate_id)
+                .or_default()
+                .push(event);
+        }
+
+        // CRITICAL FIX: Sort events within each aggregate by timestamp to ensure proper ordering
+        for (_, aggregate_events) in &mut events_by_aggregate {
+            aggregate_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        }
+
+        events_by_aggregate
+    }
+
+    /// OPTIMIZATION 8: Parallel event extraction with SIMD and memory pools
+    async fn extract_events_parallel_optimized(
+        &self,
+        cdc_events: &[serde_json::Value],
+    ) -> Result<EventBatches> {
+        let extraction_start = Instant::now();
+        // let chunk_size = (cdc_events.len() / MAX_PARALLEL_CHUNKS).max(100);
+
+        // // OPTIMIZATION 9: Process chunks in parallel with bounded concurrency
+        // let mut extraction_tasks = Vec::with_capacity(MAX_PARALLEL_CHUNKS);
+
+        // for chunk in cdc_events.chunks(chunk_size) {
+        //     let chunk = chunk.to_vec(); // Clone chunk for async processing
+        //     let permit = self.processing_semaphore.clone().acquire_owned().await?;
+        //     let self_clone = self.clone(); // Clone self to move into async task
+        //     let task = tokio::spawn(async move {
+        //         let _permit = permit; // Keep permit until task completion
+        //         self_clone.extract_chunk_events_simd_optimized(chunk).await
+        //     });
+
+        //     extraction_tasks.push(task);
+        // }
+
+        // // OPTIMIZATION 10: Collect and merge results efficiently
+        // let mut final_batches = EventBatches::with_capacity(cdc_events.len());
+        // let mut extracted_count = 0;
+        // let mut skipped_count = 0;
+        // let mut error_count = 0;
+
+        // for task in extraction_tasks {
+        //     match task.await? {
+        //         Ok((chunk_batches, stats)) => {
+        //             // Merge chunk results
+        //             final_batches
+        //                 .account_created
+        //                 .extend(chunk_batches.account_created);
+        //             final_batches
+        //                 .transactions
+        //                 .extend(chunk_batches.transactions);
+        //             final_batches
+        //                 .account_closed
+        //                 .extend(chunk_batches.account_closed);
+
+        //             extracted_count += stats.0;
+        //             skipped_count += stats.1;
+        //             error_count += stats.2;
+        //         }
+        //         Err(e) => {
+        //             tracing::error!("Chunk extraction failed: {:?}", e);
+        //             error_count += 1;
+        //         }
+        //     }
+        // }
+
+        let cdc_events_owned = cdc_events.to_vec();
+        let self_clone = self.clone();
+
+        let (final_batches, stats) = tokio::task::spawn_blocking(move || {
+            let results: Vec<_> = cdc_events_owned
+                // PERF: Switched from par_iter to a sequential iter.
+                // The system already has batch-level parallelism via multiple tokio workers.
+                // Adding another layer of parallelism with Rayon here causes thread oversubscription and contention.
+                .iter()
+                .map(|cdc_event| self_clone.extract_event_serde_json_optimized(cdc_event))
+                .collect();
+
+            let mut batches = EventBatches::with_capacity(results.len());
+            let mut extracted = 0;
+            let mut skipped = 0;
+            let mut errors = 0;
+
+            for result in results {
+                match result {
+                    Ok(Some(event)) => {
+                        match &event.event_type {
+                            EventType::AccountCreated => batches.account_created.push(event),
+                            EventType::MoneyDeposited | EventType::MoneyWithdrawn => {
+                                batches.transactions.push(event);
+                            }
+                            EventType::AccountClosed => batches.account_closed.push(event),
+                        }
+                        extracted += 1;
+                    }
+                    Ok(None) => skipped += 1,
+                    Err(_) => errors += 1,
+                }
+            }
+
+            (batches, (extracted, skipped, errors))
+        })
+        .await?;
+
+        let (extracted_count, skipped_count, error_count) = stats;
 
         let extraction_duration = extraction_start.elapsed();
         tracing::info!(
             "⚡ EXTRACTION COMPLETE: {} events in {:?} (extracted: {}, skipped: {}, errors: {})",
-            extracted_count, extraction_duration, extracted_count, skipped_count, error_count
+            extracted_count,
+            extraction_duration,
+            extracted_count,
+            skipped_count,
+            error_count
         );
 
         Ok(final_batches)
     }
-
     /// OPTIMIZATION 11: SIMD-optimized chunk processing
     async fn extract_chunk_events_simd_optimized(
         &self,
-        chunk: Vec<serde_json::Value>
+        chunk: Vec<serde_json::Value>,
     ) -> Result<(EventBatches, (usize, usize, usize))> {
         let mut batches = EventBatches::with_capacity(chunk.len());
         let mut extracted = 0;
@@ -1639,7 +1035,7 @@ impl UltraOptimizedCDCEventProcessor {
                         EventType::AccountCreated => batches.account_created.push(event),
                         EventType::MoneyDeposited | EventType::MoneyWithdrawn => {
                             batches.transactions.push(event);
-                        },
+                        }
                         EventType::AccountClosed => batches.account_closed.push(event),
                     }
                     extracted += 1;
@@ -1651,83 +1047,10 @@ impl UltraOptimizedCDCEventProcessor {
 
         Ok((batches, (extracted, skipped, errors)))
     }
-
-    // async fn process_all_event_types_parallel(&self, event_batches: EventBatches) -> Result<()> {
-    //     let batching_service = self.cdc_batching_service
-    //         .as_ref()
-    //         .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
-    //     let mut total_processed = 0;
-
-    //     // CRITICAL: Process AccountCreated asynchronously (fire and forget)
-    //     if !event_batches.account_created.is_empty() {
-    //         let account_count = event_batches.account_created.len();
-    //         let events = event_batches.account_created;
-    //         let service = batching_service.clone();
-
-    //         // FIRE AND FORGET: Spawn account creation processing but DON'T WAIT
-    //         tokio::spawn(async move {
-    //             let start_time = std::time::Instant::now();
-    //             match Self::process_account_created_ultra_fast(events, service).await {
-    //                 Ok(count) => {
-    //                     let duration = start_time.elapsed();
-    //                     tracing::info!(
-    //                         "🚀 BACKGROUND ACCOUNT_CREATED COMPLETE: {} events in {:?} ({:.0} events/sec)",
-    //                         count,
-    //                         duration,
-    //                         count as f64 / duration.as_secs_f64()
-    //                     );
-    //                 }
-    //                 Err(e) => {
-    //                     tracing::error!("❌ Background account creation processing failed: {:?}", e);
-    //                     // TODO: Send to DLQ or retry mechanism
-    //                 }
-    //             }
-    //         });
-
-    //         // Count accounts as processed (even though they're background)
-    //         total_processed += account_count;
-    //         tracing::info!("📤 QUEUED AccountCreated processing: {} events (background)", account_count);
-    //     }
-
-    //     // CRITICAL: Process Transactions asynchronously (slow operations)
-    //     if !event_batches.transactions.is_empty() {
-    //     let transaction_count = event_batches.transactions.len();
-    //     let events = event_batches.transactions;
-    //     let projection_store = self.projection_store.clone();
-    //     let service = batching_service.clone();
-
-    //     // FIRE AND FORGET: Spawn transaction processing but DON'T WAIT
-    //     tokio::spawn(async move {
-    //         let start_time = std::time::Instant::now();
-    //         match Self::process_transactions_ultra_fast(events, projection_store, service).await {
-    //             Ok(count) => {
-    //                 let duration = start_time.elapsed();
-    //                 tracing::info!(
-    //                     "🚀 BACKGROUND TRANSACTIONS COMPLETE: {} events in {:?} ({:.0} events/sec)",
-    //                     count,
-    //                     duration,
-    //                     count as f64 / duration.as_secs_f64()
-    //                 );
-    //             }
-    //             Err(e) => {
-    //                 tracing::error!("❌ Background transaction processing failed: {:?}", e);
-    //                 // TODO: Send to DLQ or retry mechanism
-    //             }
-    //         }
-    //     });
-
-    //     // Count transactions as processed (even though they're background)
-    //     total_processed += transaction_count;
-    //     tracing::info!("📤 QUEUED Transactions processing: {} events (background)", transaction_count);
-    // }
-
-    // tracing::info!("🏁 Total processed events: {} (all processing in background)", total_processed);
-    //     Ok(())
-    // }
-
     /// OPTIMIZATION 18: Process all event types in parallel with maximum efficiency
     async fn process_all_event_types_parallel(&self, event_batches: EventBatches) -> Result<()> {
-        let batching_service = self.cdc_batching_service
+        let batching_service = self
+            .cdc_batching_service
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
 
@@ -1736,7 +1059,7 @@ impl UltraOptimizedCDCEventProcessor {
             let events = event_batches.account_created;
             let service = batching_service.clone();
             Some(tokio::spawn(async move {
-                Self::process_account_created_ultra_fast(events, service).await
+                Self::prepare_account_creations(events).await
             }))
         } else {
             None
@@ -1747,7 +1070,7 @@ impl UltraOptimizedCDCEventProcessor {
             let service = batching_service.clone();
             let projection_store = self.projection_store.clone();
             Some(tokio::spawn(async move {
-                Self::process_transactions_ultra_fast(events, projection_store, service).await
+                Self::prepare_account_updates_and_transactions(events, projection_store).await
             }))
         } else {
             None
@@ -1755,12 +1078,12 @@ impl UltraOptimizedCDCEventProcessor {
 
         // OPTIMIZATION 20: Wait for all tasks and collect results
         let mut total_processed = 0;
-        
+
         if let Some(task) = account_created_task {
             match task.await? {
                 Ok(count) => {
-                    total_processed += count;
-                    tracing::info!("✅ AccountCreated processing: {} events", count);
+                    total_processed += count.len();
+                    tracing::info!("✅ AccountCreated processing: {} events", count.len());
                 }
                 Err(e) => {
                     tracing::error!("❌ AccountCreated processing failed: {:?}", e);
@@ -1772,8 +1095,11 @@ impl UltraOptimizedCDCEventProcessor {
         if let Some(task) = transactions_task {
             match task.await? {
                 Ok(count) => {
-                    total_processed += count;
-                    tracing::info!("✅ Transactions processing: {} events", count);
+                    total_processed += count.0.len() + count.1.len();
+                    tracing::info!(
+                        "✅ Transactions processing: {} events",
+                        count.0.len() + count.1.len()
+                    );
                 }
                 Err(e) => {
                     tracing::error!("❌ Transactions processing failed: {:?}", e);
@@ -1805,7 +1131,8 @@ impl UltraOptimizedCDCEventProcessor {
                     owner_name,
                     initial_balance,
                     ..
-                } = domain_event {
+                } = domain_event
+                {
                     let projection = crate::infrastructure::projections::AccountProjection {
                         id: event.aggregate_id,
                         owner_name: owner_name.clone(),
@@ -1830,7 +1157,10 @@ impl UltraOptimizedCDCEventProcessor {
         );
 
         // OPTIMIZATION 23: Batch submit with fire-and-forget optimization
-        match batching_service.submit_account_creations_bulk(projections).await {
+        match batching_service
+            .submit_account_creations_bulk(projections)
+            .await
+        {
             Ok(operation_ids) => {
                 let duration = start_time.elapsed();
                 tracing::info!(
@@ -1847,7 +1177,7 @@ impl UltraOptimizedCDCEventProcessor {
             }
         }
     }
-/// OPTIMIZATION 24: Ultra-fast transaction processing with batch operations
+    /// OPTIMIZATION 24: Ultra-fast transaction processing with batch operations
     async fn process_transactions_ultra_fast(
         events: Vec<ProcessableEvent>,
         projection_store: Arc<dyn ProjectionStoreTrait>,
@@ -1858,15 +1188,18 @@ impl UltraOptimizedCDCEventProcessor {
         }
 
         let start_time = Instant::now();
-        
+
         // OPTIMIZATION 25: Group transactions by aggregate for efficient processing
         let mut events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>> = HashMap::new();
         for event in events {
-            events_by_aggregate.entry(event.aggregate_id).or_default().push(event);
+            events_by_aggregate
+                .entry(event.aggregate_id)
+                .or_default()
+                .push(event);
         }
 
         let aggregate_ids: Vec<Uuid> = events_by_aggregate.keys().cloned().collect();
-        
+
         tracing::info!(
             "⚡ Batch loading {} account projections for transactions",
             aggregate_ids.len()
@@ -1879,9 +1212,11 @@ impl UltraOptimizedCDCEventProcessor {
             .map_err(|e| anyhow::anyhow!("Batch projection load failed: {:?}", e))?;
 
         // OPTIMIZATION 27: Fast lookup map with pre-allocated capacity
-        let mut projections_map: HashMap<Uuid, crate::infrastructure::projections::AccountProjection> = 
-            HashMap::with_capacity(db_projections.len());
-        
+        let mut projections_map: HashMap<
+            Uuid,
+            crate::infrastructure::projections::AccountProjection,
+        > = HashMap::with_capacity(db_projections.len());
+
         for proj in db_projections {
             projections_map.insert(proj.id, proj);
         }
@@ -1909,7 +1244,7 @@ impl UltraOptimizedCDCEventProcessor {
                         crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
                             current_projection.balance += *amount;
                             current_projection.updated_at = event.timestamp;
-                            
+
                             // Create transaction projection
                             transaction_projections.push(TransactionProjection {
                                 id: event.event_id,
@@ -1922,7 +1257,7 @@ impl UltraOptimizedCDCEventProcessor {
                         crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
                             current_projection.balance -= *amount;
                             current_projection.updated_at = event.timestamp;
-                            
+
                             // Create transaction projection
                             transaction_projections.push(TransactionProjection {
                                 id: event.event_id,
@@ -1949,21 +1284,26 @@ impl UltraOptimizedCDCEventProcessor {
 
         tracing::info!(
             "⚡ Processing {} account projections and {} transaction projections",
-            projection_count, transaction_count
+            projection_count,
+            transaction_count
         );
 
         // OPTIMIZATION 30: Parallel submission of account and transaction projections
         let (account_result, transaction_result) = tokio::join!(
             async {
                 if !final_projections.is_empty() {
-                    batching_service.submit_account_updates_bulk(final_projections).await
+                    batching_service
+                        .submit_account_updates_bulk(final_projections)
+                        .await
                 } else {
                     Ok(vec![])
                 }
             },
             async {
                 if !transaction_projections.is_empty() {
-                    batching_service.submit_transaction_creations_bulk(transaction_projections).await
+                    batching_service
+                        .submit_transaction_creations_bulk(transaction_projections)
+                        .await
                 } else {
                     Ok(vec![])
                 }
@@ -1971,7 +1311,7 @@ impl UltraOptimizedCDCEventProcessor {
         );
 
         let mut total_operations = 0;
-        
+
         match account_result {
             Ok(operation_ids) => {
                 total_operations += operation_ids.len();
@@ -1986,7 +1326,10 @@ impl UltraOptimizedCDCEventProcessor {
         match transaction_result {
             Ok(operation_ids) => {
                 total_operations += operation_ids.len();
-                tracing::debug!("✅ Transaction projections submitted: {}", operation_ids.len());
+                tracing::debug!(
+                    "✅ Transaction projections submitted: {}",
+                    operation_ids.len()
+                );
             }
             Err(e) => {
                 tracing::error!("❌ Transaction projection submission failed: {:?}", e);
@@ -2004,1535 +1347,6 @@ impl UltraOptimizedCDCEventProcessor {
 
         Ok(total_operations)
     }
-
-
-
-
-    async fn try_process_event(&self, processable_event: &ProcessableEvent) -> Result<()> {
-        let aggregate_id = processable_event.aggregate_id;
-
-        // Business logic validation
-        if self.business_config.lock().await.enable_validation {
-            if let Err(e) = self.validate_business_logic(processable_event).await {
-                self.metrics
-                    .events_failed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                error!(
-                    "Business validation failed for event {}: {}",
-                    processable_event.event_id, e
-                );
-                self.send_to_dlq(
-                    processable_event,
-                    &e,
-                    0,
-                    crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Validation,
-                )
-                .await?;
-                // Mark as failed in consistency manager
-                self.mark_aggregate_failed(aggregate_id, e.to_string())
-                    .await;
-                return Err(e);
-            }
-        }
-        // Duplicate detection
-        if self.business_config.lock().await.enable_duplicate_detection {
-            let mut cache_guard = self.projection_cache.write().await;
-            if cache_guard
-                .is_duplicate_event(&processable_event.event_id, &processable_event.aggregate_id)
-            {
-                self.metrics
-                    .consecutive_failures
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                debug!("Skipping duplicate event: {}", processable_event.event_id);
-                // Mark as completed for duplicate events (they were already processed)
-                self.mark_aggregate_completed(aggregate_id).await;
-                return Ok(());
-            }
-        }
-        let _permit = self.processing_semaphore.acquire().await?;
-        {
-            let mut queue = self.batch_queue.lock().await;
-            queue.push(processable_event.clone());
-
-            // Process batch when it reaches the configured size
-            // This allows batching even when batch processing is disabled
-            if queue.len() >= *self.batch_size.lock().await {
-                drop(queue);
-                if let Err(e) = self.process_current_batch().await {
-                    // Mark as failed if batch processing fails
-                    self.mark_aggregate_failed(aggregate_id, e.to_string())
-                        .await;
-                    return Err(e);
-                }
-                // Mark as completed if batch processing succeeds
-                self.mark_aggregate_completed(aggregate_id).await;
-            }
-        }
-        Ok(())
-    }
-
-    /// Business logic validation
-    async fn validate_business_logic(&self, event: &ProcessableEvent) -> Result<()> {
-        let domain_event = event.get_domain_event()?;
-
-        match domain_event {
-            crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
-                if *amount <= Decimal::ZERO {
-                    return Err(anyhow::anyhow!("Deposit amount must be positive"));
-                }
-                if *amount > self.business_config.lock().await.max_transaction_amount {
-                    return Err(anyhow::anyhow!("Deposit amount exceeds maximum allowed"));
-                }
-            }
-            crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
-                if *amount <= Decimal::ZERO {
-                    return Err(anyhow::anyhow!("Withdrawal amount must be positive"));
-                }
-                if *amount > self.business_config.lock().await.max_transaction_amount {
-                    return Err(anyhow::anyhow!("Withdrawal amount exceeds maximum allowed"));
-                }
-            }
-            crate::domain::AccountEvent::AccountCreated {
-                initial_balance, ..
-            } => {
-                if *initial_balance < self.business_config.lock().await.min_balance {
-                    return Err(anyhow::anyhow!("Initial balance cannot be negative"));
-                }
-                if *initial_balance > self.business_config.lock().await.max_balance {
-                    return Err(anyhow::anyhow!("Initial balance exceeds maximum allowed"));
-                }
-            }
-            crate::domain::AccountEvent::AccountClosed { .. } => {
-                // No additional validation needed for account closure
-            }
-        }
-        Ok(())
-    }
-
-    /// Process current batch immediately
-    async fn process_current_batch(&self) -> Result<()> {
-        let batch_size = *self.batch_size.lock().await;
-        Self::process_batch_static(
-            &self.batch_queue,
-            &self.projection_store,
-            &self.projection_cache,
-            &self.cache_service,
-            &self.metrics,
-            self.consistency_manager.as_ref(),
-            batch_size,
-        )
-        .await
-    }
-
-    /// Optimized batch processing with bulk operations and business logic
-    async fn process_batch(
-        &self,
-        batch_queue: &Arc<Mutex<Vec<ProcessableEvent>>>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        projection_cache: &Arc<RwLock<ProjectionCache>>,
-        cache_service: &Arc<dyn CacheServiceTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-        consistency_manager: Option<&Arc<ConsistencyManager>>,
-        batch_size: usize,
-    ) -> Result<()> {
-        Self::process_batch_static(
-            batch_queue,
-            projection_store,
-            projection_cache,
-            cache_service,
-            metrics,
-            consistency_manager,
-            batch_size,
-        )
-        .await
-    }
-
-    /// Static version of process_batch for use in async closures
-    async fn process_batch_static(
-        batch_queue: &Arc<Mutex<Vec<ProcessableEvent>>>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        projection_cache: &Arc<RwLock<ProjectionCache>>,
-        cache_service: &Arc<dyn CacheServiceTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-        consistency_manager: Option<&Arc<ConsistencyManager>>,
-        batch_size: usize,
-    ) -> Result<()> {
-        let events = Self::drain_batch_queue(batch_queue, batch_size).await;
-        if events.is_empty() {
-            return Ok(());
-        }
-
-        let batch_start = Instant::now();
-        let events_count = events.len();
-        Self::update_queue_depth_metric(batch_queue, metrics).await;
-
-        let events_by_aggregate = Self::group_events_by_aggregate(events);
-        // Note: This is a static function, so we can't use self.process_events_for_aggregates
-        // We'll need to handle accumulation differently in static context
-        let (updated_projections, processed_aggregates) =
-            Self::process_events_for_aggregates_static(
-                events_by_aggregate,
-                projection_cache,
-                cache_service,
-                projection_store,
-                metrics,
-            )
-            .await?;
-
-        if !updated_projections.is_empty() {
-            let upsert_result = Self::upsert_projections_in_parallel_static(
-                updated_projections,
-                projection_store,
-                metrics,
-            )
-            .await;
-            Self::handle_upsert_results(
-                upsert_result,
-                processed_aggregates,
-                consistency_manager,
-                metrics,
-            )
-            .await;
-        }
-
-        Self::update_batch_metrics(batch_start, events_count, metrics);
-        Ok(())
-    }
-
-    /// Drains the batch queue, returning a vector of processable events.
-    async fn drain_batch_queue(
-        batch_queue: &Arc<Mutex<Vec<ProcessableEvent>>>,
-        batch_size: usize,
-    ) -> Vec<ProcessableEvent> {
-        let mut queue = batch_queue.lock().await;
-        if queue.is_empty() {
-            return Vec::new();
-        }
-        let drain_size = queue.len().min(batch_size);
-        queue.drain(..drain_size).collect()
-    }
-
-    /// Updates the queue depth metric.
-    async fn update_queue_depth_metric(
-        batch_queue: &Arc<Mutex<Vec<ProcessableEvent>>>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) {
-        let queue_depth = batch_queue.lock().await.len();
-        metrics
-            .queue_depth
-            .store(queue_depth as u64, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Groups a vector of events by their aggregate ID and sorts them by timestamp.
-    fn group_events_by_aggregate(
-        events: Vec<ProcessableEvent>,
-    ) -> HashMap<Uuid, Vec<ProcessableEvent>> {
-        let mut events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>> = HashMap::new();
-
-        // Group events by aggregate ID
-        for event in events {
-            events_by_aggregate
-                .entry(event.aggregate_id)
-                .or_default()
-                .push(event);
-        }
-
-        // CRITICAL FIX: Sort events within each aggregate by timestamp to ensure proper ordering
-        for (_, aggregate_events) in &mut events_by_aggregate {
-            aggregate_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        }
-
-        events_by_aggregate
-    }
-
-    async fn process_events_for_single_aggregate(
-        &self,
-        aggregate_id: Uuid,
-        events: Vec<ProcessableEvent>,
-    ) -> Result<()> {
-        // Get or load projection from cache
-        let mut cache_guard = self.projection_cache.write().await;
-        let mut projection = Self::get_or_load_projection(
-            &mut cache_guard,
-            &self.cache_service,
-            &self.projection_store,
-            aggregate_id,
-            &self.metrics,
-        )
-        .await?;
-
-        // Apply all events to the projection
-        for event in events {
-            if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
-                tracing::error!(
-                    "Failed to apply event {} to projection: {:?}",
-                    event.event_id,
-                    e
-                );
-                return Err(e);
-            }
-        }
-
-        // Convert to database projection
-        let db_projection = Self::projection_cache_to_db_projection(&projection, aggregate_id);
-
-        // Update cache
-        cache_guard.put(aggregate_id, projection);
-
-        // Drop cache guard before database operation
-        drop(cache_guard);
-
-        // Use CDC batching service if available
-        if let Some(ref batching_service) = self.cdc_batching_service {
-            // For individual events, use direct projection store update
-            // CDC Batching Service is only used for bulk operations in process_cdc_events_batch
-            self.projection_store
-                .upsert_accounts_batch(vec![db_projection])
-                .await?;
-        } else {
-            // Fallback to direct projection store update
-            self.projection_store
-                .upsert_accounts_batch(vec![db_projection])
-                .await?;
-        }
-
-        // Update metrics
-        self.metrics
-            .projection_updates
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    /// Upserts projections to the database using CDC Batching Service.
-    async fn upsert_projections_in_parallel(
-        &self,
-        projections: Vec<crate::infrastructure::projections::AccountProjection>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) -> HashMap<Uuid, bool> {
-        Self::upsert_projections_in_parallel_static(projections, projection_store, metrics).await
-    }
-
-    /// OPTIMIZED VERSION: True parallel processing with efficient batching
-    async fn upsert_projections_in_parallel_static(
-        projections: Vec<crate::infrastructure::projections::AccountProjection>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) -> HashMap<Uuid, bool> {
-        let upsert_start = Instant::now();
-
-        // CRITICAL FIX: Deduplicate projections by ID to prevent "ON CONFLICT DO UPDATE command cannot affect row a second time"
-        let mut unique_projections = HashMap::new();
-        for projection in &projections {
-            // Keep the latest version if there are duplicates
-            unique_projections.insert(projection.id, projection.clone());
-        }
-        let deduplicated_projections: Vec<_> = unique_projections.into_values().collect();
-
-        tracing::info!(
-            "🚀 OPTIMIZED: Deduplicated {} projections to {} unique projections",
-            projections.len(),
-            deduplicated_projections.len()
-        );
-
-        // CRITICAL OPTIMIZATION: Use single batch processing for all projections
-        tracing::info!(
-            "🚀 OPTIMIZED: Using single batch processing for {} projections (NO CHUNKING)",
-            deduplicated_projections.len()
-        );
-
-        // CRITICAL: Single batch upsert with retry logic
-        let mut last_err = None;
-        for attempt in 0..2 {
-            match projection_store
-                .upsert_accounts_batch(deduplicated_projections.clone())
-                .await
-            {
-                Ok(_) => {
-                    let duration = upsert_start.elapsed();
-                    tracing::info!(
-                        "🚀 OPTIMIZED: Successfully upserted {} projections in {:?} (attempt {})",
-                        deduplicated_projections.len(),
-                        duration,
-                        attempt + 1
-                    );
-
-                    // Record success metrics
-                    metrics.projection_updates.fetch_add(
-                        deduplicated_projections.len() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-
-                    // Return success for all projections
-                    let mut results = HashMap::new();
-                    for projection in &deduplicated_projections {
-                        results.insert(projection.id, true);
-                    }
-                    return results;
-                }
-                Err(e) => {
-                    let error_msg = format!("{:?}", e);
-                    last_err = Some(e);
-                    tracing::warn!(
-                        "🚀 OPTIMIZED: Attempt {} failed to upsert {} projections: {}",
-                        attempt + 1,
-                        deduplicated_projections.len(),
-                        error_msg
-                    );
-
-                    // Record failure metrics
-                    metrics.events_failed.fetch_add(
-                        deduplicated_projections.len() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-
-                    // Short delay before retry
-                    if attempt < 1 {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                }
-            }
-        }
-
-        // All attempts failed
-        let duration = upsert_start.elapsed();
-        tracing::error!(
-            "🚀 OPTIMIZED: Failed to upsert {} projections after 2 attempts in {:?}: {:?}",
-            deduplicated_projections.len(),
-            duration,
-            last_err
-        );
-
-        // Return failure for all projections
-        let mut results = HashMap::new();
-        for projection in &deduplicated_projections {
-            results.insert(projection.id, false);
-        }
-        results
-    }
-
-    /// Handles the results of the parallel upsert operation.
-    async fn handle_upsert_results(
-        upsert_results: HashMap<Uuid, bool>,
-        processed_aggregates: Vec<Uuid>,
-        consistency_manager: Option<&Arc<ConsistencyManager>>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) {
-        let mut successful_updates = 0;
-        for aggregate_id in processed_aggregates {
-            let success = upsert_results.get(&aggregate_id).copied().unwrap_or(false);
-            if success {
-                successful_updates += 1;
-                if let Some(cm) = consistency_manager {
-                    cm.mark_projection_completed(aggregate_id).await;
-                    cm.mark_completed(aggregate_id).await;
-                }
-            } else {
-                if let Some(cm) = consistency_manager {
-                    let err_msg = "DB upsert failed".to_string();
-                    cm.mark_projection_failed(aggregate_id, err_msg.clone())
-                        .await;
-                    cm.mark_failed(aggregate_id, err_msg).await;
-                }
-                metrics
-                    .events_failed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-
-        // Update projection_updates metric - always update if there are successful updates
-        if successful_updates > 0 {
-            metrics
-                .projection_updates
-                .fetch_add(successful_updates, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!(
-                "CDC Event Processor: Updated {} projections successfully",
-                successful_updates
-            );
-        }
-    }
-
-    /// NEW: Static version for use in static contexts (without accumulation)
-    async fn process_events_for_aggregates_static(
-        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
-        projection_cache: &Arc<RwLock<ProjectionCache>>,
-        cache_service: &Arc<dyn CacheServiceTrait>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) -> Result<(
-        Vec<crate::infrastructure::projections::AccountProjection>,
-        Vec<Uuid>,
-    )> {
-        let start_time = std::time::Instant::now();
-
-        // CRITICAL OPTIMIZATION: Separate AccountCreated events from other events
-        let (account_created_events, update_events) =
-            Self::separate_account_created_events(events_by_aggregate);
-
-        tracing::info!(
-            "🚀 OPTIMIZED: Separated events - AccountCreated: {} aggregates, Other events: {} aggregates",
-            account_created_events.len(),
-            update_events.len()
-        );
-
-        let mut all_projections = Vec::new();
-        let mut processed_aggregates = Vec::new();
-
-        // CRITICAL OPTIMIZATION: Process AccountCreated events with direct COPY (INSERT)
-        if !account_created_events.is_empty() {
-            let (new_projections, new_aggregates) =
-                Self::process_account_created_events_direct_copy_static(
-                    account_created_events,
-                    projection_store,
-                    metrics,
-                )
-                .await?;
-//             let account_created_operation_ids = batching_service
-//                 .submit_account_created_projections_bulk(account_created_events)
-//                 .await?;
-            let new_aggregates_len = new_aggregates.len();
-            all_projections.extend(new_projections);
-            processed_aggregates.extend(new_aggregates);
-
-            tracing::info!(
-                "🚀 OPTIMIZED: Processed {} AccountCreated events with direct COPY",
-                new_aggregates_len
-            );
-        }
-
-        // Process other events with standard UPSERT approach
-        if !update_events.is_empty() {
-            let (updated_projections, updated_aggregates) = Self::process_update_events_with_upsert(
-                update_events,
-                projection_cache,
-                cache_service,
-                projection_store,
-                metrics,
-            )
-            .await?;
-//             let operation_ids = batching_service               
-//                 .submit_update_events_bulk(projections, event_type.clone())
-//                 .await?;
-            let updated_aggregates_len = updated_aggregates.len();
-            all_projections.extend(updated_projections);
-            processed_aggregates.extend(updated_aggregates);
-
-            tracing::info!(
-                "🚀 OPTIMIZED: Processed {} other events with UPSERT",
-                updated_aggregates_len
-            );
-        }
-
-        let duration = start_time.elapsed();
-        tracing::info!(
-            "🚀 OPTIMIZED: Processed {} aggregates with {} projections in {:?}",
-            processed_aggregates.len(),
-            all_projections.len(),
-            duration
-        );
-
-        Ok((all_projections, processed_aggregates))
-    }
-
-    /// NEW: Separates AccountCreated events for direct COPY (INSERT) vs other events for UPSERT
-    /// OPTIMIZED: Process events for aggregates with read-write separation
-    async fn process_events_for_aggregates_optimized(
-        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
-        projection_cache: &Arc<RwLock<ProjectionCache>>,
-        cache_service: &Arc<dyn CacheServiceTrait>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) -> Result<(
-        Vec<crate::infrastructure::projections::AccountProjection>,
-        Vec<Uuid>,
-    )> {
-        // Track transaction projections to create
-        let mut transaction_projections: Vec<
-            crate::infrastructure::projections::TransactionProjection,
-        > = Vec::new();
-        let mut updated_projections = Vec::new();
-        let mut processed_aggregates = Vec::new();
-
-        // CRITICAL OPTIMIZATION: Batch read all projections in single SQL query
-        let aggregate_ids: Vec<Uuid> = events_by_aggregate.keys().cloned().collect();
-        tracing::debug!("📊 Batch loading projections for {} aggregates: {:?}", aggregate_ids.len(), aggregate_ids);
-        
-        // Single SQL query to load all projections - USE READ POOL
-        let db_projections = match projection_store.get_accounts_batch(&aggregate_ids).await {
-            Ok(projections) => {
-                tracing::debug!("📊 Successfully loaded {} projections from database", projections.len());
-                projections
-            }
-            Err(e) => {
-                tracing::error!("📊 Failed to batch load projections: {:?}", e);
-                return Err(anyhow::anyhow!("Batch projection load failed: {:?}", e));
-            }
-        };
-        
-        // Convert to HashMap for fast lookup
-        let mut projections_map: HashMap<Uuid, ProjectionCacheEntry> = HashMap::new();
-        for db_projection in db_projections {
-            let cache_entry = ProjectionCacheEntry {
-                balance: db_projection.balance,
-                owner_name: db_projection.owner_name.clone(),
-                is_active: db_projection.is_active,
-                version: 0, // Will be incremented after event application
-                cached_at: tokio::time::Instant::now(),
-                last_event_id: None, // Will be set after event application
-            };
-            projections_map.insert(db_projection.id, cache_entry);
-        }
-        
-        // Create empty projections for missing aggregates
-        for aggregate_id in &aggregate_ids {
-            if !projections_map.contains_key(aggregate_id) {
-                tracing::debug!("📊 Creating empty projection for new aggregate: {}", aggregate_id);
-                let empty_projection = ProjectionCacheEntry {
-                    balance: rust_decimal::Decimal::ZERO,
-                    owner_name: String::new(),
-                    is_active: false,
-                    version: 0,
-                    cached_at: tokio::time::Instant::now(),
-                    last_event_id: None,
-                };
-                projections_map.insert(*aggregate_id, empty_projection);
-            }
-        }
-        
-        // Wrap in Arc for sharing across async tasks
-        let projections_map = Arc::new(projections_map);
-
-        // ULTRA-PARALLEL OPTIMIZATION: Use connection pooling with timeout and retry
-        let connection_timeout = Duration::from_secs(5);
-        let max_retries = 3;
-        let retry_delay = Duration::from_millis(100);
-
-        use futures::future::join_all;
-        let mut aggregate_futures = Vec::new();
-
-        // OPTIMIZATION: Pre-allocate futures to reduce memory allocation
-        aggregate_futures.reserve(events_by_aggregate.len());
-
-                // ULTRA-PARALLEL OPTIMIZATION: Process all aggregates in parallel
-        for (aggregate_id, aggregate_events) in events_by_aggregate {
-            let projection_cache = projection_cache.clone();
-            let cache_service = cache_service.clone();
-            let projection_store = projection_store.clone();
-            let metrics = metrics.clone();
-            let projections_map = projections_map.clone();
-            
-            aggregate_futures.push(async move {
-                // ULTRA-PARALLEL OPTIMIZATION: Skip cache locks for maximum performance
-                // We'll update cache at the end in batch
-                let mut cache_guard = {
-                    // Use very short timeout to avoid blocking
-                    match tokio::time::timeout(Duration::from_millis(25), projection_cache.write()).await {
-                        Ok(guard) => guard,
-                        Err(_) => {
-                            // Skip cache update if lock is not available - continue processing
-                            error!("Cache lock timeout for aggregate {} - continuing without cache update", aggregate_id);
-                            return Err(anyhow::anyhow!("Cache lock timeout - skipping"));
-                        }
-                    }
-                };
-
-                // CRITICAL OPTIMIZATION: Use pre-loaded projection from batch read
-                let mut projection = (*projections_map).get(&aggregate_id).unwrap().clone();
-                tracing::debug!("📊 Using pre-loaded projection for aggregate: {}", aggregate_id);
-
-                let mut local_transaction_projections = Vec::new();
-
-                // ULTRA-PARALLEL OPTIMIZATION: Batch event processing to reduce lock contention
-                let mut events_to_process = Vec::new();
-                for event in aggregate_events {
-                    // CRITICAL FIX: Always process AccountCreated events for new aggregates
-                    // This ensures new accounts always get projections created
-                    let is_new_aggregate_event = event.event_type == EventType::AccountCreated;
-                    
-                    // DUPLICATE DETECTION: Check if this event has already been processed
-                    // BUT: Skip duplicate detection for AccountCreated events to ensure new aggregates are always processed
-                    if !is_new_aggregate_event && cache_guard.is_duplicate_event(&event.event_id, &aggregate_id) {
-                        tracing::debug!(
-                            "🔄 Skipping duplicate event {} for aggregate {}",
-                            event.event_id, aggregate_id
-                        );
-                        metrics
-                            .duplicate_events_skipped
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        continue;
-                    }
-                    
-                    // For new aggregate events, always process them
-                    if is_new_aggregate_event {
-                        tracing::debug!(
-                            "🆕 Processing new aggregate event {} for aggregate {} (AccountCreated)",
-                            event.event_id, aggregate_id
-                        );
-                    }
-                    
-                    events_to_process.push(event);
-                    
-                    // Process in smaller batches to reduce lock hold time
-                    if events_to_process.len() >= 10 {
-                        for event in events_to_process.drain(..) {
-                    if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
-                        error!(
-                            "Failed to apply event {} to projection: {}",
-                            event.event_id, e
-                        );
-                        metrics
-                            .events_failed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        metrics
-                            .consecutive_failures
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        continue;
-                    } else {
-                        metrics
-                            .consecutive_failures
-                            .store(0, std::sync::atomic::Ordering::Relaxed);
-                    }
-
-                    // Create transaction projections for money events
-                    if let Ok(domain_event) = event.get_domain_event() {
-                        match domain_event {
-                            crate::domain::AccountEvent::MoneyDeposited {
-                                transaction_id,
-                                amount,
-                                ..
-                            } => {
-                                            local_transaction_projections.push(
-                                    crate::infrastructure::projections::TransactionProjection {
-                                        id: *transaction_id,
-                                        account_id: aggregate_id,
-                                        transaction_type: "MoneyDeposited".to_string(),
-                                        amount: *amount,
-                                        timestamp: chrono::Utc::now(),
-                                    },
-                                );
-                            }
-                            crate::domain::AccountEvent::MoneyWithdrawn {
-                                transaction_id,
-                                amount,
-                                ..
-                            } => {
-                                            local_transaction_projections.push(
-                                    crate::infrastructure::projections::TransactionProjection {
-                                        id: *transaction_id,
-                                        account_id: aggregate_id,
-                                        transaction_type: "MoneyWithdrawn".to_string(),
-                                        amount: *amount,
-                                        timestamp: chrono::Utc::now(),
-                                    },
-                                );
-                            }
-                            _ => {}
-                                    }
-                                }
-                            }
-                        }
-                }
-
-                // Process remaining events
-                for event in events_to_process {
-                    if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
-                        error!(
-                            "Failed to apply event {} to projection: {}",
-                            event.event_id, e
-                        );
-                        metrics
-                            .events_failed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        metrics
-                            .consecutive_failures
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        continue;
-                    } else {
-                        metrics
-                            .consecutive_failures
-                            .store(0, std::sync::atomic::Ordering::Relaxed);
-                    }
-
-                    // Create transaction projections for money events
-                    if let Ok(domain_event) = event.get_domain_event() {
-                        match domain_event {
-                            crate::domain::AccountEvent::MoneyDeposited {
-                                transaction_id,
-                                amount,
-                                ..
-                            } => {
-                                local_transaction_projections.push(
-                                    crate::infrastructure::projections::TransactionProjection {
-                                        id: *transaction_id,
-                                        account_id: aggregate_id,
-                                        transaction_type: "MoneyDeposited".to_string(),
-                                        amount: *amount,
-                                        timestamp: chrono::Utc::now(),
-                                    },
-                                );
-                            }
-                            crate::domain::AccountEvent::MoneyWithdrawn {
-                                transaction_id,
-                                amount,
-                                ..
-                            } => {
-                                local_transaction_projections.push(
-                                    crate::infrastructure::projections::TransactionProjection {
-                                        id: *transaction_id,
-                                        account_id: aggregate_id,
-                                        transaction_type: "MoneyWithdrawn".to_string(),
-                                        amount: *amount,
-                                        timestamp: chrono::Utc::now(),
-                                    },
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // OPTIMIZATION: Clean up duplicate detection cache periodically
-                cache_guard.cleanup_duplicates();
-
-                // Update projection in cache
-            cache_guard.put(aggregate_id, projection.clone());
-                let db_projection = Self::projection_cache_to_db_projection(&projection, aggregate_id);
-                
-                Ok::<_, anyhow::Error>((db_projection, aggregate_id, local_transaction_projections))
-            });
-        }
-
-        let results = join_all(aggregate_futures).await;
-
-        // Collect results and handle errors
-        for result in results {
-            match result {
-                Ok((projection, aggregate_id, local_transaction_projections)) => {
-                    updated_projections.push(projection);
-            processed_aggregates.push(aggregate_id);
-                    transaction_projections.extend(local_transaction_projections);
-                }
-                Err(e) => {
-                    error!("Failed to process events for aggregate: {}", e);
-                    metrics
-                        .events_failed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-
-        // OPTIMIZATION: Bulk insert transaction projections if any - USE WRITE POOL
-        if !transaction_projections.is_empty() {
-            let transaction_count = transaction_projections.len();
-            if let Err(e) = projection_store
-                .insert_transactions_batch(transaction_projections)
-                .await
-            {
-                error!("Failed to bulk insert transaction projections: {}", e);
-                metrics
-                    .events_failed
-                    .fetch_add(transaction_count as u64, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-
-        Ok((updated_projections, processed_aggregates))
-    }
-
-    /// NEW: Convert AccountCreated events to projections (no database load needed)
-    async fn convert_account_created_events_to_projections(
-        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
-    ) -> Result<Vec<(Uuid, crate::infrastructure::projections::AccountProjection)>> {
-        let mut projections = Vec::new();
-
-        for (aggregate_id, events) in events_by_aggregate {
-            // AccountCreated events should have exactly one event
-            if let Some(event) = events.first() {
-                if let Ok(domain_event) = event.get_domain_event() {
-                    if let crate::domain::AccountEvent::AccountCreated {
-                        owner_name,
-                        initial_balance,
-                        ..
-                    } = domain_event
-                    {
-                        let projection = crate::infrastructure::projections::AccountProjection {
-                            id: aggregate_id,
-                            owner_name: owner_name.clone(),
-                            balance: *initial_balance,
-                            is_active: true,
-                            created_at: event.timestamp,
-                            updated_at: event.timestamp,
-                        };
-                        projections.push((aggregate_id, projection));
-                    }
-                }
-            }
-        }
-
-        Ok(projections)
-    }
-
-    /// NEW: Convert other events to projections (requires database load and event application)
-    async fn convert_update_events_to_projections(
-        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        projection_cache: &Arc<RwLock<ProjectionCache>>,
-        cache_service: &Arc<dyn CacheServiceTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) -> Result<Vec<(Uuid, crate::infrastructure::projections::AccountProjection)>> {
-        let mut projections = Vec::new();
-        let mut processed_aggregates = Vec::new();
-
-        // CRITICAL OPTIMIZATION: Batch read all projections in single SQL query
-        let aggregate_ids: Vec<Uuid> = events_by_aggregate.keys().cloned().collect();
-        tracing::debug!(
-            "🔄 OTHER EVENTS: Batch loading projections for {} aggregates: {:?}",
-            aggregate_ids.len(),
-            aggregate_ids
-        );
-
-        // Single SQL query to load all projections - USE READ POOL
-        let db_projections = match projection_store.get_accounts_batch(&aggregate_ids).await {
-            Ok(projections) => {
-                tracing::debug!(
-                    "🔄 OTHER EVENTS: Successfully loaded {} projections from database",
-                    projections.len()
-                );
-                projections
-            }
-            Err(e) => {
-                tracing::error!("🔄 OTHER EVENTS: Failed to batch load projections: {:?}", e);
-                return Err(anyhow::anyhow!("Batch projection load failed: {:?}", e));
-            }
-        };
-
-        // Convert to HashMap for fast lookup
-        let mut projections_map: HashMap<Uuid, ProjectionCacheEntry> = HashMap::new();
-        for db_projection in db_projections {
-            let cache_entry = ProjectionCacheEntry {
-                balance: db_projection.balance,
-                owner_name: db_projection.owner_name.clone(),
-                is_active: db_projection.is_active,
-                version: 1, // We'll update this as we process events
-                cached_at: tokio::time::Instant::now(),
-                last_event_id: None,
-            };
-            projections_map.insert(db_projection.id, cache_entry);
-        }
-
-        // Calculate total events before consuming the HashMap
-        let total_events: usize = events_by_aggregate.values().map(|events| events.len()).sum();
-        
-        // Process each aggregate's events
-        for (aggregate_id, events) in events_by_aggregate.clone() {
-            // Get existing projection from batch-loaded data
-            let mut current_projection = match projections_map.get(&aggregate_id) {
-                Some(cache_entry) => {
-                    // Convert ProjectionCacheEntry back to AccountProjection
-                    crate::infrastructure::projections::AccountProjection {
-                        id: aggregate_id,
-                        owner_name: cache_entry.owner_name.clone(),
-                        balance: cache_entry.balance,
-                        is_active: cache_entry.is_active,
-                        created_at: chrono::Utc::now(), // We don't have this info, use current time
-                        updated_at: chrono::Utc::now(), // We don't have this info, use current time
-                    }
-                }
-                None => {
-                    tracing::warn!(
-                        "🔄 OTHER EVENTS: No existing projection found for aggregate {} with non-AccountCreated events",
-                        aggregate_id
-                    );
-                    continue; // Skip this aggregate
-                }
-            };
-
-            // Sort events by timestamp to ensure correct order
-            let mut sorted_events = events.clone();
-            sorted_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-
-            // Apply events to existing projection in chronological order
-            for event in sorted_events {
-                if let Ok(domain_event) = event.get_domain_event() {
-                    match domain_event {
-                        crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
-                            current_projection.balance += *amount;
-                            current_projection.updated_at = event.timestamp;
-                            
-                            tracing::debug!(
-                                "🔄 OTHER EVENTS: Applied MoneyDeposited event - aggregate: {}, amount: {}, new balance: {}",
-                                aggregate_id, amount, current_projection.balance
-                            );
-                        }
-                        crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
-                            // Business logic validation: check if sufficient balance
-                            if current_projection.balance < *amount {
-                                tracing::warn!(
-                                    "🔄 OTHER EVENTS: Insufficient balance for withdrawal - aggregate: {}, current: {}, requested: {}",
-                                    aggregate_id, current_projection.balance, amount
-                                );
-                                // Continue processing but log the issue
-                            }
-                            current_projection.balance -= *amount;
-                            current_projection.updated_at = event.timestamp;
-                            
-                            tracing::debug!(
-                                "🔄 OTHER EVENTS: Applied MoneyWithdrawn event - aggregate: {}, amount: {}, new balance: {}",
-                                aggregate_id, amount, current_projection.balance
-                            );
-                        }
-                        // Note: AccountActivated and AccountDeactivated variants don't exist in AccountEvent enum
-                        // These events are not supported in the current domain model
-                        _ => {
-                            tracing::debug!(
-                                "🔄 OTHER EVENTS: Ignoring event type for aggregate: {}",
-                                aggregate_id
-                            );
-                        }
-                    }
-                } else {
-                    tracing::error!(
-                        "🔄 OTHER EVENTS: Failed to get domain event for aggregate: {}",
-                        aggregate_id
-                    );
-                }
-            }
-
-            // Update cache with processed projection
-            {
-                let mut cache_guard = projection_cache.write().await;
-                let cache_entry = ProjectionCacheEntry {
-                    balance: current_projection.balance,
-                    owner_name: current_projection.owner_name.clone(),
-                    is_active: current_projection.is_active,
-                    version: 1,
-                    cached_at: tokio::time::Instant::now(),
-                    last_event_id: None,
-                };
-                cache_guard.put(aggregate_id, cache_entry);
-            }
-
-            projections.push((aggregate_id, current_projection));
-            processed_aggregates.push(aggregate_id);
-
-            // Update metrics
-            metrics
-                .events_processed
-                .fetch_add(events.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        tracing::info!(
-            "🔄 OTHER EVENTS: Successfully processed {} aggregates with {} total events",
-            processed_aggregates.len(),
-            total_events
-        );
-
-        Ok(projections)
-    }
-
-    /// NEW: Separate AccountCreated events from other events for optimized processing
-    fn separate_account_created_events(
-        events_by_aggregate: HashMap<Uuid, Vec<ProcessableEvent>>,
-    ) -> (
-        HashMap<Uuid, Vec<ProcessableEvent>>,
-        HashMap<Uuid, Vec<ProcessableEvent>>,
-    ) {
-        let mut account_created_events = HashMap::new();
-        let mut update_events = HashMap::new();
-
-        for (aggregate_id, events) in events_by_aggregate {
-            let mut has_account_created = false;
-            let mut account_created_event = None;
-            let mut other_aggregate_events: Vec<ProcessableEvent> = Vec::new();
-
-            // Check if this aggregate has AccountCreated event
-            for event in &events {
-                if let Ok(domain_event) = event.get_domain_event() {
-                    if let crate::domain::AccountEvent::AccountCreated { .. } = domain_event {
-                        has_account_created = true;
-                        account_created_event = Some(event.clone());
-                        break; // Found AccountCreated, stop here
-                    }
-                }
-            }
-
-            if has_account_created {
-                // This aggregate has AccountCreated - process separately
-                if let Some(account_created) = account_created_event {
-                    account_created_events.insert(aggregate_id, vec![account_created]);
-                }
-            } else {
-                // This aggregate has only other events - process with UPSERT
-                update_events.insert(aggregate_id, events);
-            }
-        }
-
-        (account_created_events, update_events)
-    }
-
-    /// NEW: Process AccountCreated events with direct COPY (INSERT) - no UPSERT needed
-    /* async fn process_account_created_events_direct_copy(
-        account_created_events: HashMap<Uuid, Vec<ProcessableEvent>>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-        cdc_batching_service: Option<
-            &Arc<PartitionedCDCBatching>,
-        >,
-    ) -> Result<(
-        Vec<crate::infrastructure::projections::AccountProjection>,
-        Vec<Uuid>,
-    )> {
-        let mut new_projections = Vec::new();
-        let mut processed_aggregates = Vec::new();
-
-        // CRITICAL OPTIMIZATION: Build projections directly from AccountCreated events
-        for (aggregate_id, events) in account_created_events {
-            // AccountCreated events should have exactly one event
-            if let Some(event) = events.first() {
-                if let Ok(domain_event) = event.get_domain_event() {
-                    if let crate::domain::AccountEvent::AccountCreated {
-                        owner_name,
-                        initial_balance,
-                        ..
-                    } = domain_event
-                    {
-                        // Create projection directly from AccountCreated event
-                        let projection = crate::infrastructure::projections::AccountProjection {
-                            id: aggregate_id,
-                            owner_name: owner_name.clone(),
-                            balance: *initial_balance,
-                            is_active: true,
-                            created_at: event.timestamp,
-                            updated_at: event.timestamp,
-                        };
-
-                        new_projections.push(projection);
-                        processed_aggregates.push(aggregate_id);
-
-                        tracing::debug!(
-                            "🚀 OPTIMIZED: Created projection from AccountCreated - account: {}, owner: {}, balance: {}",
-                            aggregate_id, owner_name, initial_balance
-                        );
-                    }
-                }
-            }
-        }
-
-        // CRITICAL: Use CDC Batching Service for large batches, direct COPY for small batches
-        if !new_projections.is_empty() {
-            let batch_size = new_projections.len();
-            let cdc_batch_threshold = std::env::var("CDC_BATCH_THRESHOLD")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(1000); // Use CDC batching for batches >= 1000
-
-            if batch_size >= cdc_batch_threshold {
-                // Use CDC Batching Service for large batches
-                if let Some(batching_service) = cdc_batching_service {
-                    tracing::info!(
-                        "🚀 CDC BATCHING: Using CDC Batching Service for {} AccountCreated projections (threshold: {})",
-                        batch_size, cdc_batch_threshold
-                    );
-
-                    // Convert to format expected by CDC Batching Service
-                    let projections_for_batching: Vec<(
-                        Uuid,
-                        crate::infrastructure::projections::AccountProjection,
-                    )> = new_projections.iter().map(|p| (p.id, p.clone())).collect();
-
-                    batching_service
-                        .submit_account_created_projections_bulk(projections_for_batching)
-                        .await?;
-
-                    tracing::info!(
-                        "✅ CDC BATCHING: Successfully submitted {} AccountCreated projections to CDC Batching Service",
-                        batch_size
-                    );
-                } else {
-                    // Fallback to direct COPY if CDC Batching Service not available
-                    tracing::warn!(
-                        "⚠️ CDC BATCHING: CDC Batching Service not available, falling back to direct COPY for {} projections",
-                        batch_size
-                    );
-                    if let Some(projection_store_impl) =
-                        projection_store
-                            .as_any()
-                            .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
-                    {
-                        projection_store_impl
-                            .bulk_insert_new_accounts_with_copy(new_projections.clone())
-                            .await?;
-                    } else {
-                        projection_store
-                            .upsert_accounts_batch(new_projections.clone())
-                            .await?;
-                    }
-                }
-            } else {
-                // Use direct COPY for small batches
-                tracing::info!(
-                    "🚀 DIRECT COPY: Using direct COPY for {} AccountCreated projections (below threshold: {})",
-                    batch_size, cdc_batch_threshold
-                );
-                if let Some(projection_store_impl) =
-                    projection_store
-                        .as_any()
-                        .downcast_ref::<crate::infrastructure::projections::ProjectionStore>()
-                {
-                    projection_store_impl
-                        .bulk_insert_new_accounts_with_copy(new_projections.clone())
-                        .await?;
-                } else {
-                    projection_store
-                        .upsert_accounts_batch(new_projections.clone())
-                        .await?;
-                }
-            }
-        }
-
-        Ok((new_projections, processed_aggregates))
-    } */
-
-    /// NEW: Process other events with standard UPSERT approach
-    async fn process_update_events_with_upsert(
-        update_events: HashMap<Uuid, Vec<ProcessableEvent>>,
-        projection_cache: &Arc<RwLock<ProjectionCache>>,
-        cache_service: &Arc<dyn CacheServiceTrait>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) -> Result<(
-        Vec<crate::infrastructure::projections::AccountProjection>,
-        Vec<Uuid>,
-    )> {
-        // Use existing logic for processing other events (MoneyDeposited, MoneyWithdrawn, etc.)
-        // This is the original process_events_for_aggregates logic for non-AccountCreated events
-
-        let mut updated_projections = Vec::new();
-        let mut processed_aggregates = Vec::new();
-
-        // CRITICAL OPTIMIZATION: Batch read all projections in single SQL query
-        let aggregate_ids: Vec<Uuid> = update_events.keys().cloned().collect();
-        tracing::debug!(
-            "🚀 OPTIMIZED: Batch loading projections for {} aggregates (non-AccountCreated)",
-            aggregate_ids.len()
-        );
-
-        // Single SQL query to load all projections
-        let db_projections = match projection_store.get_accounts_batch(&aggregate_ids).await {
-            Ok(projections) => {
-                tracing::debug!(
-                    "🚀 OPTIMIZED: Successfully loaded {} projections from database",
-                    projections.len()
-                );
-                projections
-            }
-            Err(e) => {
-                tracing::error!("🚀 OPTIMIZED: Failed to batch load projections: {:?}", e);
-                return Err(anyhow::anyhow!("Batch projection load failed: {:?}", e));
-            }
-        };
-
-        // Convert to HashMap for fast lookup
-        let mut projections_map: HashMap<Uuid, ProjectionCacheEntry> = HashMap::new();
-        for db_projection in db_projections {
-            let cache_entry = ProjectionCacheEntry {
-                balance: db_projection.balance,
-                owner_name: db_projection.owner_name.clone(),
-                is_active: db_projection.is_active,
-                version: 0,
-                cached_at: tokio::time::Instant::now(),
-                last_event_id: None,
-            };
-            projections_map.insert(db_projection.id, cache_entry);
-        }
-
-        // Process events for each aggregate
-        for (aggregate_id, events) in update_events {
-            let mut projection = if let Some(existing_projection) =
-                projections_map.get(&aggregate_id).cloned()
-            {
-                existing_projection
-            } else {
-                // Skip aggregates without existing projections (should not happen for non-AccountCreated events)
-                tracing::warn!(
-                    "🚀 OPTIMIZED: No existing projection for aggregate {} (non-AccountCreated events)",
-                    aggregate_id
-                );
-                continue;
-            };
-
-            // Apply all events to the projection
-            for event in events {
-                if let Err(e) = Self::apply_event_to_projection(&mut projection, &event) {
-                    tracing::error!(
-                        "Failed to apply event {} to projection: {:?}",
-                        event.event_id,
-                        e
-                    );
-                    continue;
-                }
-            }
-
-            // Convert to database projection
-            let db_projection = Self::projection_cache_to_db_projection(&projection, aggregate_id);
-            updated_projections.push(db_projection);
-            processed_aggregates.push(aggregate_id);
-        }
-
-        Ok((updated_projections, processed_aggregates))
-    }
-
-    /// Updates batch processing metrics.
-    fn update_batch_metrics(
-        batch_start: Instant,
-        events_count: usize,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) {
-        let batch_time = batch_start.elapsed().as_millis() as u64;
-        metrics
-            .batches_processed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        metrics
-            .events_processed
-            .fetch_add(events_count as u64, std::sync::atomic::Ordering::Relaxed);
-        metrics
-            .avg_batch_size
-            .store(events_count as u64, std::sync::atomic::Ordering::Relaxed);
-        if batch_time > 0 {
-            let throughput = (events_count as f64 / (batch_time as f64 / 1000.0)) as u64;
-            metrics
-                .throughput_per_second
-                .store(throughput, std::sync::atomic::Ordering::Relaxed);
-        }
-        if metrics
-            .events_failed
-            .load(std::sync::atomic::Ordering::Relaxed)
-            > 0
-        {
-            metrics.last_error_time.store(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        }
-        tracing::debug!(
-            "Optimized batch processing: {} events in {}ms, throughput: {}/s",
-            events_count,
-            batch_time,
-            metrics
-                .throughput_per_second
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-    }
-
-    /// Get projection from cache or load from database
-    async fn get_or_load_projection(
-        cache: &mut ProjectionCache,
-        cache_service: &Arc<dyn CacheServiceTrait>,
-        projection_store: &Arc<dyn ProjectionStoreTrait>,
-        aggregate_id: Uuid,
-        metrics: &Arc<EnhancedCDCMetrics>,
-    ) -> Result<ProjectionCacheEntry> {
-        let start_time = std::time::Instant::now();
-
-        // CRITICAL FIX: CDC Pipeline uses Database-First for consistency
-        // This ensures we always have the latest state before applying events
-
-        tracing::debug!(
-            "📊 Loading projection from database for aggregate: {} (CDC pipeline)",
-            aggregate_id
-        );
-
-        let db_projection = match projection_store.get_account(aggregate_id).await {
-            Ok(Some(projection)) => {
-                tracing::debug!(
-                    "📊 Loaded projection from database for aggregate: {}",
-                    aggregate_id
-                );
-                projection
-            }
-            Ok(None) => {
-                // Account doesn't exist yet, create empty projection
-                tracing::debug!("📊 Creating new projection for aggregate: {}", aggregate_id);
-                crate::infrastructure::projections::AccountProjection {
-                    id: aggregate_id,
-                    owner_name: String::new(),
-                    balance: rust_decimal::Decimal::ZERO,
-                    is_active: false,
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    "📊 Failed to load projection from database for aggregate {}: {:?}",
-                    aggregate_id,
-                    e
-                );
-                return Err(anyhow::anyhow!("Database read failed: {:?}", e));
-            }
-        };
-
-        // 3. Convert database projection to cache entry
-        let cache_entry = ProjectionCacheEntry {
-            balance: db_projection.balance,
-            owner_name: db_projection.owner_name.clone(),
-            is_active: db_projection.is_active,
-            version: 0, // Will be incremented after event application
-            cached_at: tokio::time::Instant::now(),
-            last_event_id: None, // Will be set after event application
-        };
-
-        // 4. Update cache with fresh data from database
-        cache.put(aggregate_id, cache_entry.clone());
-
-        let duration = start_time.elapsed();
-        metrics.processing_latency_ms.fetch_add(
-            duration.as_millis() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-        tracing::debug!(
-            "📊 Projection loaded from database for aggregate {} in {:?}",
-            aggregate_id,
-            duration
-        );
-
-        Ok(cache_entry)
-    }
-
-    /// Convert cache entry to database projection
-    fn projection_cache_to_db_projection(
-        cache_entry: &ProjectionCacheEntry,
-        aggregate_id: Uuid,
-    ) -> crate::infrastructure::projections::AccountProjection {
-        crate::infrastructure::projections::AccountProjection {
-            id: aggregate_id,
-            owner_name: cache_entry.owner_name.clone(),
-            balance: cache_entry.balance,
-            is_active: cache_entry.is_active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        }
-    }
-
-    /// Apply event to projection with business validation
-    fn apply_event_to_projection(
-        projection: &mut ProjectionCacheEntry,
-        event: &ProcessableEvent,
-    ) -> Result<()> {
-        // CRITICAL FIX: Apply event to projection with proper validation
-        // This ensures event ordering and business logic validation
-
-        tracing::debug!(
-            "📊 Applying event {} to projection for aggregate {}",
-            event.event_id,
-            event.aggregate_id
-        );
-
-        // CRITICAL FIX: Remove duplicate check from here - it's handled in the caller
-        // This prevents double duplicate detection which causes issues
-
-        // 2. Get domain event from payload
-        let domain_event = event.get_domain_event()?;
-
-        // 3. Apply event based on type with proper validation
-        match domain_event {
-            crate::domain::AccountEvent::AccountCreated {
-                account_id,
-                owner_name,
-                initial_balance,
-            } => {
-                // Validate account creation
-                if projection.balance != rust_decimal::Decimal::ZERO {
-                    return Err(anyhow::anyhow!("Account already exists"));
-                }
-
-                projection.owner_name = owner_name.clone();
-                projection.balance = *initial_balance;
-                projection.is_active = true;
-
-                tracing::debug!(
-                    "📊 Account created: account_id={}, owner={}, initial_balance={}",
-                    account_id,
-                    owner_name,
-                    initial_balance
-                );
-            }
-            crate::domain::AccountEvent::MoneyDeposited {
-                account_id,
-                amount,
-                transaction_id,
-            } => {
-                // Validate deposit
-                if *amount <= rust_decimal::Decimal::ZERO {
-                    return Err(anyhow::anyhow!("Deposit amount must be positive"));
-                }
-
-                let old_balance = projection.balance;
-                projection.balance += *amount;
-
-                tracing::debug!(
-                    "📊 Money deposited: account_id={}, transaction_id={}, amount={}, old_balance={}, new_balance={}",
-                    account_id,
-                    transaction_id,
-                    amount,
-                    old_balance,
-                    projection.balance
-                );
-            }
-            crate::domain::AccountEvent::MoneyWithdrawn {
-                account_id,
-                amount,
-                transaction_id,
-            } => {
-                // Validate withdrawal
-                if *amount <= rust_decimal::Decimal::ZERO {
-                    return Err(anyhow::anyhow!("Withdrawal amount must be positive"));
-                }
-                if projection.balance < *amount {
-                    return Err(anyhow::anyhow!("Insufficient funds for withdrawal"));
-                }
-
-                let old_balance = projection.balance;
-                projection.balance -= *amount;
-
-                tracing::debug!(
-                    "📊 Money withdrawn: account_id={}, transaction_id={}, amount={}, old_balance={}, new_balance={}",
-                    account_id,
-                    transaction_id,
-                    amount,
-                    old_balance,
-                    projection.balance
-                );
-            }
-            crate::domain::AccountEvent::AccountClosed { account_id, reason } => {
-                projection.is_active = false;
-                tracing::debug!(
-                    "📊 Account closed: account_id={}, reason={}",
-                    account_id,
-                    reason
-                );
-            }
-        }
-
-        // 4. Update projection metadata
-        projection.version += 1;
-        projection.last_event_id = Some(event.event_id);
-        projection.cached_at = tokio::time::Instant::now();
-
-        tracing::debug!(
-            "📊 Successfully applied event {} to projection. New balance: {}, version: {}",
-            event.event_id,
-            projection.balance,
-            projection.version
-        );
-
-        Ok(())
-    }
-
     fn extract_event_serde_json_optimized(
         &self,
         cdc_event: &serde_json::Value,
@@ -3583,7 +1397,8 @@ impl UltraOptimizedCDCEventProcessor {
             .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
 
         // OPTIMIZATION 7: Faster base64 decoding with proper error handling
-        let payload_bytes = BASE64_STANDARD.decode(payload_str)
+        let payload_bytes = BASE64_STANDARD
+            .decode(payload_str)
             .map_err(|e| anyhow::anyhow!("Base64 decode error: {}", e))?;
 
         let partition_key = event_data
@@ -3595,309 +1410,16 @@ impl UltraOptimizedCDCEventProcessor {
         let domain_event = bincode::deserialize::<crate::domain::AccountEvent>(&payload_bytes)
             .map_err(|e| anyhow::anyhow!("Domain event deserialization failed: {}", e))?;
 
-        ProcessableEvent::new(event_id, aggregate_id, event_type, payload_bytes, partition_key, timestamp)
-            .map(Some)
+        ProcessableEvent::new(
+            event_id,
+            aggregate_id,
+            event_type,
+            payload_bytes,
+            partition_key,
+            timestamp,
+        )
+        .map(Some)
     }
-
-    fn extract_event_from_cdc_data(
-        &self,
-        event_data: &serde_json::Value,
-    ) -> Result<Option<ProcessableEvent>> {
-        let event_id = event_data
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing event ID"))?
-            .parse::<Uuid>()
-            .map_err(|e| anyhow::anyhow!("Invalid event ID: {}", e))?;
-
-        let aggregate_id = event_data
-            .get("aggregate_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing aggregate ID"))?
-            .parse::<Uuid>()
-            .map_err(|e| anyhow::anyhow!("Invalid aggregate ID: {}", e))?;
-
-        let event_type_str = event_data
-            .get("event_type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing event type"))?
-            .to_string();
-        let event_type = EventType::from_str(&event_type_str);
-        // FIXED: Extract timestamp from CDC event data
-        let timestamp = event_data
-            .get("created_at")
-            .and_then(|v| v.as_str())
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|| chrono::Utc::now()); // Fallback to current time if not available
-
-        // tracing::info!(
-        //     "CDC EXTRACTED: aggregate_id={}, event_id={}, event_type={}",
-        //     aggregate_id,
-        //     event_id,
-        //     event_type
-        // );
-
-        let payload_str = event_data
-            .get("payload")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing payload"))?;
-
-        // The payload from Debezium for a BYTEA column is always Base64 encoded.
-        let decoded_payload = match BASE64_STANDARD.decode(payload_str) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to base64 decode payload for event_id {}: {}",
-                    event_id,
-                    e
-                );
-                return Err(anyhow::anyhow!("Base64 decode error: {}", e));
-            }
-        };
-
-        // The result of the Base64 decode might be a hex string (from the COPY command)
-        // or raw bincode bytes. We check for the `\x` prefix to decide.
-        let decoded_str = String::from_utf8_lossy(&decoded_payload);
-
-        let payload_bytes = if decoded_str.starts_with("\\x") {
-            let hex_payload = decoded_str.trim_start_matches("\\x");
-            match hex::decode(hex_payload) {
-                Ok(bytes) => {
-                    tracing::debug!(
-                        "Successfully hex-decoded payload from Base64 envelope for event_id {}",
-                        event_id
-                    );
-                    bytes
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to hex-decode payload from Base64 envelope for event_id {}: {}",
-                        event_id,
-                        e
-                    );
-                    return Err(anyhow::anyhow!("Hex decode error: {}", e));
-                }
-            }
-        } else {
-            // If no `\x` prefix, the decoded payload is the raw bincode data.
-            tracing::debug!("Using raw base64-decoded payload for event_id {}", event_id);
-            decoded_payload
-        };
-
-        // CRITICAL FIX: Enhanced bincode deserialization with fallback
-        let domain_event_result =
-            bincode::deserialize::<crate::domain::AccountEvent>(&payload_bytes);
-
-        match domain_event_result {
-            Ok(domain_event) => {
-                tracing::debug!(
-                    "Successfully deserialized domain event for event_id {}",
-                    event_id
-                );
-
-                let partition_key = event_data
-                    .get("partition_key")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                ProcessableEvent::new(
-                    event_id,
-                    aggregate_id,
-                    event_type,
-                    payload_bytes,
-                    partition_key,
-                    timestamp, // FIXED: Use extracted event timestamp
-                )
-                .map(Some)
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to deserialize domain event for event_id {}: {}",
-                    event_id,
-                    e
-                );
-
-                // CRITICAL FIX: Send to DLQ instead of failing completely
-                let this = self.clone();
-                let event_type_clone = event_type.clone();
-                let payload_bytes_clone = payload_bytes.clone();
-
-                tokio::spawn(async move {
-                    let _ = this
-                        .send_to_dlq(
-                            &ProcessableEvent {
-                                event_id,
-                                aggregate_id,
-                                event_type: event_type_clone,
-                                payload: payload_bytes_clone,
-                                partition_key: None,
-                                domain_event: None,
-                                timestamp: chrono::Utc::now(),
-                            },
-                            &anyhow::anyhow!("Bincode deserialize error: {}", e),
-                            0,
-                            crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Deserialization,
-                        )
-                        .await;
-                });
-
-                // Return None to skip this event but continue processing others
-                Ok(None)
-            }
-        }
-    }
-
-    /// Performance monitor loop
-    async fn performance_monitor_loop(
-        monitoring_system: Arc<AdvancedMonitoringSystem>,
-        shutdown_token: CancellationToken,
-    ) {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-
-        loop {
-            tokio::select! {
-                _ = shutdown_token.cancelled() => {
-                    tracing::info!("Performance monitor shutting down");
-                    break;
-                }
-                _ = interval.tick() => {
-                    monitoring_system.get_metrics_summary().await;
-                }
-            }
-        }
-    }
-    /// Get comprehensive metrics for monitoring and observability
-    pub async fn get_metrics(&self) -> EnhancedCDCMetrics {
-        // Update metrics with current state
-        let queue_depth = self.batch_queue.lock().await.len();
-        self.metrics
-            .queue_depth
-            .store(queue_depth as u64, std::sync::atomic::Ordering::Relaxed);
-
-        let memory_usage = self.get_memory_usage().await;
-        self.metrics
-            .memory_usage_bytes
-            .store(memory_usage as u64, std::sync::atomic::Ordering::Relaxed);
-
-        let active_connections = self.processing_semaphore.available_permits();
-        self.metrics.active_connections.store(
-            active_connections as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-        // Calculate error rate
-        let events_processed = self
-            .metrics
-            .events_processed
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let events_failed = self
-            .metrics
-            .events_failed
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let total_events = events_processed + events_failed;
-        let error_rate = if total_events > 0 {
-            ((events_failed as f64 / total_events as f64) * 100.0) as u64
-        } else {
-            0
-        };
-        self.metrics
-            .error_rate
-            .store(error_rate, std::sync::atomic::Ordering::Relaxed);
-
-        // Get business config status
-        let business_config = self.business_config.lock().await;
-        let batch_processing_enabled = business_config.batch_processing_enabled;
-        drop(business_config);
-
-        // Get batch processor status
-        let batch_processor_running = self.batch_processor_handle.lock().await.is_some();
-
-        // Log comprehensive metrics
-        tracing::info!(
-            "CDC Event Processor Metrics - Events: {}/{} ({}% error rate), Batches: {}, Throughput: {}/s, Queue: {}, Memory: {}MB, Active: {}, BatchProcessor: {}",
-            events_processed,
-            total_events,
-            error_rate,
-            self.metrics.batches_processed.load(std::sync::atomic::Ordering::Relaxed),
-            self.metrics.throughput_per_second.load(std::sync::atomic::Ordering::Relaxed),
-            queue_depth,
-            memory_usage / 1024 / 1024,
-            active_connections,
-            if batch_processor_running { "Running" } else { "Stopped" }
-        );
-
-        // Clone the metrics struct to return it
-        self.metrics.as_ref().clone()
-    }
-
-    /// Graceful shutdown
-    pub async fn shutdown(&mut self) -> Result<()> {
-        self.shutdown_token.cancel();
-        if let Some(handle) = self.batch_processor_handle.lock().await.take() {
-            handle.await?;
-        }
-        self.process_current_batch().await?;
-        info!("CDC Event Processor shutdown complete");
-        Ok(())
-    }
-    pub async fn get_memory_usage(&self) -> usize {
-        let cache_guard = self.projection_cache.read().await;
-        let cache_memory = cache_guard.memory_usage();
-
-        let queue_guard = self.batch_queue.lock().await;
-        let queue_memory = queue_guard.len() * std::mem::size_of::<ProcessableEvent>();
-
-        cache_memory + queue_memory
-    }
-
-    pub async fn clear_expired_cache_entries(&self) {
-        let mut cache_guard = self.projection_cache.write().await;
-        let ttl = Duration::from_secs(300);
-
-        let expired_keys: Vec<Uuid> = cache_guard
-            .cache
-            .iter()
-            .filter(|(_, entry)| entry.is_expired(ttl))
-            .map(|(k, _)| *k)
-            .collect();
-
-        for key in expired_keys {
-            cache_guard.invalidate(&key);
-        }
-
-        // Clean up duplicate detection
-        cache_guard.cleanup_duplicates();
-    }
-
-    /// Get business logic configuration
-    pub async fn get_business_config(&self) -> BusinessLogicConfig {
-        self.business_config.lock().await.clone()
-    }
-
-    /// Update business logic configuration
-    pub async fn update_business_config(&mut self, config: BusinessLogicConfig) {
-        *self.business_config.lock().await = config;
-    }
-
-    pub async fn send_to_dlq_from_cdc(
-        &self,
-        message: &rdkafka::message::BorrowedMessage<'_>,
-        error: &str,
-    ) -> Result<()> {
-        let key = message
-            .key()
-            .map(|k| String::from_utf8_lossy(k).to_string());
-        let payload = message.payload().unwrap_or_default();
-        self.dlq_router
-            .route(
-                crate::infrastructure::dlq_router::dlq_router::DLQErrorType::Unknown,
-                payload,
-                &key.unwrap_or_default(),
-            )
-            .await
-    }
-
     async fn send_to_dlq(
         &self,
         event: &ProcessableEvent,
@@ -3918,7 +1440,6 @@ impl UltraOptimizedCDCEventProcessor {
         let key = event.aggregate_id.to_string();
         self.dlq_router.route(error_type, &payload, &key).await
     }
-
     /// Send to DLQ using primitive fields (for batch DLQ from consumer)
     pub async fn send_to_dlq_from_cdc_parts(
         &self,
@@ -3951,2054 +1472,4 @@ impl UltraOptimizedCDCEventProcessor {
             )
             .await
     }
-
-    /// Adaptive batch sizing based on performance metrics
-    async fn adjust_batch_size(&self) {
-        let mut profiler = self.performance_profiler.lock().await;
-        let config = self.performance_config.lock().await;
-
-        let avg_batch_time = profiler.get_avg_batch_time();
-        let target_time = Duration::from_millis(config.target_batch_time_ms);
-        let current_batch_size = *self.batch_size.lock().await;
-
-        // Calculate adjustment factor based on performance
-        let adjustment_factor = if avg_batch_time > target_time {
-            // Batch processing is taking too long, reduce batch size
-            0.9
-        } else if avg_batch_time < target_time / 2 {
-            // Batch processing is very fast, increase batch size
-            1.1
-        } else {
-            // Performance is good, maintain current size
-            1.0
-        };
-
-        // Apply adjustment with bounds checking
-        let new_batch_size = ((current_batch_size as f64 * adjustment_factor) as usize)
-            .max(config.min_batch_size)
-            .min(config.max_batch_size);
-
-        if new_batch_size != current_batch_size {
-            *self.batch_size.lock().await = new_batch_size;
-            tracing::info!(
-                "Adaptive batch sizing: {} -> {} (avg_time: {:?}, target: {:?})",
-                current_batch_size,
-                new_batch_size,
-                avg_batch_time,
-                target_time
-            );
-        }
-
-        drop(config);
-        drop(profiler);
-    }
-
-    /// Intelligent concurrency control based on system load
-    async fn adjust_concurrency(&self) {
-        let config = self.performance_config.lock().await;
-        let current_concurrency = *self.adaptive_concurrency.lock().await;
-
-        // Get current system metrics
-        let memory_pressure = self.memory_monitor.lock().await.get_memory_pressure();
-        let queue_depth = self.batch_queue.lock().await.len();
-        let backpressure_active = self
-            .backpressure_signal
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        let mut new_concurrency = current_concurrency;
-
-        // Reduce concurrency under memory pressure
-        if memory_pressure > config.memory_pressure_threshold {
-            new_concurrency = new_concurrency.saturating_sub(1);
-            tracing::warn!(
-                "Reducing concurrency due to memory pressure: {} -> {} (pressure: {:.2})",
-                current_concurrency,
-                new_concurrency,
-                memory_pressure
-            );
-        }
-
-        // Reduce concurrency under backpressure
-        if backpressure_active || queue_depth > config.backpressure_threshold {
-            new_concurrency = new_concurrency.saturating_sub(1);
-            tracing::warn!(
-                "Reducing concurrency due to backpressure: {} -> {} (queue: {}, backpressure: {})",
-                current_concurrency,
-                new_concurrency,
-                queue_depth,
-                backpressure_active
-            );
-        }
-
-        // Increase concurrency if system is underutilized
-        if memory_pressure < config.memory_pressure_threshold * 0.5
-            && queue_depth < config.backpressure_threshold / 2
-            && !backpressure_active
-        {
-            new_concurrency = (new_concurrency + 1).min(config.max_concurrency);
-            tracing::info!(
-                "Increasing concurrency due to underutilization: {} -> {}",
-                current_concurrency,
-                new_concurrency
-            );
-        }
-
-        // Apply bounds
-        new_concurrency = new_concurrency
-            .max(config.min_concurrency)
-            .min(config.max_concurrency);
-
-        if new_concurrency != current_concurrency {
-            *self.adaptive_concurrency.lock().await = new_concurrency;
-
-            // Update semaphore
-            let new_semaphore = Arc::new(Semaphore::new(new_concurrency));
-            // Note: In a real implementation, you'd need to replace the semaphore atomically
-            tracing::info!(
-                "Concurrency adjusted: {} -> {} (memory_pressure: {:.2}, queue_depth: {})",
-                current_concurrency,
-                new_concurrency,
-                memory_pressure,
-                queue_depth
-            );
-        }
-
-        drop(config);
-    }
-
-    /// Start periodic flush task for when batch processing is disabled
-    async fn start_periodic_flush_task(&mut self) -> Result<()> {
-        // Start a periodic task to flush any remaining events in the queue
-        // This ensures events don't sit indefinitely when batch processing is disabled
-        let batch_queue = Arc::clone(&self.batch_queue);
-        let projection_store = Arc::clone(&self.projection_store);
-        let projection_cache = Arc::clone(&self.projection_cache);
-        let cache_service = Arc::clone(&self.cache_service);
-        let metrics = Arc::clone(&self.metrics);
-        let batch_size = *self.batch_size.lock().await;
-        let consistency_manager = self.consistency_manager.clone();
-
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5)); // Flush every 5 seconds
-            loop {
-                interval.tick().await;
-
-                // Check if there are any events in the queue
-                let queue_len = batch_queue.lock().await.len();
-                if queue_len > 0 {
-                    // Process any remaining events
-                    if let Err(e) = Self::process_batch_static(
-                        &batch_queue,
-                        &projection_store,
-                        &projection_cache,
-                        &cache_service,
-                        &metrics,
-                        consistency_manager.as_ref(), // Always notify consistency manager
-                        batch_size,
-                    )
-                    .await
-                    {
-                        error!("Periodic flush failed: {}", e);
-                    }
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    /// Start performance monitoring task
-    async fn start_performance_monitor(&mut self) -> Result<()> {
-        let config = self.performance_config.lock().await;
-        if !config.enable_performance_profiling {
-            drop(config);
-            return Ok(());
-        }
-
-        let interval_ms = config.metrics_collection_interval_ms;
-        drop(config);
-
-        let processor = Arc::new(self.clone());
-
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-
-            loop {
-                interval.tick().await;
-
-                // Update memory usage
-                let memory_usage = processor.get_memory_usage().await;
-                processor
-                    .memory_monitor
-                    .lock()
-                    .await
-                    .update_memory_usage(memory_usage);
-
-                // Record performance metrics
-                let mut profiler = processor.performance_profiler.lock().await;
-                profiler.record_memory_usage(memory_usage);
-
-                // Get current metrics
-                let events_processed = processor
-                    .metrics
-                    .events_processed
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let events_failed = processor
-                    .metrics
-                    .events_failed
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let total_events = events_processed + events_failed;
-                let error_rate = if total_events > 0 {
-                    (events_failed as f64 / total_events as f64) * 100.0
-                } else {
-                    0.0
-                };
-
-                profiler.record_error_rate(error_rate);
-
-                // Get throughput
-                let throughput = processor
-                    .metrics
-                    .throughput_per_second
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                profiler.record_throughput(throughput);
-
-                drop(profiler);
-
-                // Adjust batch size and concurrency
-                processor.adjust_batch_size().await;
-                processor.adjust_concurrency().await;
-
-                // Check for memory pressure and trigger GC if needed
-                if processor.memory_monitor.lock().await.should_trigger_gc() {
-                    processor.clear_expired_cache_entries().await;
-                    tracing::info!("Memory GC triggered");
-                }
-
-                // Log performance summary
-                let memory_stats = processor.memory_monitor.lock().await.get_memory_stats();
-                let avg_throughput = processor
-                    .performance_profiler
-                    .lock()
-                    .await
-                    .get_avg_throughput();
-                let avg_error_rate = processor
-                    .performance_profiler
-                    .lock()
-                    .await
-                    .get_avg_error_rate();
-
-                tracing::debug!(
-                    "Performance Monitor - Memory: {}MB/{}MB ({:.2}), Throughput: {}/s, Error Rate: {:.2}%",
-                    memory_stats.0 / 1024 / 1024,
-                    memory_stats.1 / 1024 / 1024,
-                    memory_stats.2,
-                    avg_throughput,
-                    avg_error_rate
-                );
-            }
-        });
-
-        *self.performance_monitor_handle.lock().await = Some(handle);
-        tracing::info!("Performance monitor started");
-        Ok(())
-    }
-
-    /// Get advanced performance statistics
-    pub async fn get_performance_stats(&self) -> serde_json::Value {
-        let profiler = self.performance_profiler.lock().await;
-        let memory_stats = self.memory_monitor.lock().await.get_memory_stats();
-        let config = self.performance_config.lock().await;
-        let batch_size = *self.batch_size.lock().await;
-        let concurrency = *self.adaptive_concurrency.lock().await;
-
-        serde_json::json!({
-            "batch_size": {
-                "current": batch_size,
-                "min": config.min_batch_size,
-                "max": config.max_batch_size,
-                "target_time_ms": config.target_batch_time_ms
-            },
-            "concurrency": {
-                "current": concurrency,
-                "min": config.min_concurrency,
-                "max": config.max_concurrency
-            },
-            "memory": {
-                "current_mb": memory_stats.0 / 1024 / 1024,
-                "peak_mb": memory_stats.1 / 1024 / 1024,
-                "pressure": memory_stats.2,
-                "threshold": config.memory_pressure_threshold
-            },
-            "performance": {
-                "avg_batch_time_ms": profiler.get_avg_batch_time().as_millis(),
-                "avg_throughput_per_sec": profiler.get_avg_throughput(),
-                "avg_error_rate_percent": profiler.get_avg_error_rate(),
-                "memory_trend": profiler.get_memory_trend()
-            },
-            "backpressure": {
-                "active": self.backpressure_signal.load(std::sync::atomic::Ordering::Relaxed),
-                "queue_depth": self.batch_queue.lock().await.len(),
-                "threshold": config.backpressure_threshold
-            }
-        })
-    }
-
-    // OPTIMIZATION: Add longer wait for CDC processing to ensure projections are updated
-    async fn wait_for_cdc_processing(
-        metrics: &Arc<EnhancedCDCMetrics>,
-        expected_events: usize,
-        timeout_secs: u64,
-    ) -> Result<()> {
-        let start = Instant::now();
-        let timeout = Duration::from_secs(timeout_secs);
-
-        loop {
-            let events_processed = metrics
-                .events_processed
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let projection_updates = metrics
-                .projection_updates
-                .load(std::sync::atomic::Ordering::Relaxed);
-
-            // Check if we've processed enough events and have projection updates
-            if events_processed >= expected_events as u64 && projection_updates > 0 {
-                info!(
-                    "✅ CDC processing complete: {} events processed, {} projection updates",
-                    events_processed, projection_updates
-                );
-                return Ok(());
-            }
-
-            // Check timeout
-            if start.elapsed() > timeout {
-                warn!(
-                    "⚠️ CDC processing timeout after {:?}. Processed: {}, Projections: {}",
-                    start.elapsed(),
-                    events_processed,
-                    projection_updates
-                );
-                return Ok(());
-            }
-
-            // Wait before checking again
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
-    // REMOVED: Accumulation flush task - using ProjectionStore standard batching instead
-}
-
-// DLQ Recovery Configuration
-#[derive(Debug, Clone)]
-pub struct DLQRecoveryConfig {
-    pub dlq_topic: String,
-    pub consumer_group_id: String,
-    pub max_reprocessing_retries: u32,
-    pub reprocessing_backoff_ms: u64,
-    pub batch_size: usize,
-    pub poll_timeout_ms: u64,
-    pub enable_auto_recovery: bool,
-    pub auto_recovery_interval_secs: u64,
-}
-
-impl Default for DLQRecoveryConfig {
-    fn default() -> Self {
-        Self {
-            dlq_topic: "banking-es-dlq".to_string(),
-            consumer_group_id: "banking-es-dlq-recovery".to_string(),
-            max_reprocessing_retries: 5,
-            reprocessing_backoff_ms: 1000,
-            batch_size: 10,
-            poll_timeout_ms: 25,
-            enable_auto_recovery: false,
-            auto_recovery_interval_secs: 300, // 5 minutes
-        }
-    }
-}
-
-// DLQ Consumer for recovery processing
-pub struct DLQConsumer {
-    kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
-    config: DLQRecoveryConfig,
-    processor: Arc<UltraOptimizedCDCEventProcessor>,
-    metrics: Arc<DLQRecoveryMetrics>,
-    shutdown_tx: Option<mpsc::Sender<()>>,
-    consumer_handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-#[derive(Debug, Default)]
-pub struct DLQRecoveryMetrics {
-    pub dlq_messages_consumed: std::sync::atomic::AtomicU64,
-    pub dlq_messages_reprocessed: std::sync::atomic::AtomicU64,
-    pub dlq_messages_failed: std::sync::atomic::AtomicU64,
-    pub dlq_reprocessing_retries: std::sync::atomic::AtomicU64,
-    pub dlq_consumer_restarts: std::sync::atomic::AtomicU64,
-    pub dlq_processing_latency_ms: std::sync::atomic::AtomicU64,
-}
-
-impl DLQConsumer {
-    pub fn new(
-        kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
-        config: DLQRecoveryConfig,
-        processor: Arc<UltraOptimizedCDCEventProcessor>,
-    ) -> Self {
-        Self {
-            kafka_consumer,
-            config,
-            processor,
-            metrics: Arc::new(DLQRecoveryMetrics::default()),
-            shutdown_tx: None,
-            consumer_handle: None,
-        }
-    }
-
-    /// Start the DLQ consumer for automatic recovery
-    pub async fn start(&mut self) -> Result<()> {
-        if !self.config.enable_auto_recovery {
-            info!("DLQ auto-recovery is disabled");
-            return Ok(());
-        }
-
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
-        self.shutdown_tx = Some(shutdown_tx);
-
-        let kafka_consumer = self.kafka_consumer.clone();
-        let config = self.config.clone();
-        let processor = self.processor.clone();
-        let metrics = self.metrics.clone();
-
-        let handle = tokio::spawn(async move {
-            info!("Starting DLQ consumer for topic: {}", config.dlq_topic);
-
-            // Subscribe to DLQ topic
-            if let Err(e) = kafka_consumer.subscribe_to_topic(&config.dlq_topic).await {
-                error!("Failed to subscribe to DLQ topic: {}", e);
-                return;
-            }
-
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(config.auto_recovery_interval_secs));
-
-            loop {
-                tokio::select! {
-                    _ = shutdown_rx.recv() => {
-                        info!("DLQ consumer received shutdown signal");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        if let Err(e) = Self::process_dlq_batch(&kafka_consumer, &processor, &metrics, &config).await {
-                            error!("DLQ batch processing failed: {}", e);
-                            metrics.dlq_consumer_restarts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                }
-            }
-
-            info!("DLQ consumer stopped");
-        });
-
-        self.consumer_handle = Some(handle);
-        info!("DLQ consumer started successfully");
-        Ok(())
-    }
-
-    /// Stop the DLQ consumer
-    pub async fn stop(&mut self) -> Result<()> {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(()).await;
-        }
-
-        if let Some(handle) = self.consumer_handle.take() {
-            handle.await?;
-        }
-
-        info!("DLQ consumer stopped");
-        Ok(())
-    }
-
-    /// Process a batch of DLQ messages
-    async fn process_dlq_batch(
-        consumer: &crate::infrastructure::kafka_abstraction::KafkaConsumer,
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-        metrics: &Arc<DLQRecoveryMetrics>,
-        config: &DLQRecoveryConfig,
-    ) -> Result<()> {
-        let mut processed_count = 0;
-        let start_time = Instant::now();
-
-        for _ in 0..config.batch_size {
-            match consumer.poll_dlq_message().await {
-                Ok(Some(dlq_message)) => {
-                    metrics
-                        .dlq_messages_consumed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    if let Err(e) =
-                        Self::reprocess_dlq_message(processor, &dlq_message, config).await
-                    {
-                        error!("Failed to reprocess DLQ message: {}", e);
-                        metrics
-                            .dlq_messages_failed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    } else {
-                        metrics
-                            .dlq_messages_reprocessed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        processed_count += 1;
-                    }
-                }
-                Ok(None) => {
-                    // No more messages available
-                    break;
-                }
-                Err(e) => {
-                    error!("Error polling DLQ message: {}", e);
-                    break;
-                }
-            }
-        }
-
-        if processed_count > 0 {
-            let latency = start_time.elapsed().as_millis() as u64;
-            metrics
-                .dlq_processing_latency_ms
-                .store(latency, std::sync::atomic::Ordering::Relaxed);
-            info!(
-                "Processed {} DLQ messages in {}ms",
-                processed_count, latency
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Reprocess a single DLQ message
-    async fn reprocess_dlq_message(
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-        dlq_message: &crate::infrastructure::kafka_dlq::DeadLetterMessage,
-        config: &DLQRecoveryConfig,
-    ) -> Result<()> {
-        // Convert DeadLetterMessage back to ProcessableEvent
-        // Note: DeadLetterMessage contains events, not individual event data
-        // We'll process the first event from the batch for simplicity
-        if let Some(first_event) = dlq_message.events.first() {
-            let event_id = Uuid::new_v4(); // Generate new event ID for reprocessing
-            let payload = bincode::serialize(first_event)?;
-
-            let processable_event = ProcessableEvent::new(
-                event_id,
-                dlq_message.account_id,
-                EventType::from_str(first_event.event_type()),
-                payload,
-                None,               // partition_key
-                chrono::Utc::now(), // FIXED: Use event timestamp
-            )?;
-
-            let mut retries = 0;
-            loop {
-                match processor.try_process_event(&processable_event).await {
-                    Ok(_) => {
-                        info!(
-                            "Successfully reprocessed DLQ message for account: {}",
-                            dlq_message.account_id
-                        );
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        retries += 1;
-                        if retries > config.max_reprocessing_retries {
-                            error!(
-                                "Failed to reprocess DLQ message for account {} after {} retries: {}",
-                                dlq_message.account_id, retries, e
-                            );
-                            return Err(e);
-                        } else {
-                            warn!(
-                                "Retrying DLQ message for account {} (attempt {}): {}",
-                                dlq_message.account_id, retries, e
-                            );
-                            tokio::time::sleep(Duration::from_millis(
-                                config.reprocessing_backoff_ms * retries as u64,
-                            ))
-                            .await;
-                        }
-                    }
-                }
-            }
-        } else {
-            Err(anyhow::anyhow!("No events found in DLQ message"))
-        }
-    }
-
-    /// Get DLQ recovery metrics
-    pub fn get_metrics(&self) -> DLQRecoveryMetrics {
-        DLQRecoveryMetrics {
-            dlq_messages_consumed: std::sync::atomic::AtomicU64::new(
-                self.metrics
-                    .dlq_messages_consumed
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            dlq_messages_reprocessed: std::sync::atomic::AtomicU64::new(
-                self.metrics
-                    .dlq_messages_reprocessed
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            dlq_messages_failed: std::sync::atomic::AtomicU64::new(
-                self.metrics
-                    .dlq_messages_failed
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            dlq_reprocessing_retries: std::sync::atomic::AtomicU64::new(
-                self.metrics
-                    .dlq_reprocessing_retries
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            dlq_consumer_restarts: std::sync::atomic::AtomicU64::new(
-                self.metrics
-                    .dlq_consumer_restarts
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            dlq_processing_latency_ms: std::sync::atomic::AtomicU64::new(
-                self.metrics
-                    .dlq_processing_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-        }
-    }
-}
-
-impl UltraOptimizedCDCEventProcessor {
-    /// Create a DLQ consumer for recovery processing
-    pub fn create_dlq_consumer(&self, config: DLQRecoveryConfig) -> Result<DLQConsumer> {
-        let kafka_config = crate::infrastructure::kafka_abstraction::KafkaConfig::default();
-        let kafka_consumer =
-            crate::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config)?;
-
-        Ok(DLQConsumer::new(
-            kafka_consumer,
-            config,
-            Arc::new(self.clone()),
-        ))
-    }
-
-    /// Manual DLQ reprocessing - process all available DLQ messages
-    pub async fn reprocess_dlq(&self) -> Result<DLQRecoveryMetrics> {
-        let config = DLQRecoveryConfig::default();
-        let mut dlq_consumer = self.create_dlq_consumer(config.clone())?;
-
-        info!("Starting manual DLQ reprocessing");
-
-        // Process all available DLQ messages
-        let mut total_processed = 0;
-        let mut total_failed = 0;
-
-        // Create a Kafka consumer for DLQ polling
-        let kafka_config = crate::infrastructure::kafka_abstraction::KafkaConfig::default();
-        let kafka_consumer =
-            crate::infrastructure::kafka_abstraction::KafkaConsumer::new(kafka_config)?;
-
-        // Subscribe to DLQ topic
-        kafka_consumer.subscribe_to_dlq().await?;
-
-        // Clone config to avoid move issues
-        let config_clone = config.clone();
-
-        loop {
-            match kafka_consumer.poll_dlq_message().await {
-                Ok(Some(dlq_message)) => {
-                    match self
-                        .reprocess_single_dlq_message(&dlq_message, &config_clone)
-                        .await
-                    {
-                        Ok(_) => {
-                            total_processed += 1;
-                            info!(
-                                "Successfully reprocessed DLQ message for account: {}",
-                                dlq_message.account_id
-                            );
-                        }
-                        Err(e) => {
-                            total_failed += 1;
-                            error!(
-                                "Failed to reprocess DLQ message for account {}: {}",
-                                dlq_message.account_id, e
-                            );
-                        }
-                    }
-                }
-                Ok(None) => {
-                    // No more messages
-                    break;
-                }
-                Err(e) => {
-                    error!("Error polling DLQ message: {}", e);
-                    break;
-                }
-            }
-        }
-
-        info!(
-            "Manual DLQ reprocessing completed: {} processed, {} failed",
-            total_processed, total_failed
-        );
-
-        // Return metrics
-        Ok(DLQRecoveryMetrics {
-            dlq_messages_consumed: std::sync::atomic::AtomicU64::new(
-                total_processed + total_failed,
-            ),
-            dlq_messages_reprocessed: std::sync::atomic::AtomicU64::new(total_processed),
-            dlq_messages_failed: std::sync::atomic::AtomicU64::new(total_failed),
-            dlq_reprocessing_retries: std::sync::atomic::AtomicU64::new(0),
-            dlq_consumer_restarts: std::sync::atomic::AtomicU64::new(0),
-            dlq_processing_latency_ms: std::sync::atomic::AtomicU64::new(0),
-        })
-    }
-
-    /// Reprocess a single DLQ message with retries
-    async fn reprocess_single_dlq_message(
-        &self,
-        dlq_message: &crate::infrastructure::kafka_dlq::DeadLetterMessage,
-        config: &DLQRecoveryConfig,
-    ) -> Result<()> {
-        // Convert DeadLetterMessage to ProcessableEvent
-        // Note: DeadLetterMessage contains events, not individual event data
-        if let Some(first_event) = dlq_message.events.first() {
-            let event_id = Uuid::new_v4(); // Generate new event ID for reprocessing
-            let payload = bincode::serialize(first_event)?;
-
-            let processable_event = ProcessableEvent::new(
-                event_id,
-                dlq_message.account_id,
-                EventType::from_str(first_event.event_type()),
-                payload,
-                None,
-                chrono::Utc::now(), // FIXED: Use event timestamp
-            )?;
-
-            let mut retries = 0;
-            loop {
-                match self.try_process_event(&processable_event).await {
-                    Ok(_) => {
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        retries += 1;
-                        if retries > config.max_reprocessing_retries {
-                            return Err(e);
-                        } else {
-                            warn!(
-                                "Retrying DLQ message for account {} (attempt {}): {}",
-                                dlq_message.account_id, retries, e
-                            );
-                            tokio::time::sleep(Duration::from_millis(
-                                config.reprocessing_backoff_ms * retries as u64,
-                            ))
-                            .await;
-                        }
-                    }
-                }
-            }
-        } else {
-            Err(anyhow::anyhow!("No events found in DLQ message"))
-        }
-    }
-
-    /// Get DLQ statistics
-    pub async fn get_dlq_stats(&self) -> Result<serde_json::Value> {
-        // This would typically query the DLQ topic/table for statistics
-        // For now, return a placeholder
-        Ok(serde_json::json!({
-            "dlq_topic": "banking-es-dlq",
-            "total_messages": 0, // Would query actual count
-            "oldest_message_age_seconds": 0, // Would calculate from timestamps
-            "recovery_enabled": false,
-            "last_recovery_attempt": null,
-        }))
-    }
-}
-
-impl UltraOptimizedCDCEventProcessor {
-    /// Static method to enable and start batch processor on an Arc (for use in service managers)
-    pub async fn enable_and_start_batch_processor_arc(processor: Arc<Self>) -> Result<()> {
-        // Update configuration to enable batch processing
-        {
-            let mut config = processor.business_config.lock().await;
-            config.batch_processing_enabled = true;
-        }
-
-        // Check if batch processor is already running
-        if processor.batch_processor_handle.lock().await.is_some() {
-            return Ok(()); // Already running
-        }
-
-        let shutdown_token = processor.shutdown_token.clone();
-        let batch_queue = Arc::clone(&processor.batch_queue);
-        let projection_store = Arc::clone(&processor.projection_store);
-        let projection_cache = Arc::clone(&processor.projection_cache);
-        let cache_service = Arc::clone(&processor.cache_service);
-        let metrics = Arc::clone(&processor.metrics);
-        let batch_size = *processor.batch_size.lock().await;
-        let batch_timeout = processor.batch_timeout;
-
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(batch_timeout / 2);
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        if let Err(e) = Self::process_batch_static(
-                            &batch_queue,
-                            &projection_store,
-                            &projection_cache,
-                            &cache_service,
-                            &metrics,
-                            None, // No consistency manager in this context
-                            batch_size,
-                        ).await {
-                            error!("Batch processing failed: {}", e);
-                        }
-                    }
-                    _ = shutdown_token.cancelled() => {
-                        info!("Batch processor shutting down");
-                        break;
-                    }
-                }
-            }
-        });
-
-        *processor.batch_processor_handle.lock().await = Some(handle);
-        info!("Batch processor started successfully");
-        Ok(())
-    }
-}
-
-/// Memory monitor for advanced memory management
-#[derive(Debug)]
-pub struct MemoryMonitor {
-    peak_memory: usize,
-    current_memory: usize,
-    memory_pressure_threshold: f64,
-    gc_trigger_threshold: usize,
-    last_gc_time: Instant,
-    gc_interval: Duration,
-}
-
-impl MemoryMonitor {
-    pub fn new(memory_pressure_threshold: f64, gc_trigger_threshold: usize) -> Self {
-        Self {
-            peak_memory: 0,
-            current_memory: 0,
-            memory_pressure_threshold,
-            gc_trigger_threshold,
-            last_gc_time: Instant::now(),
-            gc_interval: Duration::from_secs(60), // GC every minute at most
-        }
-    }
-
-    pub fn update_memory_usage(&mut self, usage: usize) {
-        self.current_memory = usage;
-        if usage > self.peak_memory {
-            self.peak_memory = usage;
-        }
-    }
-
-    pub fn should_trigger_gc(&mut self) -> bool {
-        let now = Instant::now();
-        let time_since_last_gc = now.duration_since(self.last_gc_time);
-
-        if time_since_last_gc < self.gc_interval {
-            return false;
-        }
-
-        if self.current_memory > self.gc_trigger_threshold {
-            self.last_gc_time = now;
-            return true;
-        }
-
-        false
-    }
-
-    pub fn get_memory_pressure(&self) -> f64 {
-        if self.peak_memory == 0 {
-            return 0.0;
-        }
-        self.current_memory as f64 / self.peak_memory as f64
-    }
-
-    pub fn is_under_pressure(&self) -> bool {
-        self.get_memory_pressure() > self.memory_pressure_threshold
-    }
-
-    pub fn get_memory_stats(&self) -> (usize, usize, f64) {
-        (
-            self.current_memory,
-            self.peak_memory,
-            self.get_memory_pressure(),
-        )
-    }
-}
-
-/// Advanced performance configuration for adaptive optimization
-#[derive(Debug, Clone)]
-pub struct AdvancedPerformanceConfig {
-    // Adaptive batch sizing
-    pub min_batch_size: usize,
-    pub max_batch_size: usize,
-    pub target_batch_time_ms: u64,
-    pub load_adjustment_factor: f64,
-
-    // Intelligent concurrency control
-    pub min_concurrency: usize,
-    pub max_concurrency: usize,
-    pub cpu_utilization_threshold: f64,
-    pub backpressure_threshold: usize,
-
-    // Advanced caching
-    pub enable_predictive_caching: bool,
-    pub cache_warmup_size: usize,
-    pub cache_eviction_policy: CacheEvictionPolicy,
-
-    // Memory management
-    pub memory_pressure_threshold: f64,
-    pub gc_trigger_threshold: usize,
-
-    // Performance monitoring
-    pub enable_performance_profiling: bool,
-    pub metrics_collection_interval_ms: u64,
-    pub enable_detailed_profiling: bool,
-    pub enable_adaptive_batching: bool,
-    pub max_retries: u32,
-    pub retry_backoff_ms: u64,
-    pub batch_timeout: Duration,
-}
-
-#[derive(Debug, Clone)]
-pub enum CacheEvictionPolicy {
-    LRU,      // Least Recently Used
-    LFU,      // Least Frequently Used
-    TTL,      // Time To Live
-    Adaptive, // Adaptive based on access patterns
-}
-
-impl Default for AdvancedPerformanceConfig {
-    fn default() -> Self {
-        Self {
-            min_batch_size: 1000,    // Increased from 500 to 1000 for much better throughput
-            max_batch_size: 2000,    // Increased from 1000 to 2000 for much better throughput
-            target_batch_time_ms: 5, // Reduced from 10ms to 5ms for ultra-fast processing
-            load_adjustment_factor: 0.02, // Reduced from 0.05 to 0.02 for more aggressive adjustment
-
-            min_concurrency: 4,  // Increased from 2 to 4 for better parallelism
-            max_concurrency: 32, // Increased from 16 to 32 for better scalability
-            cpu_utilization_threshold: 0.9, // Increased from 0.8 to 0.9 for higher utilization
-            backpressure_threshold: 2000, // Increased from 1000 to 2000 for higher capacity
-
-            enable_predictive_caching: true,
-            cache_warmup_size: 200, // Increased from 100 to 200 for better cache hit rates
-            cache_eviction_policy: CacheEvictionPolicy::Adaptive,
-
-            memory_pressure_threshold: 0.9, // Increased from 0.85 to 0.9 for higher memory utilization
-            gc_trigger_threshold: 20000,    // Increased from 10000 to 20000 for less frequent GC
-
-            enable_performance_profiling: true,
-            metrics_collection_interval_ms: 500, // Reduced from 1000ms to 500ms for more frequent updates
-            enable_detailed_profiling: true,
-            max_retries: 3,
-            retry_backoff_ms: 100,
-            enable_adaptive_batching: true,
-            batch_timeout: Duration::from_millis(50),
-        }
-    }
-}
-
-/// Performance profiler for detailed analysis
-#[derive(Debug)]
-pub struct PerformanceProfiler {
-    batch_times: Vec<Duration>,
-    memory_usage: Vec<usize>,
-    cpu_usage: Vec<f64>,
-    throughput_history: Vec<u64>,
-    error_rates: Vec<f64>,
-    last_reset: Instant,
-    max_history_size: usize,
-    enable_detailed_profiling: bool,
-}
-
-impl PerformanceProfiler {
-    pub fn new(max_history_size: usize, enable_detailed_profiling: bool) -> Self {
-        Self {
-            batch_times: Vec::new(),
-            memory_usage: Vec::new(),
-            cpu_usage: Vec::new(),
-            throughput_history: Vec::new(),
-            error_rates: Vec::new(),
-            last_reset: Instant::now(),
-            max_history_size,
-            enable_detailed_profiling,
-        }
-    }
-
-    pub fn record_batch_time(&mut self, duration: Duration) {
-        self.batch_times.push(duration);
-        if self.batch_times.len() > self.max_history_size {
-            self.batch_times.remove(0);
-        }
-    }
-
-    pub fn record_memory_usage(&mut self, usage: usize) {
-        self.memory_usage.push(usage);
-        if self.memory_usage.len() > self.max_history_size {
-            self.memory_usage.remove(0);
-        }
-    }
-
-    pub fn record_cpu_usage(&mut self, usage: f64) {
-        self.cpu_usage.push(usage);
-        if self.cpu_usage.len() > self.max_history_size {
-            self.cpu_usage.remove(0);
-        }
-    }
-
-    pub fn record_throughput(&mut self, throughput: u64) {
-        self.throughput_history.push(throughput);
-        if self.throughput_history.len() > self.max_history_size {
-            self.throughput_history.remove(0);
-        }
-    }
-
-    pub fn record_error_rate(&mut self, error_rate: f64) {
-        self.error_rates.push(error_rate);
-        if self.error_rates.len() > self.max_history_size {
-            self.error_rates.remove(0);
-        }
-    }
-
-    pub fn get_avg_batch_time(&self) -> Duration {
-        if self.batch_times.is_empty() {
-            return Duration::ZERO;
-        }
-        let total: Duration = self.batch_times.iter().sum();
-        total / self.batch_times.len() as u32
-    }
-
-    pub fn get_avg_throughput(&self) -> u64 {
-        if self.throughput_history.is_empty() {
-            return 0;
-        }
-        self.throughput_history.iter().sum::<u64>() / self.throughput_history.len() as u64
-    }
-
-    pub fn get_avg_error_rate(&self) -> f64 {
-        if self.error_rates.is_empty() {
-            return 0.0;
-        }
-        self.error_rates.iter().sum::<f64>() / self.error_rates.len() as f64
-    }
-
-    pub fn get_memory_trend(&self) -> f64 {
-        if self.memory_usage.len() < 2 {
-            return 0.0;
-        }
-        let recent = self.memory_usage[self.memory_usage.len() - 1];
-        let older = self.memory_usage[0];
-        if older == 0 {
-            return 0.0;
-        }
-        (recent as f64 - older as f64) / older as f64
-    }
-
-    pub fn reset(&mut self) {
-        self.batch_times.clear();
-        self.memory_usage.clear();
-        self.cpu_usage.clear();
-        self.throughput_history.clear();
-        self.error_rates.clear();
-        self.last_reset = Instant::now();
-    }
-}
-
-// Phase 2.3: Advanced Monitoring
-// ==============================
-
-/// Health check status for monitoring
-#[derive(Debug, Clone, Serialize)]
-pub enum HealthStatus {
-    Healthy,
-    Degraded,
-    Unhealthy,
-    Unknown,
-}
-
-/// Health check result with details
-#[derive(Debug, Clone, Serialize)]
-pub struct HealthCheckResult {
-    pub status: HealthStatus,
-    pub component: String,
-    pub message: String,
-    pub timestamp: DateTime<Utc>,
-    pub details: serde_json::Value,
-}
-
-/// Alert severity levels
-#[derive(Debug, Clone, Serialize)]
-pub enum AlertSeverity {
-    Info,
-    Warning,
-    Error,
-    Critical,
-}
-
-impl std::fmt::Display for AlertSeverity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AlertSeverity::Info => write!(f, "INFO"),
-            AlertSeverity::Warning => write!(f, "WARNING"),
-            AlertSeverity::Error => write!(f, "ERROR"),
-            AlertSeverity::Critical => write!(f, "CRITICAL"),
-        }
-    }
-}
-
-/// Alert configuration
-#[derive(Debug, Clone)]
-pub struct AlertConfig {
-    pub enabled: bool,
-    pub error_rate_threshold: f64,
-    pub latency_threshold_ms: u64,
-    pub memory_usage_threshold: f64,
-    pub queue_depth_threshold: usize,
-    pub consecutive_failures_threshold: u32,
-    pub alert_cooldown_seconds: u64,
-}
-
-impl Default for AlertConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            error_rate_threshold: 5.0,   // 5% error rate
-            latency_threshold_ms: 1000,  // 1 second
-            memory_usage_threshold: 0.8, // 80% memory usage
-            queue_depth_threshold: 1000,
-            consecutive_failures_threshold: 10,
-            alert_cooldown_seconds: 300, // 5 minutes
-        }
-    }
-}
-
-/// Alert with metadata
-#[derive(Debug, Clone, Serialize)]
-pub struct Alert {
-    pub id: Uuid,
-    pub severity: AlertSeverity,
-    pub component: String,
-    pub message: String,
-    pub timestamp: DateTime<Utc>,
-    pub metadata: serde_json::Value,
-    pub acknowledged: bool,
-    pub resolved: bool,
-}
-
-/// Metrics aggregation for time-series data
-#[derive(Clone)]
-pub struct MetricsAggregator {
-    time_series: Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, f64)>>>>,
-    max_data_points: usize,
-    aggregation_interval: Duration,
-}
-
-impl MetricsAggregator {
-    pub fn new(max_data_points: usize, aggregation_interval: Duration) -> Self {
-        Self {
-            time_series: Arc::new(RwLock::new(HashMap::new())),
-            max_data_points,
-            aggregation_interval,
-        }
-    }
-
-    pub async fn record_metric(&self, metric_name: &str, value: f64) {
-        let mut time_series = self.time_series.write().await;
-        let series = time_series
-            .entry(metric_name.to_string())
-            .or_insert_with(VecDeque::new);
-
-        let now = Utc::now();
-        series.push_back((now, value));
-
-        // Keep only the latest data points
-        while series.len() > self.max_data_points {
-            series.pop_front();
-        }
-    }
-
-    pub async fn get_metric_stats(&self, metric_name: &str) -> Option<serde_json::Value> {
-        let time_series = self.time_series.read().await;
-        let series = time_series.get(metric_name)?;
-
-        if series.is_empty() {
-            return None;
-        }
-
-        let values: Vec<f64> = series.iter().map(|(_, v)| *v).collect();
-        let min = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let sum: f64 = values.iter().sum();
-        let avg = sum / values.len() as f64;
-
-        // Calculate percentiles
-        let mut sorted_values = values.clone();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p50_idx = (sorted_values.len() as f64 * 0.5) as usize;
-        let p95_idx = (sorted_values.len() as f64 * 0.95) as usize;
-        let p99_idx = (sorted_values.len() as f64 * 0.99) as usize;
-
-        let p50 = sorted_values.get(p50_idx).unwrap_or(&0.0);
-        let p95 = sorted_values.get(p95_idx).unwrap_or(&0.0);
-        let p99 = sorted_values.get(p99_idx).unwrap_or(&0.0);
-
-        Some(serde_json::json!({
-            "metric_name": metric_name,
-            "count": values.len(),
-            "min": min,
-            "max": max,
-            "avg": avg,
-            "sum": sum,
-            "p50": p50,
-            "p95": p95,
-            "p99": p99,
-            "latest_value": values.last(),
-            "latest_timestamp": series.back().map(|(ts, _)| ts)
-        }))
-    }
-
-    pub async fn get_all_metrics(&self) -> serde_json::Value {
-        let time_series = self.time_series.read().await;
-        let mut result = serde_json::Map::new();
-
-        for (metric_name, _) in time_series.iter() {
-            if let Some(stats) = self.get_metric_stats(metric_name).await {
-                result.insert(metric_name.to_string(), stats);
-            }
-        }
-
-        serde_json::Value::Object(result)
-    }
-}
-
-/// Advanced monitoring system
-pub struct AdvancedMonitoringSystem {
-    alert_config: AlertConfig,
-    alerts: Arc<RwLock<Vec<Alert>>>,
-    metrics_aggregator: MetricsAggregator,
-    health_checks: Arc<RwLock<HashMap<String, HealthCheckResult>>>,
-    monitoring_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    last_alert_time: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
-}
-
-impl AdvancedMonitoringSystem {
-    pub fn new(alert_config: AlertConfig) -> Self {
-        Self {
-            alert_config,
-            alerts: Arc::new(RwLock::new(Vec::new())),
-            metrics_aggregator: MetricsAggregator::new(
-                1000,                    // 1000 data points per metric
-                Duration::from_secs(60), // 1 minute aggregation interval
-            ),
-            health_checks: Arc::new(RwLock::new(HashMap::new())),
-            monitoring_handle: Arc::new(Mutex::new(None)),
-            last_alert_time: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    pub async fn start_monitoring(
-        &mut self,
-        processor: Arc<UltraOptimizedCDCEventProcessor>,
-    ) -> Result<()> {
-        let alert_config = self.alert_config.clone();
-        let alerts = Arc::clone(&self.alerts);
-        let metrics_aggregator = self.metrics_aggregator.clone();
-        let health_checks = Arc::clone(&self.health_checks);
-        let last_alert_time = Arc::clone(&self.last_alert_time);
-
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30)); // Check every 30 seconds
-
-            loop {
-                interval.tick().await;
-
-                // Collect metrics
-                Self::collect_metrics(&processor, &metrics_aggregator).await;
-
-                // Run health checks
-                Self::run_health_checks(&processor, &health_checks).await;
-
-                // Check for alerts
-                Self::check_alerts(&processor, &alert_config, &alerts, &last_alert_time).await;
-            }
-        });
-
-        let mut monitoring_handle = self.monitoring_handle.lock().await;
-        *monitoring_handle = Some(handle);
-
-        info!("Advanced monitoring system started");
-        Ok(())
-    }
-
-    pub async fn stop_monitoring(&mut self) -> Result<()> {
-        let mut monitoring_handle = self.monitoring_handle.lock().await;
-        if let Some(handle) = monitoring_handle.take() {
-            handle.abort();
-        }
-
-        info!("Advanced monitoring system stopped");
-        Ok(())
-    }
-
-    async fn collect_metrics(
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-        metrics_aggregator: &MetricsAggregator,
-    ) {
-        let metrics = processor.get_metrics().await;
-
-        // Record key metrics
-        metrics_aggregator
-            .record_metric(
-                "events_processed_per_sec",
-                metrics
-                    .events_processed
-                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
-            )
-            .await;
-
-        metrics_aggregator
-            .record_metric(
-                "events_failed_per_sec",
-                metrics
-                    .events_failed
-                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
-            )
-            .await;
-
-        metrics_aggregator
-            .record_metric(
-                "processing_latency_ms",
-                metrics
-                    .processing_latency_ms
-                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
-            )
-            .await;
-
-        metrics_aggregator
-            .record_metric(
-                "memory_usage_bytes",
-                metrics
-                    .memory_usage_bytes
-                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
-            )
-            .await;
-
-        metrics_aggregator
-            .record_metric(
-                "queue_depth",
-                metrics
-                    .queue_depth
-                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
-            )
-            .await;
-
-        metrics_aggregator
-            .record_metric(
-                "error_rate",
-                metrics
-                    .error_rate
-                    .load(std::sync::atomic::Ordering::Relaxed) as f64,
-            )
-            .await;
-    }
-
-    async fn run_health_checks(
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-        health_checks: &Arc<RwLock<HashMap<String, HealthCheckResult>>>,
-    ) {
-        let mut checks = health_checks.write().await;
-        let now = Utc::now();
-
-        // Check batch processor health
-        let batch_processor_running = processor.is_batch_processor_running().await;
-        checks.insert(
-            "batch_processor".to_string(),
-            HealthCheckResult {
-                status: if batch_processor_running {
-                    HealthStatus::Healthy
-                } else {
-                    HealthStatus::Degraded
-                },
-                component: "batch_processor".to_string(),
-                message: if batch_processor_running {
-                    "Batch processor is running"
-                } else {
-                    "Batch processor is not running"
-                }
-                .to_string(),
-                timestamp: now,
-                details: serde_json::json!({ "running": batch_processor_running }),
-            },
-        );
-
-        // Check memory health
-        let memory_usage = processor.get_memory_usage().await;
-        let memory_status = if memory_usage > 1_000_000_000 {
-            // 1GB
-            HealthStatus::Degraded
-        } else {
-            HealthStatus::Healthy
-        };
-        checks.insert(
-            "memory".to_string(),
-            HealthCheckResult {
-                status: memory_status,
-                component: "memory".to_string(),
-                message: format!("Memory usage: {} bytes", memory_usage),
-                timestamp: now,
-                details: serde_json::json!({ "usage_bytes": memory_usage }),
-            },
-        );
-
-        // Check circuit breaker health
-        let circuit_breaker_open = !processor.circuit_breaker.can_execute().await;
-        checks.insert(
-            "circuit_breaker".to_string(),
-            HealthCheckResult {
-                status: if circuit_breaker_open {
-                    HealthStatus::Unhealthy
-                } else {
-                    HealthStatus::Healthy
-                },
-                component: "circuit_breaker".to_string(),
-                message: if circuit_breaker_open {
-                    "Circuit breaker is open"
-                } else {
-                    "Circuit breaker is closed"
-                }
-                .to_string(),
-                timestamp: now,
-                details: serde_json::json!({ "open": circuit_breaker_open }),
-            },
-        );
-    }
-
-    async fn check_alerts(
-        processor: &Arc<UltraOptimizedCDCEventProcessor>,
-        alert_config: &AlertConfig,
-        alerts: &Arc<RwLock<Vec<Alert>>>,
-        last_alert_time: &Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
-    ) {
-        if !alert_config.enabled {
-            return;
-        }
-
-        let metrics = processor.get_metrics().await;
-        let now = Utc::now();
-        let mut new_alerts = Vec::new();
-        let mut last_alert_times = last_alert_time.write().await;
-
-        // Check error rate
-        let error_rate = metrics
-            .error_rate
-            .load(std::sync::atomic::Ordering::Relaxed) as f64;
-        if error_rate > alert_config.error_rate_threshold {
-            let alert_key = "high_error_rate".to_string();
-            if Self::should_send_alert(
-                &alert_key,
-                &last_alert_times,
-                now,
-                alert_config.alert_cooldown_seconds,
-            )
-            .await
-            {
-                new_alerts.push(Alert {
-                    id: Uuid::new_v4(),
-                    severity: AlertSeverity::Error,
-                    component: "cdc_processor".to_string(),
-                    message: format!("High error rate detected: {:.2}%", error_rate),
-                    timestamp: now,
-                    metadata: serde_json::json!({ "error_rate": error_rate, "threshold": alert_config.error_rate_threshold }),
-                    acknowledged: false,
-                    resolved: false,
-                });
-                last_alert_times.insert(alert_key, now);
-            }
-        }
-
-        // Check latency
-        let avg_latency = metrics
-            .processing_latency_ms
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if avg_latency > alert_config.latency_threshold_ms {
-            let alert_key = "high_latency".to_string();
-            if Self::should_send_alert(
-                &alert_key,
-                &last_alert_times,
-                now,
-                alert_config.alert_cooldown_seconds,
-            )
-            .await
-            {
-                new_alerts.push(Alert {
-                    id: Uuid::new_v4(),
-                    severity: AlertSeverity::Warning,
-                    component: "cdc_processor".to_string(),
-                    message: format!("High processing latency detected: {}ms", avg_latency),
-                    timestamp: now,
-                    metadata: serde_json::json!({ "latency_ms": avg_latency, "threshold_ms": alert_config.latency_threshold_ms }),
-                    acknowledged: false,
-                    resolved: false,
-                });
-                last_alert_times.insert(alert_key, now);
-            }
-        }
-
-        // Check queue depth
-        let queue_depth = metrics
-            .queue_depth
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if queue_depth > alert_config.queue_depth_threshold as u64 {
-            let alert_key = "high_queue_depth".to_string();
-            if Self::should_send_alert(
-                &alert_key,
-                &last_alert_times,
-                now,
-                alert_config.alert_cooldown_seconds,
-            )
-            .await
-            {
-                new_alerts.push(Alert {
-                    id: Uuid::new_v4(),
-                    severity: AlertSeverity::Warning,
-                    component: "cdc_processor".to_string(),
-                    message: format!("High queue depth detected: {}", queue_depth),
-                    timestamp: now,
-                    metadata: serde_json::json!({ "queue_depth": queue_depth, "threshold": alert_config.queue_depth_threshold }),
-                    acknowledged: false,
-                    resolved: false,
-                });
-                last_alert_times.insert(alert_key, now);
-            }
-        }
-
-        // Check consecutive failures
-        let consecutive_failures = metrics
-            .consecutive_failures
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if consecutive_failures > alert_config.consecutive_failures_threshold as u64 {
-            let alert_key = "consecutive_failures".to_string();
-            if Self::should_send_alert(
-                &alert_key,
-                &last_alert_times,
-                now,
-                alert_config.alert_cooldown_seconds,
-            )
-            .await
-            {
-                new_alerts.push(Alert {
-                    id: Uuid::new_v4(),
-                    severity: AlertSeverity::Critical,
-                    component: "cdc_processor".to_string(),
-                    message: format!("High consecutive failures detected: {}", consecutive_failures),
-                    timestamp: now,
-                    metadata: serde_json::json!({ "consecutive_failures": consecutive_failures, "threshold": alert_config.consecutive_failures_threshold }),
-                    acknowledged: false,
-                    resolved: false,
-                });
-                last_alert_times.insert(alert_key, now);
-            }
-        }
-
-        // Add new alerts
-        if !new_alerts.is_empty() {
-            let mut alerts_guard = alerts.write().await;
-            alerts_guard.extend(new_alerts.clone());
-
-            // Log alerts
-            for alert in new_alerts {
-                match alert.severity {
-                    AlertSeverity::Info => {
-                        info!("🚨 ALERT [{}]: {}", alert.severity, alert.message)
-                    }
-                    AlertSeverity::Warning => {
-                        warn!("🚨 ALERT [{}]: {}", alert.severity, alert.message)
-                    }
-                    AlertSeverity::Error => {
-                        error!("🚨 ALERT [{}]: {}", alert.severity, alert.message)
-                    }
-                    AlertSeverity::Critical => {
-                        error!("🚨 CRITICAL ALERT [{}]: {}", alert.severity, alert.message)
-                    }
-                }
-            }
-        }
-    }
-
-    async fn should_send_alert(
-        alert_key: &str,
-        last_alert_times: &HashMap<String, DateTime<Utc>>,
-        now: DateTime<Utc>,
-        cooldown_seconds: u64,
-    ) -> bool {
-        if let Some(last_time) = last_alert_times.get(alert_key) {
-            let time_since_last = now.signed_duration_since(*last_time);
-            time_since_last.num_seconds() < cooldown_seconds as i64
-        } else {
-            true
-        }
-    }
-
-    pub async fn get_health_status(&self) -> serde_json::Value {
-        let health_checks = self.health_checks.read().await;
-        let alerts = self.alerts.read().await;
-
-        let mut overall_status = HealthStatus::Healthy;
-        let mut component_statuses = serde_json::Map::new();
-
-        for (component, check) in health_checks.iter() {
-            component_statuses.insert(
-                component.clone(),
-                serde_json::json!({
-                    "status": check.status,
-                    "message": check.message,
-                    "timestamp": check.timestamp,
-                    "details": check.details
-                }),
-            );
-
-            // Update overall status
-            match check.status {
-                HealthStatus::Unhealthy => overall_status = HealthStatus::Unhealthy,
-                HealthStatus::Degraded if matches!(overall_status, HealthStatus::Healthy) => {
-                    overall_status = HealthStatus::Degraded;
-                }
-                _ => {}
-            }
-        }
-
-        let active_alerts: Vec<&Alert> = alerts.iter().filter(|a| !a.resolved).collect();
-
-        serde_json::json!({
-            "overall_status": overall_status,
-            "components": component_statuses,
-            "active_alerts_count": active_alerts.len(),
-            "alerts": active_alerts.iter().map(|a| serde_json::json!({
-                "id": a.id,
-                "severity": a.severity,
-                "component": a.component,
-                "message": a.message,
-                "timestamp": a.timestamp,
-                "metadata": a.metadata,
-                "acknowledged": a.acknowledged,
-                "resolved": a.resolved
-            })).collect::<Vec<_>>(),
-            "timestamp": Utc::now()
-        })
-    }
-
-    pub async fn get_metrics_summary(&self) -> serde_json::Value {
-        self.metrics_aggregator.get_all_metrics().await
-    }
-
-    pub async fn acknowledge_alert(&self, alert_id: Uuid) -> Result<()> {
-        let mut alerts = self.alerts.write().await;
-        if let Some(alert) = alerts.iter_mut().find(|a| a.id == alert_id) {
-            alert.acknowledged = true;
-            info!("Alert {} acknowledged", alert_id);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Alert not found"))
-        }
-    }
-
-    pub async fn resolve_alert(&self, alert_id: Uuid) -> Result<()> {
-        let mut alerts = self.alerts.write().await;
-        if let Some(alert) = alerts.iter_mut().find(|a| a.id == alert_id) {
-            alert.resolved = true;
-            info!("Alert {} resolved", alert_id);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Alert not found"))
-        }
-    }
-
-    pub async fn clear_resolved_alerts(&self) -> Result<()> {
-        let mut alerts = self.alerts.write().await;
-        let initial_count = alerts.len();
-        alerts.retain(|a| !a.resolved);
-        let removed_count = initial_count - alerts.len();
-        info!("Cleared {} resolved alerts", removed_count);
-        Ok(())
-    }
-}
-
-// Phase 2.3: Advanced Monitoring Integration Methods
-// =================================================
-
-impl UltraOptimizedCDCEventProcessor {
-    /// Start the advanced monitoring system
-    pub async fn start_advanced_monitoring(
-        &mut self,
-        alert_config: Option<AlertConfig>,
-    ) -> Result<()> {
-        let alert_config = alert_config.unwrap_or_default();
-        let monitoring_system = AdvancedMonitoringSystem::new(alert_config);
-
-        let mut monitoring_guard = self.monitoring_system.lock().await;
-        *monitoring_guard = Some(monitoring_system);
-
-        let processor = Arc::new(self.clone());
-        if let Some(monitoring_system) = monitoring_guard.as_mut() {
-            monitoring_system.start_monitoring(processor).await?;
-        }
-
-        info!("Advanced monitoring system started");
-        Ok(())
-    }
-
-    /// Stop the advanced monitoring system
-    pub async fn stop_advanced_monitoring(&mut self) -> Result<()> {
-        let mut monitoring_guard = self.monitoring_system.lock().await;
-        if let Some(monitoring_system) = monitoring_guard.as_mut() {
-            monitoring_system.stop_monitoring().await?;
-        }
-        *monitoring_guard = None;
-
-        info!("Advanced monitoring system stopped");
-        Ok(())
-    }
-
-    /// Get comprehensive health status
-    pub async fn get_health_status(&self) -> Result<serde_json::Value> {
-        let monitoring_guard = self.monitoring_system.lock().await;
-        if let Some(monitoring_system) = monitoring_guard.as_ref() {
-            Ok(monitoring_system.get_health_status().await)
-        } else {
-            Err(anyhow::anyhow!("Advanced monitoring system not started"))
-        }
-    }
-
-    /// Get metrics summary with time-series data
-    pub async fn get_metrics_summary(&self) -> Result<serde_json::Value> {
-        let monitoring_guard = self.monitoring_system.lock().await;
-        if let Some(monitoring_system) = monitoring_guard.as_ref() {
-            Ok(monitoring_system.get_metrics_summary().await)
-        } else {
-            Err(anyhow::anyhow!("Advanced monitoring system not started"))
-        }
-    }
-
-    /// Acknowledge an alert
-    pub async fn acknowledge_alert(&self, alert_id: Uuid) -> Result<()> {
-        let monitoring_guard = self.monitoring_system.lock().await;
-        if let Some(monitoring_system) = monitoring_guard.as_ref() {
-            monitoring_system.acknowledge_alert(alert_id).await
-        } else {
-            Err(anyhow::anyhow!("Advanced monitoring system not started"))
-        }
-    }
-
-    /// Resolve an alert
-    pub async fn resolve_alert(&self, alert_id: Uuid) -> Result<()> {
-        let monitoring_guard = self.monitoring_system.lock().await;
-        if let Some(monitoring_system) = monitoring_guard.as_ref() {
-            monitoring_system.resolve_alert(alert_id).await
-        } else {
-            Err(anyhow::anyhow!("Advanced monitoring system not started"))
-        }
-    }
-
-    /// Clear resolved alerts
-    pub async fn clear_resolved_alerts(&self) -> Result<()> {
-        let monitoring_guard = self.monitoring_system.lock().await;
-        if let Some(monitoring_system) = monitoring_guard.as_ref() {
-            monitoring_system.clear_resolved_alerts().await
-        } else {
-            Err(anyhow::anyhow!("Advanced monitoring system not started"))
-        }
-    }
-
-    /// Graceful shutdown of the CDC event processor
-    pub async fn stop(&self) -> Result<()> {
-        info!("🛑 UltraOptimizedCDCEventProcessor: Starting graceful shutdown");
-
-        // Cancel shutdown token to signal all background tasks
-        self.shutdown_token.cancel();
-
-        // Stop advanced monitoring if running
-        let mut monitoring_guard = self.monitoring_system.lock().await;
-        if let Some(monitoring_system) = monitoring_guard.as_mut() {
-            if let Err(e) = monitoring_system.stop_monitoring().await {
-                warn!("⚠️ Failed to stop monitoring system: {}", e);
-            }
-        }
-        *monitoring_guard = None;
-
-        // Stop performance monitoring if running
-        let mut perf_monitor_guard = self.performance_monitor_handle.lock().await;
-        if let Some(handle) = perf_monitor_guard.take() {
-            if !handle.is_finished() {
-                let _ = handle.await;
-            }
-        }
-
-        // Stop batch processor if running
-        let mut batch_processor_guard = self.batch_processor_handle.lock().await;
-        if let Some(handle) = batch_processor_guard.take() {
-            if !handle.is_finished() {
-                let _ = handle.await;
-            }
-        }
-
-        // REMOVED: Accumulation flush task - using ProjectionStore standard batching instead
-
-        // Shutdown projection store
-        info!("🛑 UltraOptimizedCDCEventProcessor: Shutting down projection store");
-        if let Err(e) = self.projection_store.shutdown().await {
-            warn!("⚠️ Failed to shutdown projection store: {}", e);
-        } else {
-            info!("✅ UltraOptimizedCDCEventProcessor: Projection store shutdown complete");
-        }
-
-        // Wait a bit for all tasks to complete
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        info!("✅ UltraOptimizedCDCEventProcessor: Graceful shutdown complete");
-        Ok(())
-    }
-
-    /// Get comprehensive monitoring dashboard data
-    pub async fn get_monitoring_dashboard(&self) -> Result<serde_json::Value> {
-        let health_status = self.get_health_status().await?;
-        let metrics_summary = self.get_metrics_summary().await?;
-        let performance_stats = self.get_performance_stats().await;
-        let dlq_stats = self
-            .get_dlq_stats()
-            .await
-            .unwrap_or_else(|_| serde_json::json!({"error": "Failed to get DLQ stats"}));
-
-        Ok(serde_json::json!({
-            "health_status": health_status,
-            "metrics_summary": metrics_summary,
-            "performance_stats": performance_stats,
-            "dlq_stats": dlq_stats,
-            "timestamp": Utc::now(),
-            "version": "2.3.0"
-        }))
-    }
-
-    /// Get alert history
-    pub async fn get_alert_history(&self) -> Result<serde_json::Value> {
-        let monitoring_guard = self.monitoring_system.lock().await;
-        if let Some(monitoring_system) = monitoring_guard.as_ref() {
-            let alerts = monitoring_system.alerts.read().await;
-            Ok(serde_json::json!({
-                "alerts": alerts.iter().map(|a| serde_json::json!({
-                    "id": a.id,
-                    "severity": a.severity,
-                    "component": a.component,
-                    "message": a.message,
-                    "timestamp": a.timestamp,
-                    "metadata": a.metadata,
-                    "acknowledged": a.acknowledged,
-                    "resolved": a.resolved
-                })).collect::<Vec<_>>(),
-                "total_alerts": alerts.len(),
-                "active_alerts": alerts.iter().filter(|a| !a.resolved).count(),
-                "resolved_alerts": alerts.iter().filter(|a| a.resolved).count()
-            }))
-        } else {
-            Err(anyhow::anyhow!("Advanced monitoring system not started"))
-        }
-    }
-
-    /// Get system performance trends
-    pub async fn get_performance_trends(&self) -> Result<serde_json::Value> {
-        let monitoring_guard = self.monitoring_system.lock().await;
-        if let Some(monitoring_system) = monitoring_guard.as_ref() {
-            let metrics = monitoring_system.get_metrics_summary().await;
-
-            // Calculate trends from time-series data
-            let mut trends = serde_json::Map::new();
-
-            if let Some(events_processed) = metrics.get("events_processed_per_sec") {
-                trends.insert(
-                    "events_processed_trend".to_string(),
-                    events_processed.clone(),
-                );
-            }
-
-            if let Some(error_rate) = metrics.get("error_rate") {
-                trends.insert("error_rate_trend".to_string(), error_rate.clone());
-            }
-
-            if let Some(latency) = metrics.get("processing_latency_ms") {
-                trends.insert("latency_trend".to_string(), latency.clone());
-            }
-
-            if let Some(memory) = metrics.get("memory_usage_bytes") {
-                trends.insert("memory_trend".to_string(), memory.clone());
-            }
-
-            Ok(serde_json::Value::Object(trends))
-        } else {
-            Err(anyhow::anyhow!("Advanced monitoring system not started"))
-        }
-    }
-
-    /// Export monitoring data for external systems
-    pub async fn export_monitoring_data(&self) -> Result<serde_json::Value> {
-        let dashboard = self.get_monitoring_dashboard().await?;
-        let alert_history = self.get_alert_history().await?;
-        let performance_trends = self.get_performance_trends().await?;
-
-        Ok(serde_json::json!({
-            "export_timestamp": Utc::now(),
-            "system_info": {
-                "version": "2.3.0",
-                "component": "CDC Event Processor",
-                "export_format": "json"
-            },
-            "dashboard": dashboard,
-            "alert_history": alert_history,
-            "performance_trends": performance_trends
-        }))
-    }
-
-    /// Mark an aggregate as completed by CDC processing
-    pub async fn mark_aggregate_completed(&self, aggregate_id: Uuid) {
-        // This method can be called by external consistency managers
-        // when CDC events are successfully processed
-        info!(
-            "🟡 CDC Event Processor: Marked aggregate {} as completed",
-            aggregate_id
-        );
-
-        // If we have a consistency manager, mark the projection as completed
-        if let Some(ref consistency_manager) = self.consistency_manager {
-            info!(
-                "🟡 CDC Event Processor: Calling consistency manager for aggregate {}",
-                aggregate_id
-            );
-            consistency_manager
-                .mark_projection_completed(aggregate_id)
-                .await;
-            info!(
-                "🟡 CDC Event Processor: Successfully called consistency manager for aggregate {}",
-                aggregate_id
-            );
-
-            // Also mark CDC processing as completed
-            tracing::info!(
-                "CDC Event Processor: Marking CDC completed for aggregate {} (immediate)",
-                aggregate_id
-            );
-            consistency_manager.mark_completed(aggregate_id).await;
-            tracing::info!("CDC Event Processor: Successfully marked CDC completed for aggregate {} (immediate)", aggregate_id);
-        } else {
-            warn!(
-                "🟡 CDC Event Processor: No consistency manager available for aggregate {}",
-                aggregate_id
-            );
-        }
-    }
-
-    /// Mark an aggregate as failed by CDC processing
-    pub async fn mark_aggregate_failed(&self, aggregate_id: Uuid, error: String) {
-        // This method can be called by external consistency managers
-        // when CDC events fail to process
-        error!(
-            "CDC Event Processor: Marked aggregate {} as failed: {}",
-            aggregate_id, error
-        );
-
-        // If we have a consistency manager, mark the aggregate as failed
-        if let Some(ref consistency_manager) = self.consistency_manager {
-            consistency_manager
-                .mark_failed(aggregate_id, error.clone())
-                .await;
-        }
-    }
-
-    /// Set the consistency manager for this processor
-    pub async fn set_consistency_manager(&mut self, consistency_manager: Arc<ConsistencyManager>) {
-        self.consistency_manager = Some(consistency_manager);
-        info!("CDC Event Processor: Consistency manager set");
-    }
-}
-
-// REMOVED: Memory pool - overhead was too high
-
-/// NEW: Static version for AccountCreated events processing (without CDC Batching Service)
-async fn process_account_created_events_direct_copy_static(
-    account_created_events: HashMap<Uuid, Vec<ProcessableEvent>>,
-    projection_store: &Arc<dyn ProjectionStoreTrait>,
-    metrics: &Arc<EnhancedCDCMetrics>,
-) -> Result<(
-    Vec<crate::infrastructure::projections::AccountProjection>,
-    Vec<Uuid>,
-)> {
-    let mut new_projections = Vec::new();
-    let mut processed_aggregates = Vec::new();
-
-    // CRITICAL OPTIMIZATION: Build projections directly from AccountCreated events
-    for (aggregate_id, events) in account_created_events {
-        // AccountCreated events should have exactly one event
-        if let Some(event) = events.first() {
-            if let Ok(domain_event) = event.get_domain_event() {
-                if let crate::domain::AccountEvent::AccountCreated {
-                    owner_name,
-                    initial_balance,
-                    ..
-                } = domain_event
-                {
-                    // Create projection directly from AccountCreated event
-                    let projection = crate::infrastructure::projections::AccountProjection {
-                        id: aggregate_id,
-                        owner_name: owner_name.clone(),
-                        balance: *initial_balance,
-                        is_active: true,
-                        created_at: event.timestamp,
-                        updated_at: event.timestamp,
-                    };
-
-                    new_projections.push(projection);
-                    processed_aggregates.push(aggregate_id);
-
-                    tracing::debug!(
-                            "🚀 OPTIMIZED: Created projection from AccountCreated - account: {}, owner: {}, balance: {}",
-                            aggregate_id, owner_name, initial_balance
-                        );
-                }
-            }
-        }
-    }
-
-    // Use direct COPY for all AccountCreated events in static context
-    if !new_projections.is_empty() {
-        let batch_size = new_projections.len();
-        tracing::info!(
-            "🚀 DIRECT COPY: Using direct COPY for {} AccountCreated projections (static context)",
-            batch_size
-        );
-        if let Some(projection_store_impl) = projection_store
-            .as_any()
-            .downcast_ref::<crate::infrastructure::projections::ProjectionStore>(
-        ) {
-            projection_store_impl
-                .bulk_insert_new_accounts_with_copy(new_projections.clone())
-                .await?;
-        } else {
-            projection_store
-                .upsert_accounts_batch(new_projections.clone())
-                .await?;
-        }
-    }
-
-    Ok((new_projections, processed_aggregates))
 }

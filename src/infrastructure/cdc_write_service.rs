@@ -183,6 +183,7 @@ impl<T> LockedBatch<T> {
 }
 
 // OPTIMIZATION 8: Type-specific processors
+#[derive(Clone)]
 pub struct OptimizedCDCProcessor {
     // Lock-free processors for unique operations
     account_creation_batch: Arc<LockFreeBatch<AccountProjection>>,
@@ -228,6 +229,7 @@ impl ProcessorMetrics {
 
 impl OptimizedCDCProcessor {
     pub async fn new(projection_store: Arc<dyn ProjectionStoreTrait>) -> Self {
+        tracing::info!("Creating OptimizedCDCProcessor");
         Self {
             account_creation_batch: Arc::new(LockFreeBatch::new("ACCOUNT_CREATION".to_string())),
             transaction_creation_batch: Arc::new(LockFreeBatch::new(
@@ -242,6 +244,7 @@ impl OptimizedCDCProcessor {
 
     // OPTIMIZATION 9: Lock-free account creation submission
     pub async fn submit_account_creation(&self, account: AccountProjection) -> Result<Uuid> {
+        tracing::debug!("Submitting account creation");
         let operation_id = Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(1);
 
@@ -261,6 +264,7 @@ impl OptimizedCDCProcessor {
         &self,
         projections: Vec<(Uuid, AccountProjection)>,
     ) -> Result<Vec<Uuid>> {
+        tracing::debug!("Submitting account creations in bulk");
         let batch_size = projections.len();
         let mut operation_ids = Vec::with_capacity(batch_size);
         let mut batch_items = Vec::with_capacity(batch_size);
@@ -300,6 +304,7 @@ impl OptimizedCDCProcessor {
         &self,
         transaction: TransactionProjection,
     ) -> Result<Uuid> {
+        tracing::debug!("Submitting transaction creation");
         let operation_id = Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(1);
 
@@ -319,6 +324,7 @@ impl OptimizedCDCProcessor {
         &self,
         transactions: Vec<TransactionProjection>,
     ) -> Result<Vec<Uuid>> {
+        tracing::debug!("Submitting transaction creations in bulk");
         let mut operation_ids = Vec::with_capacity(transactions.len());
         let mut batch_items = Vec::with_capacity(transactions.len());
 
@@ -351,6 +357,7 @@ impl OptimizedCDCProcessor {
 
     // OPTIMIZATION 11: Locked account update submission (only when necessary)
     pub async fn submit_account_update(&self, account: AccountProjection) -> Result<Uuid> {
+        tracing::debug!("Submitting account update");
         let operation_id = Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(1);
 
@@ -373,6 +380,7 @@ impl OptimizedCDCProcessor {
         &self,
         projections: Vec<(Uuid, AccountProjection)>,
     ) -> Result<Vec<Uuid>> {
+        tracing::debug!("Submitting account updates in bulk");
         let mut operation_ids = Vec::with_capacity(projections.len());
         let mut batch_items = Vec::with_capacity(projections.len());
 
@@ -405,6 +413,7 @@ impl OptimizedCDCProcessor {
 
     // OPTIMIZATION 12: Parallel processing of all batch types
     pub async fn start_processing(&self) -> Result<()> {
+        tracing::info!("Starting OptimizedCDCProcessor processing");
         let account_creation_batch = self.account_creation_batch.clone();
         let transaction_creation_batch = self.transaction_creation_batch.clone();
         let account_update_batch = self.account_update_batch.clone();
@@ -444,13 +453,10 @@ impl OptimizedCDCProcessor {
 
         tracing::info!("🚀 Started optimized CDC processor with 3 specialized batch processors",);
 
-        // Wait for all processors (in production, you might handle this differently)
-        tokio::try_join!(
-            account_creation_handle,
-            transaction_creation_handle,
-            account_update_handle
-        )?;
-
+        // In a real service, you would store these handles to manage their lifecycle (e.g., for graceful shutdown).
+        // For this application's structure, we spawn them as background tasks that run indefinitely.
+        // We do NOT `await` or `join` them here, as that would block the `start_processing` call forever.
+        // The handles will be dropped, but the tasks will continue to run in the background.
         Ok(())
     }
 
@@ -462,6 +468,7 @@ impl OptimizedCDCProcessor {
         metrics: ProcessorMetrics,
     ) {
         let mut interval = tokio::time::interval(Duration::from_millis(5)); // Aggressive for lock-free
+        tracing::info!("Starting account creation batch processor");
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -549,6 +556,7 @@ impl OptimizedCDCProcessor {
         metrics: ProcessorMetrics,
     ) {
         let mut interval = tokio::time::interval(Duration::from_millis(5)); // Aggressive for lock-free
+        tracing::info!("Starting transaction creation batch processor");
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -645,6 +653,7 @@ impl OptimizedCDCProcessor {
         metrics: ProcessorMetrics,
     ) {
         let mut interval = tokio::time::interval(Duration::from_millis(10)); // Slower for locked operations
+        tracing::info!("Starting account update batch processor");
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -1836,6 +1845,7 @@ pub struct CDCBatchingConfig {
 
 impl Default for CDCBatchingConfig {
     fn default() -> Self {
+        tracing::info!("Loading CDCBatchingConfig from environment");
         Self {
             max_batch_size: get_cdc_default_batch_size(), // Standard batch size
             max_batch_wait_time_ms: get_cdc_write_batch_timeout_ms(), // Fast response time

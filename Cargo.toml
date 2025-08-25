@@ -41,7 +41,7 @@ byteorder = "1.4"
 # Database and persistence
 
 # Concurrency and performance
-rayon = "1.7"    # Data parallelism
+rayon = "1.8"    # Data parallelism
 crossbeam = "0.8" # Lock-free data structures
 # fxhash = "0.2"   # Fast hashing for partitioning
 

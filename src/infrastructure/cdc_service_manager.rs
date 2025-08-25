@@ -60,10 +60,6 @@ impl CDCServiceManager {
                 Default::default(),
             ),
         );
-        // Create CDC Batching Service first
-        let write_pool = pools
-            .select_pool(crate::infrastructure::connection_pool_partitioning::OperationType::Write)
-            .clone();
 
         let cdc_batching_service = OptimizedCDCProcessor::new(projection_store.clone()).await;
 
@@ -72,11 +68,9 @@ impl CDCServiceManager {
             cache_service,
             projection_store.clone(),
             metrics.clone(),
-            None,
             None, // Use default performance config
             consistency_manager.clone(),
-            Some(Arc::new(write_pool)),
-            Some(Arc::new(cdc_batching_service)),
+            Some(Arc::new(cdc_batching_service.clone())),
         ));
 
         Ok(Self {
@@ -92,7 +86,7 @@ impl CDCServiceManager {
             optimization_config,
             consistency_manager,
             outbox_cleaner: None,
-            cdc_batching_service: None,
+            cdc_batching_service: Some(Arc::new(cdc_batching_service)),
         })
     }
 
@@ -182,36 +176,15 @@ impl CDCServiceManager {
         let consumer_handle = self.start_resilient_consumer().await?;
         tasks.push(consumer_handle);
 
-        // Start event processor's batch processor
-        tracing::info!("CDC Service Manager: Starting event processor's batch processor...");
-        let processor_clone = self.processor.clone();
-
-        match UltraOptimizedCDCEventProcessor::enable_and_start_batch_processor_arc(processor_clone)
-            .await
-        {
-            Ok(_) => {
-                tracing::info!("CDC Service Manager: ✅ Event processor's batch processor started successfully");
-            }
-            Err(e) => {
-                tracing::error!(
-                    "CDC Service Manager: Failed to start event processor's batch processor: {}",
-                    e
-                );
-                return Err(e);
-            }
-        }
-
-        // Get CDC Batching Service from processor for CDCServiceManager access
-        if let Some(cdc_batching_service) = self.processor.get_cdc_batching_service() {
-            self.cdc_batching_service = Some(cdc_batching_service.clone());
-            tracing::info!("CDC Service Manager: CDC Batching Service retrieved from processor");
-
-            // Start CDC Batching Service
-            tracing::info!("CDC Service Manager: Starting CDC Batching Service...");
+        // Start the dedicated CDC write service (batching service)
+        if let Some(cdc_batching_service) = &self.cdc_batching_service {
+            info!("CDC Service Manager: Starting CDC Batching Service...");
+            // This call spawns background tasks and returns immediately.
+            // It should NOT be awaited if it's designed to run indefinitely.
             cdc_batching_service.start_processing().await?;
             tracing::info!("CDC Service Manager: ✅ CDC Batching Service started successfully");
         } else {
-            tracing::warn!("CDC Service Manager: CDC Batching Service not available");
+            warn!("CDC Service Manager: CDC Batching Service not available, write performance will be degraded.");
         }
 
         tracing::info!("CDC Service Manager: ✅ Core services started");
@@ -578,14 +551,14 @@ impl CDCServiceManager {
 
         // Shutdown CDC event processor
         info!("🛑 CDCServiceManager: Shutting down CDC event processor");
-        if let Err(e) = self.processor.stop().await {
-            warn!(
-                "⚠️ CDCServiceManager: Failed to shutdown CDC event processor: {}",
-                e
-            );
-        } else {
-            info!("✅ CDCServiceManager: CDC event processor shutdown complete");
-        }
+        // if let Err(e) = self.processor.stop().await {
+        //     warn!(
+        //         "⚠️ CDCServiceManager: Failed to shutdown CDC event processor: {}",
+        //         e
+        //     );
+        // } else {
+        //     info!("✅ CDCServiceManager: CDC event processor shutdown complete");
+        // }
 
         // Wait for all tasks to complete with timeout
         let shutdown_timeout =
@@ -757,44 +730,6 @@ impl CDCServiceManager {
     /// Get the CDC Batching Service if available
     pub fn get_cdc_batching_service(&self) -> Option<Arc<OptimizedCDCProcessor>> {
         self.cdc_batching_service.clone()
-    }
-
-    /// Ensure batch processing is enabled and started
-    pub async fn ensure_batch_processing_enabled(&self) -> Result<()> {
-        // Check if batch processing is enabled in config
-        if !self.optimization_config.enable_batching {
-            tracing::warn!(
-                "CDC Service Manager: Batch processing is disabled in config, enabling it..."
-            );
-        }
-
-        // Check if batch processor is already running
-        if !self.processor.is_batch_processor_running().await {
-            tracing::info!("CDC Service Manager: Starting batch processor...");
-
-            // Start the batch processor
-            UltraOptimizedCDCEventProcessor::enable_and_start_batch_processor_arc(
-                self.processor.clone(),
-            )
-            .await?;
-
-            tracing::info!("CDC Service Manager: ✅ Batch processor started successfully");
-        } else {
-            tracing::info!("CDC Service Manager: ✅ Batch processor is already running");
-        }
-
-        Ok(())
-    }
-
-    /// Get the CDC event processor with batch processing enabled
-    pub async fn get_processor_with_batch_enabled(
-        &self,
-    ) -> Result<Arc<UltraOptimizedCDCEventProcessor>> {
-        // Ensure batch processing is enabled
-        self.ensure_batch_processing_enabled().await?;
-
-        // Return the processor
-        Ok(self.processor.clone())
     }
 }
 

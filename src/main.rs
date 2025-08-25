@@ -264,14 +264,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         manager.start().await?;
         info!("CDC Service Manager started.");
 
-        // Get the processor with batch processing enabled
-        let processor = manager.get_processor_with_batch_enabled().await?;
-        info!("CDC Event Processor with batch processing enabled retrieved");
-
-        // Verify batch processing is enabled
-        let is_batch_running = processor.is_batch_processor_running().await;
-        info!("CDC Batch Processor running: {}", is_batch_running);
-
         cdc_service_manager = Some(manager);
     } else if app_config.data_capture.method == DataCaptureMethod::OutboxPoller {
         info!("Using Outbox Poller for data capture");
