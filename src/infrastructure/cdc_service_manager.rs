@@ -1,3 +1,4 @@
+use crate::infrastructure::cache_models::ProjectionCacheEntry;
 use crate::infrastructure::cache_service::CacheServiceTrait;
 use crate::infrastructure::cdc_debezium::{CDCConsumer, CDCOutboxRepository, DebeziumConfig};
 use crate::infrastructure::cdc_event_processor::UltraOptimizedCDCEventProcessor;
@@ -9,6 +10,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
+use moka::future::Cache;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
@@ -46,6 +48,7 @@ impl CDCServiceManager {
         cache_service: Arc<dyn CacheServiceTrait>,
         pools: Arc<crate::infrastructure::connection_pool_partitioning::PartitionedPools>,
         metrics: Option<Arc<EnhancedCDCMetrics>>,
+        projection_cache: Cache<Uuid, ProjectionCacheEntry>,
         consistency_manager: Option<
             Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
         >,
@@ -58,6 +61,7 @@ impl CDCServiceManager {
             crate::infrastructure::projections::ProjectionStore::from_pools_with_config(
                 pools.clone(),
                 Default::default(),
+                projection_cache.clone(),
             ),
         );
 
@@ -70,6 +74,7 @@ impl CDCServiceManager {
             metrics.clone(),
             None, // Use default performance config
             consistency_manager.clone(),
+            projection_cache.clone(),
             Some(Arc::new(cdc_batching_service.clone())),
         ));
 
@@ -176,14 +181,7 @@ impl CDCServiceManager {
         let consumer_handle = self.start_resilient_consumer().await?;
         tasks.push(consumer_handle);
 
-        // Start the dedicated CDC write service (batching service)
-        if let Some(cdc_batching_service) = &self.cdc_batching_service {
-            info!("CDC Service Manager: Starting CDC Batching Service...");
-            // This call spawns background tasks and returns immediately.
-            // It should NOT be awaited if it's designed to run indefinitely.
-            cdc_batching_service.start_processing().await?;
-            tracing::info!("CDC Service Manager: ✅ CDC Batching Service started successfully");
-        } else {
+        if self.cdc_batching_service.is_none() {
             warn!("CDC Service Manager: CDC Batching Service not available, write performance will be degraded.");
         }
 
@@ -461,9 +459,7 @@ impl CDCServiceManager {
         let optimization_config = self.optimization_config.clone();
 
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(
-                optimization_config.metrics_flush_interval_secs,
-            ));
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
             let mut last_processed = 0u64;
             let mut last_time = std::time::Instant::now();
 
@@ -492,10 +488,15 @@ impl CDCServiceManager {
                         } else {
                             0
                         };
-                        metrics.error_rate.store(error_rate, std::sync::atomic::Ordering::Relaxed);
+                        let cache_hits = metrics.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
+                        let cache_misses = metrics.cache_misses.load(std::sync::atomic::Ordering::Relaxed);
+                        let total_lookups = cache_hits + cache_misses;
+                        let hit_rate = if total_lookups > 0 { (cache_hits as f64 / total_lookups as f64) * 100.0 } else { 0.0 };
 
-                        tracing::debug!("Metrics: Processed: {}, Failed: {}, Throughput: {}/s, Error Rate: {}%",
-                                       current_processed, failed, throughput, error_rate);
+                        tracing::info!(
+                            "CDC Metrics: Processed={}, Failed={}, Throughput={}/s, ErrorRate={:.2}%, CacheHits={}, CacheMisses={}, CacheHitRate={:.2}%",
+                            current_processed, failed, throughput, error_rate, cache_hits, cache_misses, hit_rate
+                        );
                     }
                 }
             }
@@ -619,7 +620,9 @@ impl CDCServiceManager {
                 "consumer_restarts": self.metrics.consumer_restarts.load(std::sync::atomic::Ordering::Relaxed),
                 "circuit_breaker_trips": self.metrics.circuit_breaker_trips.load(std::sync::atomic::Ordering::Relaxed),
                 "memory_usage_mb": self.metrics.memory_usage_bytes.load(std::sync::atomic::Ordering::Relaxed) / 1024 / 1024,
-                "cleanup_cycles": self.metrics.cleanup_cycles.load(std::sync::atomic::Ordering::Relaxed)
+                "cleanup_cycles": self.metrics.cleanup_cycles.load(std::sync::atomic::Ordering::Relaxed),
+                "cache_hits": self.metrics.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+                "cache_misses": self.metrics.cache_misses.load(std::sync::atomic::Ordering::Relaxed)
             }
         })
     }
@@ -825,8 +828,9 @@ impl CDCHealthCheck {
                 "projection_updates": self.metrics.projection_updates.load(std::sync::atomic::Ordering::Relaxed),
                 "batches_processed": self.metrics.batches_processed.load(std::sync::atomic::Ordering::Relaxed),
                 "consumer_restarts": self.metrics.consumer_restarts.load(std::sync::atomic::Ordering::Relaxed),
-                "circuit_breaker_trips": self.metrics.circuit_breaker_trips.load(std::sync::atomic::Ordering::Relaxed),
-                "memory_usage_mb": self.metrics.memory_usage_bytes.load(std::sync::atomic::Ordering::Relaxed) / 1024 / 1024
+                "circuit_breaker_trips": self.metrics.circuit_breaker_trips.load(std::sync::atomic::Ordering::Relaxed), "memory_usage_mb": self.metrics.memory_usage_bytes.load(std::sync::atomic::Ordering::Relaxed) / 1024 / 1024,
+                "cache_hits": self.metrics.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+                "cache_misses": self.metrics.cache_misses.load(std::sync::atomic::Ordering::Relaxed)
             }
         })
     }
@@ -903,6 +907,10 @@ pub struct EnhancedCDCMetrics {
 
     // Duplicate detection
     pub duplicate_events_skipped: std::sync::atomic::AtomicU64,
+
+    // L1 Cache Metrics
+    pub cache_hits: std::sync::atomic::AtomicU64,
+    pub cache_misses: std::sync::atomic::AtomicU64,
 
     // Batch processing metrics
     pub batch_processing_duration: std::sync::atomic::AtomicU64,
@@ -997,6 +1005,12 @@ impl Clone for EnhancedCDCMetrics {
                 self.duplicate_events_skipped
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
+            cache_hits: std::sync::atomic::AtomicU64::new(
+                self.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            cache_misses: std::sync::atomic::AtomicU64::new(
+                self.cache_misses.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             batch_processing_duration: std::sync::atomic::AtomicU64::new(
                 self.batch_processing_duration
                     .load(std::sync::atomic::Ordering::Relaxed),
@@ -1039,6 +1053,8 @@ impl Default for EnhancedCDCMetrics {
             duplicate_events_skipped: std::sync::atomic::AtomicU64::new(0),
             batch_processing_duration: std::sync::atomic::AtomicU64::new(0),
             batch_processing_errors: std::sync::atomic::AtomicU64::new(0),
+            cache_hits: std::sync::atomic::AtomicU64::new(0),
+            cache_misses: std::sync::atomic::AtomicU64::new(0),
             integration_helper_initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }

@@ -42,14 +42,14 @@ pub mod redis_lock_monitor;
 pub mod repository;
 pub mod scaling;
 // pub mod separate_process_save;
+pub mod cache_models;
 pub mod sharding;
 pub mod shutdown;
 pub mod stuck_operation_diagnostic;
 pub mod timeout_manager;
 pub mod troubleshooting;
 pub mod user_repository; // Added for OutboxPollingService
-pub mod write_batching; // Added write batching // Added CDC batching service
-
+pub mod write_batching; // Added write batching // Added CDC batching service // Added cache models
 pub use auth::*;
 pub use binary_utils::*; // Added binary utils exports
 pub use cache_service::*;
@@ -88,7 +88,8 @@ pub use repository::*;
 pub use repository::{AccountRepository, AccountRepositoryTrait, RepositoryError};
 pub use scaling::*;
 // pub use separate_process_save::*;
+pub use cache_models::*;
 pub use sharding::*;
 pub use user_repository::*;
 pub use user_repository::{NewUser, User, UserRepository, UserRepositoryError}; // Added re-export // Added for OutboxPollingService
-pub use write_batching::*; // Added write batching exports // Added CDC batching service exports
+pub use write_batching::*; // Added write batching exports // Added CDC batching service exports // Added cache models exports

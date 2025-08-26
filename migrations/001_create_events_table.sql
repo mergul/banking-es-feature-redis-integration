@@ -13,6 +13,55 @@ CREATE TABLE IF NOT EXISTS events (
 ) PARTITION BY RANGE (timestamp);
 
 -- Create monthly partitions with optimized fillfactor
+CREATE TABLE IF NOT EXISTS events_2024_01 PARTITION OF events
+    FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_02 PARTITION OF events
+    FOR VALUES FROM ('2024-02-01') TO ('2024-03-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_03 PARTITION OF events
+    FOR VALUES FROM ('2024-03-01') TO ('2024-04-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_04 PARTITION OF events
+    FOR VALUES FROM ('2024-04-01') TO ('2024-05-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_05 PARTITION OF events
+    FOR VALUES FROM ('2024-05-01') TO ('2024-06-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_06 PARTITION OF events
+    FOR VALUES FROM ('2024-06-01') TO ('2024-07-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_07 PARTITION OF events
+    FOR VALUES FROM ('2024-07-01') TO ('2024-08-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_08 PARTITION OF events
+    FOR VALUES FROM ('2024-08-01') TO ('2024-09-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_09 PARTITION OF events
+    FOR VALUES FROM ('2024-09-01') TO ('2024-10-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_10 PARTITION OF events
+    FOR VALUES FROM ('2024-10-01') TO ('2024-11-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_11 PARTITION OF events
+    FOR VALUES FROM ('2024-11-01') TO ('2024-12-01')
+    WITH (fillfactor = 90);
+
+CREATE TABLE IF NOT EXISTS events_2024_12 PARTITION OF events
+    FOR VALUES FROM ('2024-12-01') TO ('2025-01-01')
+    WITH (fillfactor = 90);
+
+-- Create partitions for 2025
 CREATE TABLE IF NOT EXISTS events_2025_01 PARTITION OF events
     FOR VALUES FROM ('2025-01-01') TO ('2025-02-01')
     WITH (fillfactor = 90);
@@ -114,9 +163,9 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_version
     ON snapshots (version)
     WITH (fillfactor = 90);
 
--- Add GIN index for JSONB queries (GIN indexes don't support fillfactor)
-CREATE INDEX IF NOT EXISTS idx_snapshots_data_gin
-    ON snapshots USING GIN (snapshot_data jsonb_path_ops);
+-- Note: GIN index on snapshot_data removed since it will be converted to BYTEA in later migration
+-- CREATE INDEX IF NOT EXISTS idx_snapshots_data_gin
+--     ON snapshots USING GIN (snapshot_data jsonb_path_ops);
 
 -- Optional: Create a function to automatically create future partitions
 CREATE OR REPLACE FUNCTION create_monthly_partition(table_name TEXT, start_date DATE)

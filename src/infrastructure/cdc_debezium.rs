@@ -4,8 +4,9 @@ use crate::infrastructure::connection_pool_partitioning::{
 };
 use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
-use crate::infrastructure::CopyOptimizationConfig;
-use anyhow::Result;
+use crate::infrastructure::{AccountProjection, CopyOptimizationConfig, TransactionProjection};
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rdkafka::consumer::{CommitMode, Consumer};
@@ -30,6 +31,9 @@ use crate::infrastructure::binary_utils::{PgCopyBinaryWriter, ToPgCopyBinary};
 use crate::infrastructure::cdc_event_processor::{
     BusinessLogicConfig, UltraOptimizedCDCEventProcessor,
 };
+use crate::infrastructure::cdc_event_processor::{
+    EventBatches, ProcessableEvent, ProjectionBatches,
+};
 use crate::infrastructure::cdc_integration_helper::{
     CDCIntegrationConfig, CDCIntegrationHelper, CDCIntegrationHelperBuilder,
     MigrationIntegrityReport, MigrationStats,
@@ -37,11 +41,16 @@ use crate::infrastructure::cdc_integration_helper::{
 use crate::infrastructure::cdc_producer::{BusinessLogicValidator, CDCProducer, CDCProducerConfig};
 use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::event_processor::EventProcessor;
+use futures::future::join_all;
 use futures::stream::StreamExt;
 use rayon::prelude::*;
 use sqlx::types::JsonValue;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::Stream;
+use tokio_stream::StreamExt as TokioStreamExt;
 use tokio_util::sync::CancellationToken;
 
 /// Kafka message structure for CDC events
@@ -1245,403 +1254,97 @@ impl CDCConsumer {
         self.cdc_topic = topic_to_subscribe.clone();
         // Subscribe to CDC topic and join consumer group
         tracing::info!("CDCConsumer: Subscribing to topic: {}", self.cdc_topic);
-
-        // Subscribe to topic - this will trigger consumer group join
-        self.kafka_consumer
-            .subscribe_to_topic(&self.cdc_topic)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to subscribe to CDC topic: {}", e))?;
-
-        // Give Kafka consumer time to join the group (subscription triggers join)
-        // Consumer group join is asynchronous and doesn't require polling
-        tracing::info!("CDCConsumer: Waiting for consumer group join to complete...");
-
-        // CRITICAL FIX: Don't wait for messages - just give Kafka client time to complete group join protocol
-        // The real issue was waiting for messages in an empty topic
-        tokio::time::sleep(Duration::from_millis(2000)).await; // 2 seconds is enough for group join
-
-        tracing::info!("CDCConsumer: ✅ Consumer group join wait completed - consumer is ready");
-
-        tracing::info!(
-            "CDCConsumer: ✅ Successfully subscribed to topic: {} and joined consumer group",
-            self.cdc_topic
-        );
-
-        tracing::info!(
-            "CDCConsumer: Starting main consumption loop for topic: {}",
-            self.cdc_topic
-        );
-        let mut poll_count = 0;
-        let mut last_log_time = std::time::Instant::now();
-        let mut consecutive_empty_polls = 0;
-        let max_consecutive_empty_polls = 100; // Log warning after 100 empty polls
-        let max_concurrent = 32; // Tune as needed
-        let semaphore = Arc::new(Semaphore::new(max_concurrent));
-        let offsets = Arc::new(Mutex::new(Vec::<(String, i32, i64)>::new()));
-        let offsets_clone = offsets.clone();
-        let (dlq_tx, mut dlq_rx) =
-            mpsc::channel::<(String, i32, i64, Vec<u8>, Option<Vec<u8>>, String)>(1000);
-        let kafka_consumer = self.kafka_consumer.clone();
-        let shutdown_token_clone = shutdown_token.clone();
-
-        // Background offset committer
-        tokio::spawn(async move {
-            let mut last_commit_time = std::time::Instant::now();
-
-            // Read timing configuration from environment variables
-            // CRITICAL: Adjusted for Debezium's 5ms poll interval
-            let offset_commit_sleep_ms = std::env::var("CDC_OFFSET_COMMIT_SLEEP_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(10); // Reduced from 50ms to 10ms to match Debezium's 5ms poll
-
-            let offset_commit_batch_size = std::env::var("CDC_OFFSET_COMMIT_BATCH_SIZE")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(5000);
-
-            let offset_commit_timeout_ms = std::env::var("CDC_OFFSET_COMMIT_TIMEOUT_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(25); // Reduced from 100ms to 25ms to match Debezium's 5ms poll
-
-            tracing::info!(
-                "Offset committer config - sleep: {}ms, batch_size: {}, timeout: {}ms (optimized for Debezium 5ms poll)",
-                offset_commit_sleep_ms, offset_commit_batch_size, offset_commit_timeout_ms
-            );
-
-            loop {
-                tokio::select! {
-                    _ = shutdown_token_clone.cancelled() => {
-                        tracing::info!("Background offset committer: Received shutdown signal");
-                        break;
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(offset_commit_sleep_ms)) => {
-                        let mut offsets = offsets_clone.lock().await;
-                        let should_commit = offsets.len() >= offset_commit_batch_size ||
-                                           last_commit_time.elapsed() > std::time::Duration::from_millis(offset_commit_timeout_ms);
-
-                        if should_commit && !offsets.is_empty() {
-                            // Only commit the highest offset per (topic, partition)
-                            let mut highest: HashMap<(String, i32), i64> = HashMap::new();
-                            for (topic, partition, offset) in offsets.drain(..) {
-                                let key = (topic.clone(), partition);
-                                highest
-                                    .entry(key)
-                                    .and_modify(|v| *v = (*v).max(offset))
-                                    .or_insert(offset);
-                            }
-                            let offset_count = highest.len(); // Store length before moving
-                            let mut tpl = TopicPartitionList::new();
-                            for ((topic, partition), offset) in highest {
-                                tpl.add_partition_offset(&topic, partition, Offset::Offset(offset + 1))
-                                    .unwrap();
-                            }
-                            if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
-                                tracing::error!("Failed to batch commit offsets: {}", e);
-                            } else {
-                                tracing::info!("✅ Successfully committed {} offsets", offset_count);
-                                last_commit_time = std::time::Instant::now();
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Final commit on shutdown
-            let mut offsets = offsets_clone.lock().await;
-            if !offsets.is_empty() {
-                let mut highest: HashMap<(String, i32), i64> = HashMap::new();
-                for (topic, partition, offset) in offsets.drain(..) {
-                    let key = (topic.clone(), partition);
-                    highest
-                        .entry(key)
-                        .and_modify(|v| *v = (*v).max(offset))
-                        .or_insert(offset);
-                }
-                let mut tpl = TopicPartitionList::new();
-                for ((topic, partition), offset) in highest {
-                    tpl.add_partition_offset(&topic, partition, Offset::Offset(offset + 1))
-                        .unwrap();
-                }
-                if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
-                    tracing::error!("Failed to final commit offsets on shutdown: {}", e);
-                } else {
-                    tracing::info!("✅ Final commit on shutdown completed");
-                }
-            }
-        });
-
-        // Background DLQ handler (batch)
-        let dlq_producer = processor.clone();
-        let shutdown_token_dlq = shutdown_token.clone();
-        tokio::spawn(async move {
-            // Read DLQ configuration from environment variables
-            // CRITICAL: Adjusted for Debezium's 5ms poll interval
-            let dlq_batch_size = std::env::var("CDC_DLQ_BATCH_SIZE")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(50); // Reduced from 500 to 50 for faster processing
-
-            let dlq_timeout_ms = std::env::var("CDC_DLQ_TIMEOUT_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(100); // Reduced from 500ms to 100ms for faster processing
-
-            tracing::info!(
-                "DLQ handler config - batch_size: {}, timeout: {}ms (optimized for Debezium 5ms poll)",
-                dlq_batch_size, dlq_timeout_ms
-            );
-
-            let mut batch = Vec::with_capacity(dlq_batch_size);
-            let mut last_send = std::time::Instant::now();
-            loop {
-                tokio::select! {
-                    _ = shutdown_token_dlq.cancelled() => {
-                        tracing::info!("Background DLQ handler: Received shutdown signal");
-                        break;
-                    }
-                    Some((topic, partition, offset, payload, key, error)) = dlq_rx.recv() => {
-                        batch.push((topic, partition, offset, payload, key, error));
-                        if batch.len() >= dlq_batch_size || last_send.elapsed() > std::time::Duration::from_millis(dlq_timeout_ms) {
-                            let to_send = std::mem::take(&mut batch);
-                            for (topic, partition, offset, payload, key, error) in to_send {
-                                if let Err(e) = dlq_producer
-                                    .send_to_dlq_from_cdc_parts(
-                                        &topic,
-                                        partition,
-                                        offset,
-                                        &payload,
-                                        key.as_deref(),
-                                        &error,
-                                    )
-                                    .await
-                                {
-                                    tracing::error!("Failed to send to DLQ: {}", e);
-                                }
-                            }
-                            last_send = std::time::Instant::now();
-                        }
-                    }
-                    else => {
-                        if !batch.is_empty() {
-                            let to_send = std::mem::take(&mut batch);
-                            for (topic, partition, offset, payload, key, error) in to_send {
-                                if let Err(e) = dlq_producer
-                                    .send_to_dlq_from_cdc_parts(
-                                        &topic,
-                                        partition,
-                                        offset,
-                                        &payload,
-                                        key.as_deref(),
-                                        &error,
-                                    )
-                                    .await
-                                {
-                                    tracing::error!("Failed to send to DLQ: {}", e);
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // Final DLQ processing on shutdown
-            if !batch.is_empty() {
-                let to_send = std::mem::take(&mut batch);
-                for (topic, partition, offset, payload, key, error) in to_send {
-                    if let Err(e) = dlq_producer
-                        .send_to_dlq_from_cdc_parts(
-                            &topic,
-                            partition,
-                            offset,
-                            &payload,
-                            key.as_deref(),
-                            &error,
-                        )
-                        .await
-                    {
-                        tracing::error!("Failed to send to DLQ on shutdown: {}", e);
-                    }
-                }
-            }
-        });
-        // SOLUTION 1: Create processing channel to decouple consumer from processor
-        let (batch_tx, mut batch_rx) = mpsc::channel::<Vec<serde_json::Value>>(100); // Buffer up to 100 batches
-
-        // SOLUTION 2: Spawn dedicated processing workers (multiple workers for parallel processing)
-        let max_concurrent_batches = std::env::var("CDC_MAX_CONCURRENT_TASKS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(32); // Process up to 32 tasks concurrently
-
-        tracing::info!("Starting {} CDC processing workers", max_concurrent_batches);
-
-        let mut worker_senders = Vec::new();
-        let worker_selector = Arc::new(AtomicUsize::new(0));
-
-        for worker_id in 0..max_concurrent_batches {
-            let (worker_tx, mut worker_rx) = mpsc::channel::<Vec<serde_json::Value>>(25); // Smaller buffer per worker
-            worker_senders.push(worker_tx);
-
-            let worker_processor = processor.clone();
-            let worker_shutdown = shutdown_token.clone();
-
-            tokio::spawn(async move {
-                tracing::info!("CDC Worker {} started with dedicated channel", worker_id);
-
-                loop {
-                    tokio::select! {
-                        _ = worker_shutdown.cancelled() => {
-                            tracing::info!("CDC Worker {} shutting down", worker_id);
-                            break;
-                        }
-                        Some(mut events) = worker_rx.recv() => {
-                            let start_time = std::time::Instant::now();
-
-                            match worker_processor.process_cdc_events_batch(&mut events).await {
-                                Ok(_) => {
-                                    let duration = start_time.elapsed();
-                                    tracing::debug!(
-                                        "Worker {} processed {} events in {:?}",
-                                        worker_id,
-                                        events.len(),
-                                        duration
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!("Worker {} processing failed: {}", worker_id, e);
-                                    // Optionally send to DLQ here
-                                }
-                            }
-                        }
-                        else => {
-                            tracing::debug!("Worker {} channel closed", worker_id);
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-
-        let mut message_stream = self.kafka_consumer.stream();
-
-        // Read CDC polling interval from environment variable
-        let poll_interval_ms = std::env::var("CDC_POLL_INTERVAL_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(5); // CRITICAL FIX: Increased from 5ms to 100ms to prevent consumer group ejection
-
-        // CRITICAL OPTIMIZATION: Batch processing configuration
-        let batch_size = std::env::var("CDC_BATCH_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(5000);
-
-        let batch_timeout_ms = std::env::var("CDC_BATCH_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(25); // 5x poll interval (5ms * 5 = 25ms)
-
-        tracing::info!(
-            "CDCConsumer: Using polling interval: {}ms, batch_size: {}, batch_timeout: {}ms",
-            poll_interval_ms,
-            batch_size,
-            batch_timeout_ms
-        );
-
-        // CRITICAL OPTIMIZATION: Batch processing buffer
-        let mut message_batch = Vec::with_capacity(batch_size);
-        let mut cdc_events_buffer: Vec<serde_json::Value> = Vec::with_capacity(batch_size);
-        let mut last_batch_time = std::time::Instant::now();
-        let commit_every_n_batches = std::env::var("CDC_COMMIT_EVERY_N_BATCHES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(10); // Commit every 10 batches instead of every batch
-
-        tracing::info!("Starting ultra-fast consumer loop with round-robin distribution");
-
-        loop {
-            tokio::select! {
-                _ = shutdown_token.cancelled() => {
-                    tracing::info!("Consumer received shutdown signal");
-
-                    // Process remaining messages
-                    if !message_batch.is_empty() {
-                        Self::parse_and_distribute_batch(
-                            &message_batch,
-                            &mut cdc_events_buffer,
-                            &worker_senders,
-                            &worker_selector
-                        ).await;
-                    }
-                    break;
-                }
-
-                message_result = tokio::time::timeout(
-                    Duration::from_millis(poll_interval_ms * 2), // Optimal: 2x poll interval (10ms)
-                    message_stream.next()
-                ) => {
-                    match message_result {
-                        Ok(Some(Ok(message))) => {
-                            let kafka_message = Self::convert_message_fast(message);
-                            message_batch.push(kafka_message);
-
-                            let should_process = message_batch.len() >= batch_size ||
-                                               last_batch_time.elapsed() > Duration::from_millis(batch_timeout_ms);
-
-                            if should_process {
-                                Self::parse_and_distribute_batch(
-                                    &message_batch,
-                                    &mut cdc_events_buffer,
-                                    &worker_senders,
-                                    &worker_selector
-                                ).await;
-
-                                message_batch.clear();
-                                cdc_events_buffer.clear();
-                                last_batch_time = std::time::Instant::now();
-                            } // IMPORTANT: Update last_batch_time when first message arrives
-                            else if message_batch.len() == 1 {
-                                last_batch_time = std::time::Instant::now();
-                            }
-                        }
-                        Ok(Some(Err(e))) => {
-                            tracing::error!("Message receive error: {:?}", e);
-                        }
-                        Ok(None) => {
-                            tracing::info!("Message stream ended");
-                            // Process remaining messages before breaking
-                            if !message_batch.is_empty() {
-                                Self::parse_and_distribute_batch(
-                                    &message_batch,
-                                    &mut cdc_events_buffer,
-                                    &worker_senders,
-                                    &worker_selector
-                                ).await;
-                            }
-                            break;
-                        }
-                        Err(_) => {
-                            if !message_batch.is_empty() {
-                                Self::parse_and_distribute_batch(
-                                    &message_batch,
-                                    &mut cdc_events_buffer,
-                                    &worker_senders,
-                                    &worker_selector
-                                ).await;
-                                message_batch.clear();
-                                cdc_events_buffer.clear();
-                                last_batch_time = std::time::Instant::now();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+        let handles = self
+            .start_staged_processing(processor, shutdown_token)
+            .await?;
+        join_all(handles).await;
         Ok(())
+    }
+
+    /// Orchestrates the staged event processing pipeline.
+    pub async fn start_staged_processing(
+        &mut self,
+        processor: Arc<UltraOptimizedCDCEventProcessor>,
+        shutdown_token: CancellationToken,
+    ) -> Result<Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>>> {
+        info!("🚀 Initializing Staged Event Processing Pipeline...");
+        const NUM_SHARDS: usize = 8;
+
+        // --- Channel Setup ---
+        const CHANNEL_CAPACITY: usize = 20000;
+
+        // Create a set of channels for each shard
+        // NEW: A single, shared channel for all account creations
+        let (creation_tx, creation_rx) = mpsc::channel(CHANNEL_CAPACITY * NUM_SHARDS);
+        let (modifications_txs, mut modifications_rxs): (
+            Vec<mpsc::Sender<Vec<ProcessableEvent>>>,
+            Vec<_>,
+        ) = (0..NUM_SHARDS)
+            .map(|_| mpsc::channel(CHANNEL_CAPACITY))
+            .unzip();
+        // NEW: A single, shared channel for all prepared account updates
+        let (prepared_tx, prepared_rx) = mpsc::channel(CHANNEL_CAPACITY * NUM_SHARDS);
+        // NEW: A single, shared channel for all transaction projections
+        let (transactions_tx, transactions_rx) = mpsc::channel(CHANNEL_CAPACITY * NUM_SHARDS);
+
+        // --- Task Spawning ---
+        let mut handles = Vec::new();
+
+        // Stage 1: Consume and Distribute (1 worker, distributing to N channels)
+        let consume_handle = tokio::spawn(Self::consume_and_distribute_task(
+            self.kafka_consumer.clone(),
+            self.cdc_topic.clone(),
+            processor.clone(),
+            creation_tx.clone(), // Clone for the consumer task
+            modifications_txs,
+            shutdown_token.clone(),
+        ));
+        handles.push(consume_handle);
+        info!("✅ Stage 1 (Consume & Distribute) worker started.");
+
+        // Stage 2: Prepare Modifications (N workers, one per shard)
+        for i in 0..NUM_SHARDS {
+            let modifications_rx_for_worker = modifications_rxs.remove(0);
+            let prepared_tx_for_worker = prepared_tx.clone(); // Clone the shared sender
+                                                              // NEW: Clone the shared transactions sender for each worker
+            let transactions_tx_for_worker = transactions_tx.clone();
+            let prepare_handle = tokio::spawn(Self::prepare_modifications_task(
+                processor.clone(),
+                modifications_rx_for_worker,
+                prepared_tx_for_worker,
+                transactions_tx_for_worker, // Pass it in
+                i,
+            ));
+            handles.push(prepare_handle);
+            info!(
+                "✅ Stage 2 (Prepare Modifications) worker for shard {} started.",
+                i
+            );
+        }
+        // Drop the original senders so channels close when all workers are done
+        drop(creation_tx);
+        drop(prepared_tx);
+        // Drop the original sender so the channel closes when all workers are done
+        drop(transactions_tx);
+
+        // Stage 3: Write Account Creations and Updates to Database (Single dedicated worker)
+        let account_write_handle = tokio::spawn(Self::write_to_database_task(
+            processor.clone(),
+            creation_rx, // Pass the single receiver
+            prepared_rx, // Pass the single receiver
+        ));
+        handles.push(account_write_handle);
+        info!("✅ Stage 3 (Account Writer) worker started.");
+        // NEW Stage 3.5: Write Transaction Projections to Database (Single dedicated worker)
+        let transaction_write_handle = tokio::spawn(Self::write_transactions_task(
+            processor.clone(),
+            transactions_rx, // Pass the receiver directly
+            0,
+        ));
+        handles.push(transaction_write_handle);
+        info!("✅ Stage 3.5 (Transaction Writer) worker started.");
+
+        Ok(handles)
     }
 
     // Round-robin distribution to workers (no mutex contention)
@@ -1731,6 +1434,335 @@ impl CDCConsumer {
             events.len()
         );
         // Consider sending to DLQ here instead of dropping
+    }
+    // --- Pipeline Stage Implementations ---
+
+    /// STAGE 1: Consumes from Kafka, extracts events, and distributes them to channels.
+    async fn consume_and_distribute_task(
+        kafka_consumer: crate::infrastructure::kafka_abstraction::KafkaConsumer,
+        cdc_topic: String,
+        processor: Arc<UltraOptimizedCDCEventProcessor>,
+        creation_tx: mpsc::Sender<Vec<ProcessableEvent>>,
+        modifications_txs: Vec<mpsc::Sender<Vec<ProcessableEvent>>>, // Stays sharded
+        shutdown_token: CancellationToken,
+    ) -> Result<()> {
+        kafka_consumer.subscribe_to_topic(&cdc_topic).await?;
+        info!("Stage 1: Subscribed to topic '{}'", cdc_topic);
+
+        let mut message_stream = kafka_consumer.stream();
+        let batch_size = 5000;
+        let batch_timeout = Duration::from_millis(50);
+        let mut message_batch = Vec::with_capacity(batch_size);
+        let mut last_batch_time = Instant::now();
+
+        loop {
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    info!("Stage 1: Shutdown signal received.");
+                    break;
+                }
+                message_result = tokio::time::timeout(batch_timeout, StreamExt::next(&mut message_stream)) => {
+                    if let Ok(Some(Ok(message))) = message_result {
+                        message_batch.push(message.detach());
+                    }
+
+                    let should_process = message_batch.len() >= batch_size || last_batch_time.elapsed() >= batch_timeout;
+
+                    if should_process && !message_batch.is_empty() {
+                        let batch_to_process = std::mem::take(&mut message_batch);
+                        let raw_events: Vec<serde_json::Value> = batch_to_process
+                            .par_iter()
+                            .filter_map(|msg| {
+                                // simd_json::from_slice requires &mut [u8], so we need a mutable copy.
+                                // msg.payload() returns &[u8], so we convert to Vec<u8> and then take a mutable slice.
+                                let mut payload_bytes = msg.payload()?.to_vec();
+                                simd_json::from_slice(&mut payload_bytes).ok()
+                            })
+                            .collect();
+
+                        if let Ok(event_batches) = processor.extract_events_parallel_optimized(&raw_events).await {
+                            // Send all creations to the single, centralized writer task
+                            if !event_batches.account_created.is_empty() {
+                                if let Err(e) = creation_tx.send(event_batches.account_created).await {
+                                    error!("Stage 1: Failed to send creation event batch: {}", e);
+                                }
+                            }
+
+                            // Distribute modifications across sharded workers
+                            let num_shards = modifications_txs.len();
+                            if num_shards > 0 && !event_batches.transactions.is_empty() {
+                                let mut modification_shards: Vec<Vec<_>> = vec![Vec::new(); num_shards];
+                                for event in event_batches.transactions {
+                                    let shard_id = (event.aggregate_id.as_u128() as usize) % num_shards;
+                                    modification_shards[shard_id].push(event);
+                                }
+
+                                for i in 0..num_shards {
+                                    if !modification_shards[i].is_empty() {
+                                        if let Err(e) = modifications_txs[i].send(std::mem::take(&mut modification_shards[i])).await {
+                                            error!("Stage 1: Failed to send modification event batch to shard {}: {}", i, e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Commit offsets for the processed batch
+                        if let Some(last_message) = batch_to_process.last() {
+                             let mut tpl = TopicPartitionList::new();
+                             tpl.add_partition_offset(last_message.topic(), last_message.partition(), Offset::Offset(last_message.offset() + 1))?;
+                             if let Err(e) = kafka_consumer.commit(&tpl, CommitMode::Async) {
+                                 error!("Stage 1: Failed to commit offset: {}", e);
+                             }
+                        }
+                        last_batch_time = Instant::now();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// STAGE 2: Receives modification events, fetches current projections, and prepares them for update.
+    async fn prepare_modifications_task(
+        processor: Arc<UltraOptimizedCDCEventProcessor>,
+        mut modifications_rx: mpsc::Receiver<Vec<ProcessableEvent>>,
+        prepared_tx: mpsc::Sender<ProjectionBatches>,
+        transactions_tx: mpsc::Sender<Vec<TransactionProjection>>, // NEW: Channel for transactions
+        shard_id: usize,
+    ) -> Result<()> {
+        while let Some(batch) = modifications_rx.recv().await {
+            if batch.is_empty() {
+                continue;
+            }
+
+            let event_batches = EventBatches {
+                transactions: batch,
+                ..Default::default()
+            };
+
+            match processor.prepare_projection_batches(event_batches).await {
+                Ok(mut projection_batches) => {
+                    if !projection_batches.transactions_to_create.is_empty() {
+                        let txs_to_send =
+                            std::mem::take(&mut projection_batches.transactions_to_create);
+                        if let Err(e) = transactions_tx.send(txs_to_send).await {
+                            error!(
+                                "Stage 2 (Shard {}): Failed to send prepared transactions: {}",
+                                shard_id, e
+                            );
+                        }
+                    }
+                    if !projection_batches.accounts_to_update.is_empty() {
+                        if let Err(e) = prepared_tx.send(projection_batches).await {
+                            error!(
+                                "Stage 2 (Shard {}): Failed to send prepared batch: {}",
+                                shard_id, e
+                            );
+                        }
+                    }
+                }
+                Err(e) => error!(
+                    "Stage 2 (Shard {}): Error preparing modification batch: {}",
+                    shard_id, e
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// STAGE 3: Receives prepared projections and writes them to the database in bulk.
+    async fn write_to_database_task(
+        processor: Arc<UltraOptimizedCDCEventProcessor>,
+        creations_rx: mpsc::Receiver<Vec<ProcessableEvent>>,
+        prepared_rx: mpsc::Receiver<ProjectionBatches>, // This now only contains account updates
+    ) -> Result<()> {
+        // Batching parameters are tuned to be more "patient" for account updates.
+        // The stream of account updates is less dense than transactions, so we wait
+        // longer to accumulate larger, more efficient batches.
+        let micro_batch_chunk_size = 100;
+        let timeout = Duration::from_millis(500);
+
+        // Map incoming batches to a common enum type without flattening them.
+        let creations_stream = StreamExt::map(
+            ReceiverStream::new(creations_rx),
+            WriterInputBatch::Creation,
+        );
+        let updates_stream = StreamExt::map(ReceiverStream::new(prepared_rx), |batch| {
+            WriterInputBatch::Update(batch.accounts_to_update)
+        });
+
+        // Merge the streams of batches.
+        let merged_batch_stream = creations_stream.merge(updates_stream);
+
+        // Use chunks_timeout to group the incoming batches into larger chunks for processing.
+        let mut chunked_stream =
+            TokioStreamExt::chunks_timeout(merged_batch_stream, micro_batch_chunk_size, timeout);
+        tokio::pin!(chunked_stream);
+
+        while let Some(chunk_of_batches) = StreamExt::next(&mut chunked_stream).await {
+            let mut creation_events = Vec::new();
+            let mut accounts_to_update = Vec::new();
+
+            // Consolidate the chunk of micro-batches into two large vectors.
+            for batch in chunk_of_batches {
+                match batch {
+                    WriterInputBatch::Creation(events) => {
+                        creation_events.extend(events);
+                    }
+                    WriterInputBatch::Update(updates) => {
+                        accounts_to_update.extend(updates);
+                    }
+                }
+            }
+
+            if !creation_events.is_empty() || !accounts_to_update.is_empty() {
+                let accounts_to_create = if !creation_events.is_empty() {
+                    processor.prepare_account_creations(creation_events).await?
+                } else {
+                    vec![]
+                };
+
+                // De-duplicate account updates before flushing. It's common for a single
+                // batch to contain multiple updates for the same account. We only need
+                // to write the most recent state to the database.
+                let final_accounts_to_update = if !accounts_to_update.is_empty() {
+                    let mut latest_updates: std::collections::HashMap<Uuid, AccountProjection> =
+                        std::collections::HashMap::with_capacity(accounts_to_update.len());
+                    // The `extend` in the loop above preserves the order of events from the stream.
+                    // By iterating and inserting into the HashMap, we ensure that for any given ID,
+                    // the last projection encountered in the batch is the one that remains. This is
+                    // the correct "latest state" for this batch.
+                    for (id, projection) in accounts_to_update {
+                        latest_updates.insert(id, projection);
+                    }
+                    latest_updates.into_iter().collect()
+                } else {
+                    vec![]
+                };
+
+                Self::flush_write_batches(&processor, accounts_to_create, final_accounts_to_update)
+                    .await?;
+            }
+        }
+
+        info!("Account writer: Channels closed. Exiting.");
+        Ok(())
+    }
+
+    /// NEW Stage 3.5: Receives prepared transaction projections and writes them to the database in parallel.
+    async fn write_transactions_task(
+        processor: Arc<UltraOptimizedCDCEventProcessor>,
+        transactions_rx: mpsc::Receiver<Vec<TransactionProjection>>,
+        _shard_id: usize,
+    ) -> Result<()> {
+        // Batching parameters: group multiple incoming micro-batches of transactions together.
+        // Tuned to be more patient to accommodate the upstream idempotency check latency.
+        let micro_batch_chunk_size = 100;
+        let timeout = Duration::from_millis(200);
+
+        // This stream receives Vec<TransactionProjection>
+        let transaction_batch_stream = ReceiverStream::new(transactions_rx);
+
+        // Group the incoming Vecs into larger chunks for processing.
+        let mut chunked_stream = TokioStreamExt::chunks_timeout(
+            transaction_batch_stream,
+            micro_batch_chunk_size,
+            timeout,
+        );
+        tokio::pin!(chunked_stream);
+
+        while let Some(chunk_of_batches) = StreamExt::next(&mut chunked_stream).await {
+            // Flatten the collected batches into a single large Vec for flushing.
+            let consolidated_batch: Vec<TransactionProjection> =
+                chunk_of_batches.into_iter().flatten().collect();
+
+            if !consolidated_batch.is_empty() {
+                Self::flush_transaction_batch(&processor, consolidated_batch).await?;
+            }
+        }
+
+        info!("Transaction writer: Channel closed. Exiting.");
+        Ok(())
+    }
+
+    /// Helper to flush write batches to the database.
+    async fn flush_write_batches(
+        processor: &Arc<UltraOptimizedCDCEventProcessor>,
+        accounts_to_create: Vec<(Uuid, AccountProjection)>,
+        accounts_to_update: Vec<(Uuid, AccountProjection)>,
+    ) -> Result<()> {
+        let batching_service = processor
+            .get_cdc_batching_service()
+            .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
+
+        let creation_ids: Vec<Uuid> = accounts_to_create.iter().map(|(id, _)| *id).collect();
+        let update_ids: Vec<Uuid> = accounts_to_update.iter().map(|(id, _)| *id).collect();
+
+        let create_count = accounts_to_create.len();
+        let update_count = accounts_to_update.len();
+
+        if create_count == 0 && update_count == 0 {
+            return Ok(());
+        }
+
+        info!(
+            "Stage 3: Flushing to DB - Creates: {}, Updates: {}",
+            create_count, update_count
+        );
+
+        let (create_res, update_res) = tokio::join!(
+            async {
+                if create_count > 0 {
+                    batching_service
+                        .submit_account_creations_bulk(accounts_to_create)
+                        .await
+                } else {
+                    Ok(vec![])
+                }
+            },
+            async {
+                if update_count > 0 {
+                    batching_service
+                        .submit_account_updates_bulk(accounts_to_update)
+                        .await
+                } else {
+                    Ok(vec![])
+                }
+            }
+        );
+
+        create_res.context("Failed to submit account creations")?;
+        update_res.context("Failed to submit account updates")?;
+
+        // Invalidate cache for successfully written projections
+        processor.invalidate_projection_cache(&update_ids).await;
+
+        Ok(())
+    }
+
+    /// NEW: Helper to flush only transaction batches.
+    async fn flush_transaction_batch(
+        processor: &Arc<UltraOptimizedCDCEventProcessor>,
+        transactions_to_create: Vec<TransactionProjection>,
+    ) -> Result<()> {
+        let batching_service = processor
+            .get_cdc_batching_service()
+            .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
+
+        let tx_count = transactions_to_create.len();
+        if tx_count == 0 {
+            return Ok(());
+        }
+
+        info!("Stage 3.5: Flushing {} transactions to DB", tx_count);
+
+        batching_service
+            .submit_transaction_creations_bulk(transactions_to_create)
+            .await
+            .context("Failed to submit transaction creations")?;
+
+        Ok(())
     }
 
     fn convert_message_fast(
@@ -2041,4 +2073,13 @@ impl MemoryPressureMonitor {
 
         false
     }
+}
+
+/// An enum to represent the different types of batches the writer task can receive.
+/// This avoids flattening the batches into individual items prematurely.
+enum WriterInputBatch {
+    /// A batch of account creation events.
+    Creation(Vec<ProcessableEvent>),
+    /// A batch of account update projections.
+    Update(Vec<(Uuid, AccountProjection)>),
 }

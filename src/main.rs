@@ -48,7 +48,8 @@ use crate::infrastructure::middleware::RequestMiddleware; // Keep if CQRS handle
 use crate::infrastructure::{
     connection_pool_partitioning::{OperationType, PartitionedPools, PoolSelector},
     AccountRepository, EventStoreConfig, UserRepository,
-}; // AccountRepository might be unused if not by AccountService
+};
+use moka::future::Cache; // AccountRepository might be unused if not by AccountService
 
 use opentelemetry::sdk::export::trace::SpanExporter;
 use opentelemetry::trace::TracerProvider;
@@ -193,10 +194,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pools = Arc::new(PartitionedPools::new(pool_config).await?);
     let write_pool = pools.select_pool(OperationType::Write).clone();
+    // Create the single, shared, high-performance projection cache
+    let projection_cache = Cache::builder()
+        .max_capacity(50_000) // Max 50k cached projections
+        .time_to_live(Duration::from_secs(1800)) // 30 minute TTL
+        .build();
+    info!("✅ Shared Projection L1 Cache (Moka) created.");
 
     // Initialize all services with background tasks
-    let service_context =
-        init_all_services(Some(consistency_manager.clone()), pools.clone()).await?;
+    let service_context = init_all_services(
+        Some(consistency_manager.clone()),
+        projection_cache.clone(),
+        pools.clone(),
+    )
+    .await?;
 
     // Create KafkaConfig instance (can be loaded from env or defaults)
     let kafka_config = KafkaConfig::default(); // Or load from env
@@ -255,7 +266,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kafka_consumer_for_cdc,
             service_context.cache_service.clone(),
             pools.clone(),
-            None, // <-- pass None for metrics in production
+            None,             // <-- pass None for metrics in production
+            projection_cache, // Pass the shared cache
             Some(cqrs_service.get_consistency_manager()), // Pass consistency manager from CQRS service
         )
         .await?;

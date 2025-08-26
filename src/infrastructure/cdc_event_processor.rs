@@ -1,4 +1,5 @@
 use crate::domain::AccountEvent;
+use crate::infrastructure::cache_models::ProjectionCacheEntry;
 use crate::infrastructure::cache_service::CacheServiceTrait;
 use crate::infrastructure::cdc_service_manager::EnhancedCDCMetrics;
 use crate::infrastructure::consistency_manager::ConsistencyManager;
@@ -7,8 +8,8 @@ use crate::infrastructure::kafka_abstraction::KafkaProducerTrait;
 use crate::infrastructure::projections::ProjectionStoreTrait;
 use crate::infrastructure::projections::{AccountProjection, TransactionProjection};
 use crate::infrastructure::CopyOptimizationConfig;
+use crate::infrastructure::OptimizedCDCProcessor;
 use crate::infrastructure::ProjectionConfig;
-use crate::infrastructure::{CDCBatchingConfig, OptimizedCDCProcessor};
 use crate::ProjectionStore;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,6 +19,7 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use futures::FutureExt;
 use hostname;
+use moka::future::Cache;
 use rayon::prelude::*;
 use rayon::prelude::*;
 use rdkafka::Message;
@@ -31,7 +33,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
@@ -59,10 +61,10 @@ pub struct ProjectionBatches {
 
 // OPTIMIZATION 3: Separate event containers for better cache locality
 #[derive(Debug, Default)]
-struct EventBatches {
-    account_created: Vec<ProcessableEvent>,
-    transactions: Vec<ProcessableEvent>,
-    account_closed: Vec<ProcessableEvent>,
+pub struct EventBatches {
+    pub account_created: Vec<ProcessableEvent>,
+    pub transactions: Vec<ProcessableEvent>,
+    pub account_closed: Vec<ProcessableEvent>,
 }
 
 impl EventBatches {
@@ -138,70 +140,6 @@ pub struct OptimizedCDCOutboxMessage {
     pub schema_version: Option<i32>,
 }
 
-// Lightweight projection cache entry with business validation
-#[derive(Debug, Clone)]
-struct ProjectionCacheEntry {
-    balance: Decimal,
-    owner_name: String,
-    is_active: bool,
-    version: u64,
-    cached_at: Instant,
-    last_event_id: Option<Uuid>, // For duplicate detection
-}
-
-impl ProjectionCacheEntry {
-    fn is_expired(&self, ttl: Duration) -> bool {
-        self.cached_at.elapsed() > ttl
-    }
-
-    fn apply_event(&mut self, event: &crate::domain::AccountEvent) -> Result<()> {
-        // Business logic validation
-        match event {
-            crate::domain::AccountEvent::MoneyDeposited { amount, .. } => {
-                if *amount <= Decimal::ZERO {
-                    return Err(anyhow::anyhow!("Deposit amount must be positive"));
-                }
-                if self.balance + *amount > Decimal::from_str("999999999.99").unwrap() {
-                    return Err(anyhow::anyhow!("Balance would exceed maximum allowed"));
-                }
-                self.balance += *amount;
-                self.version += 1;
-            }
-            crate::domain::AccountEvent::MoneyWithdrawn { amount, .. } => {
-                if *amount <= Decimal::ZERO {
-                    return Err(anyhow::anyhow!("Withdrawal amount must be positive"));
-                }
-                if self.balance < *amount {
-                    return Err(anyhow::anyhow!("Insufficient funds for withdrawal"));
-                }
-                self.balance -= *amount;
-                self.version += 1;
-            }
-            crate::domain::AccountEvent::AccountCreated {
-                owner_name,
-                initial_balance,
-                ..
-            } => {
-                if initial_balance < &Decimal::ZERO {
-                    return Err(anyhow::anyhow!("Initial balance cannot be negative"));
-                }
-                self.owner_name = owner_name.clone();
-                self.balance = *initial_balance;
-                self.is_active = true;
-                self.version += 1;
-            }
-            crate::domain::AccountEvent::AccountClosed { .. } => {
-                if !self.is_active {
-                    return Err(anyhow::anyhow!("Account is already closed"));
-                }
-                self.is_active = false;
-                self.version += 1;
-            }
-        }
-        Ok(())
-    }
-}
-
 // Optimized batch processing structure
 #[derive(Debug)]
 struct EventBatch {
@@ -211,14 +149,14 @@ struct EventBatch {
 }
 
 #[derive(Debug, Clone)]
-struct ProcessableEvent {
-    event_id: Uuid,
-    aggregate_id: Uuid,
-    event_type: EventType,
-    payload: Vec<u8>,
-    partition_key: Option<String>,
-    domain_event: Option<crate::domain::AccountEvent>, // Pre-deserialized for performance
-    timestamp: chrono::DateTime<chrono::Utc>, // FIXED: Add timestamp field for transaction projections
+pub struct ProcessableEvent {
+    pub event_id: Uuid,
+    pub aggregate_id: Uuid,
+    pub event_type: EventType,
+    pub payload: Vec<u8>,
+    pub partition_key: Option<String>,
+    pub domain_event: Option<crate::domain::AccountEvent>, // Pre-deserialized for performance
+    pub timestamp: chrono::DateTime<chrono::Utc>, // FIXED: Add timestamp field for transaction projections
 }
 
 impl ProcessableEvent {
@@ -288,7 +226,7 @@ impl Default for AdvancedCircuitBreakerState {
 }
 
 struct AdvancedCircuitBreaker {
-    state: Arc<RwLock<AdvancedCircuitBreakerState>>,
+    state: Arc<std::sync::RwLock<AdvancedCircuitBreakerState>>,
     failure_threshold: u32,
     recovery_timeout: Duration,
     half_open_success_threshold: u32,
@@ -297,7 +235,7 @@ struct AdvancedCircuitBreaker {
 impl AdvancedCircuitBreaker {
     fn new() -> Self {
         Self {
-            state: Arc::new(RwLock::new(AdvancedCircuitBreakerState::Closed)),
+            state: Arc::new(std::sync::RwLock::new(AdvancedCircuitBreakerState::Closed)),
             failure_threshold: 10,                     // Increased threshold
             recovery_timeout: Duration::from_secs(30), // Increased timeout
             half_open_success_threshold: 5,
@@ -305,7 +243,7 @@ impl AdvancedCircuitBreaker {
     }
 
     async fn can_execute(&self) -> bool {
-        let state = self.state.read().await;
+        let state = self.state.read().expect("Failed to acquire read lock");
         match *state {
             AdvancedCircuitBreakerState::Closed => true,
             AdvancedCircuitBreakerState::Open { until, .. } => Instant::now() >= until,
@@ -314,7 +252,7 @@ impl AdvancedCircuitBreaker {
     }
 
     async fn on_success(&self) {
-        let mut state = self.state.write().await;
+        let mut state = self.state.write().expect("Failed to acquire write lock");
         match *state {
             AdvancedCircuitBreakerState::HalfOpen {
                 ref mut success_count,
@@ -330,7 +268,7 @@ impl AdvancedCircuitBreaker {
     }
 
     async fn on_failure(&self) {
-        let mut state = self.state.write().await;
+        let mut state = self.state.write().expect("Failed to acquire write lock");
         match *state {
             AdvancedCircuitBreakerState::Closed => {
                 *state = AdvancedCircuitBreakerState::Open {
@@ -361,7 +299,7 @@ impl AdvancedCircuitBreaker {
     }
 
     async fn on_attempt(&self) {
-        let mut state = self.state.write().await;
+        let mut state = self.state.write().expect("Failed to acquire write lock");
         if let AdvancedCircuitBreakerState::Open { until, .. } = *state {
             if Instant::now() >= until {
                 *state = AdvancedCircuitBreakerState::HalfOpen {
@@ -386,134 +324,6 @@ impl Clone for AdvancedCircuitBreaker {
             failure_threshold: self.failure_threshold,
             recovery_timeout: self.recovery_timeout,
             half_open_success_threshold: self.half_open_success_threshold,
-        }
-    }
-}
-
-// Memory-efficient LRU cache for projections with business validation
-struct ProjectionCache {
-    cache: HashMap<Uuid, ProjectionCacheEntry>,
-    access_order: VecDeque<Uuid>,
-    max_size: usize,
-    ttl: Duration,
-    duplicate_detection: DashMap<Uuid, Uuid>, // event_id -> aggregate_id for duplicate detection
-}
-
-impl ProjectionCache {
-    fn new(max_size: usize, ttl: Duration) -> Self {
-        Self {
-            cache: HashMap::new(),
-            access_order: VecDeque::new(),
-            max_size,
-            ttl,
-            duplicate_detection: DashMap::new(),
-        }
-    }
-
-    // OPTIMIZATION: Use read lock when possible, write lock only when needed
-    fn get(&mut self, key: &Uuid) -> Option<&ProjectionCacheEntry> {
-        if let Some(entry) = self.cache.get(key) {
-            // Check if entry is expired
-            if entry.is_expired(self.ttl) {
-                // Don't call remove_expired here to avoid borrow checker issues
-                return None;
-            }
-
-            // Update access order (move to front)
-            if let Some(pos) = self.access_order.iter().position(|&id| id == *key) {
-                self.access_order.remove(pos);
-            }
-            self.access_order.push_back(*key);
-
-            Some(entry)
-        } else {
-            None
-        }
-    }
-
-    // OPTIMIZATION: Efficient removal with minimal lock contention
-    fn remove_expired(&mut self, key: &Uuid) {
-        self.cache.remove(key);
-        if let Some(pos) = self.access_order.iter().position(|&id| id == *key) {
-            self.access_order.remove(pos);
-        }
-    }
-
-    // OPTIMIZATION: Batch put operations to reduce lock contention
-    fn put(&mut self, key: Uuid, entry: ProjectionCacheEntry) {
-        // Remove from access order if already exists
-        if let Some(pos) = self.access_order.iter().position(|&id| id == key) {
-            self.access_order.remove(pos);
-        }
-
-        // Add to cache
-        self.cache.insert(key, entry);
-
-        // Add to access order
-        self.access_order.push_back(key);
-
-        // OPTIMIZATION: Evict oldest entries if cache is full
-        while self.cache.len() > self.max_size {
-            if let Some(oldest_key) = self.access_order.pop_front() {
-                self.cache.remove(&oldest_key);
-            }
-        }
-    }
-
-    // OPTIMIZATION: Efficient invalidation
-    fn invalidate(&mut self, key: &Uuid) {
-        self.cache.remove(key);
-        if let Some(pos) = self.access_order.iter().position(|&id| id == *key) {
-            self.access_order.remove(pos);
-        }
-    }
-
-    // OPTIMIZATION: Memory usage calculation with minimal overhead
-    fn memory_usage(&self) -> usize {
-        let mut total = 0;
-
-        // Calculate memory usage for cache entries
-        for (key, entry) in &self.cache {
-            total += std::mem::size_of_val(key);
-            total += std::mem::size_of_val(entry);
-            total += entry.owner_name.capacity();
-        }
-
-        // Calculate memory usage for access order
-        total += self.access_order.capacity() * std::mem::size_of::<Uuid>();
-
-        // Calculate memory usage for duplicate detection
-        total += self.duplicate_detection.len() * std::mem::size_of::<(Uuid, Uuid)>();
-
-        total
-    }
-
-    // OPTIMIZATION: Efficient duplicate detection with DashMap
-    fn is_duplicate_event(&self, event_id: &Uuid, aggregate_id: &Uuid) -> bool {
-        // Check if this event has been processed before
-        if let Some(existing_aggregate_id) = self.duplicate_detection.get(event_id) {
-            return *existing_aggregate_id == *aggregate_id;
-        }
-
-        // Record this event
-        self.duplicate_detection.insert(*event_id, *aggregate_id);
-        false
-    }
-
-    // OPTIMIZATION: Periodic cleanup to prevent memory leaks
-    fn cleanup_duplicates(&mut self) {
-        // Remove old entries from duplicate detection (keep last 1000)
-        if self.duplicate_detection.len() > 1000 {
-            let to_remove: Vec<Uuid> = self
-                .duplicate_detection
-                .iter()
-                .take(self.duplicate_detection.len() - 1000)
-                .map(|entry| *entry.key())
-                .collect();
-
-            for key in to_remove {
-                self.duplicate_detection.remove(&key);
-            }
         }
     }
 }
@@ -551,15 +361,15 @@ pub struct UltraOptimizedCDCEventProcessor {
     circuit_breaker: AdvancedCircuitBreaker,
 
     // Memory-efficient projection cache
-    projection_cache: Arc<RwLock<ProjectionCache>>,
+    pub projection_cache: moka::future::Cache<Uuid, ProjectionCacheEntry>,
 
     // Batch processing coordination with interior mutability
     // batch_processor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     shutdown_token: CancellationToken,
 
     // Business logic configuration with interior mutability
-    business_config: Arc<Mutex<BusinessLogicConfig>>, // Adaptive concurrency control
-    adaptive_concurrency: Arc<Mutex<usize>>,
+    business_config: Arc<std::sync::Mutex<BusinessLogicConfig>>, // Adaptive concurrency control
+    adaptive_concurrency: Arc<std::sync::Mutex<usize>>,
     backpressure_signal: Arc<AtomicBool>,
 
     cdc_batching_service: Option<Arc<OptimizedCDCProcessor>>,
@@ -606,7 +416,7 @@ impl Clone for UltraOptimizedCDCEventProcessor {
             circuit_breaker: self.circuit_breaker.clone(),
             projection_cache: self.projection_cache.clone(),
             shutdown_token: self.shutdown_token.clone(),
-            business_config: Arc::new(Mutex::new(BusinessLogicConfig::default())), // Use default instead of trying to clone
+            business_config: Arc::new(std::sync::Mutex::new(BusinessLogicConfig::default())), // Use default instead of trying to clone
             cdc_batching_service: self.cdc_batching_service.clone(),
             adaptive_concurrency: self.adaptive_concurrency.clone(),
             backpressure_signal: self.backpressure_signal.clone(),
@@ -622,6 +432,7 @@ impl UltraOptimizedCDCEventProcessor {
         metrics: Arc<EnhancedCDCMetrics>,
         business_config: Option<BusinessLogicConfig>,
         consistency_manager: Option<Arc<ConsistencyManager>>,
+        projection_cache: moka::future::Cache<Uuid, ProjectionCacheEntry>,
         cdc_batching_service: Option<Arc<OptimizedCDCProcessor>>,
     ) -> Self {
         Self::new_with_write_pool(
@@ -631,6 +442,7 @@ impl UltraOptimizedCDCEventProcessor {
             metrics,
             business_config,
             consistency_manager,
+            projection_cache,
             cdc_batching_service,
         )
     }
@@ -642,15 +454,10 @@ impl UltraOptimizedCDCEventProcessor {
         metrics: Arc<EnhancedCDCMetrics>,
         business_config: Option<BusinessLogicConfig>,
         consistency_manager: Option<Arc<ConsistencyManager>>,
+        projection_cache: moka::future::Cache<Uuid, ProjectionCacheEntry>,
         cdc_batching_service: Option<Arc<OptimizedCDCProcessor>>,
     ) -> Self {
         let business_config: BusinessLogicConfig = business_config.unwrap_or_default();
-
-        // 1. Increase cache size and TTL with advanced configuration
-        let projection_cache = Arc::new(RwLock::new(ProjectionCache::new(
-            50000,                     // Max 50k cached projections
-            Duration::from_secs(1800), // 30 minute TTL
-        )));
 
         Self {
             kafka_producer: kafka_producer.clone(),
@@ -666,12 +473,12 @@ impl UltraOptimizedCDCEventProcessor {
             metrics,
             consistency_manager, // Use the provided consistency manager
             processing_semaphore: Arc::new(Semaphore::new(32)),
-            prepare_semaphore: Arc::new(Semaphore::new(32)), // Limit concurrent DB reads to 32
+            prepare_semaphore: Arc::new(Semaphore::new(8)), // Limit concurrent DB reads to 8 (tunable)
             circuit_breaker: AdvancedCircuitBreaker::new(),
             projection_cache,
             shutdown_token: CancellationToken::new(),
-            business_config: Arc::new(Mutex::new(business_config)),
-            adaptive_concurrency: Arc::new(Mutex::new(32)),
+            business_config: Arc::new(std::sync::Mutex::new(business_config)),
+            adaptive_concurrency: Arc::new(std::sync::Mutex::new(32)),
             backpressure_signal: Arc::new(AtomicBool::new(false)),
             cdc_batching_service,
         }
@@ -682,6 +489,15 @@ impl UltraOptimizedCDCEventProcessor {
         self.cdc_batching_service.as_ref()
     }
 
+    /// Public method to invalidate cache entries after a successful DB write.
+    pub async fn invalidate_projection_cache(&self, ids: &[Uuid]) {
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            self.projection_cache.invalidate(id).await;
+        }
+    }
     /// CRITICAL OPTIMIZATION: Process multiple CDC events in batch with event type separation
     pub async fn process_cdc_events_batch(
         &self,
@@ -693,6 +509,9 @@ impl UltraOptimizedCDCEventProcessor {
 
         let total_start_time = Instant::now();
         let batch_size = cdc_events.len();
+        self.metrics
+            .events_processed
+            .fetch_add(batch_size as u64, std::sync::atomic::Ordering::Relaxed);
         tracing::info!(
             "🔍 CDC Event Processor: Starting batch processing of {} events with event type separation",
             batch_size
@@ -723,6 +542,17 @@ impl UltraOptimizedCDCEventProcessor {
         let create_count = projection_batches.accounts_to_create.len();
         let update_count = projection_batches.accounts_to_update.len();
         let tx_count = projection_batches.transactions_to_create.len();
+        self.metrics.projection_updates.fetch_add(
+            (create_count + update_count) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.metrics
+            .batches_processed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics.processing_latency_ms.fetch_add(
+            processing_duration.as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         let (create_res, update_res, tx_res) = tokio::join!(
             async {
@@ -763,6 +593,10 @@ impl UltraOptimizedCDCEventProcessor {
 
         let submission_duration = submission_start.elapsed();
         let total_duration = total_start_time.elapsed();
+        self.metrics.total_latency_ms.fetch_add(
+            total_duration.as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         tracing::info!(
             "🏆 ULTRA-OPTIMIZED CDC COMPLETE: {} events in {:?} (prepare: {:?}, submit: {:?}, throughput: {:.0} events/sec)",
@@ -778,25 +612,23 @@ impl UltraOptimizedCDCEventProcessor {
 
     /// Prepares projection batches from classified events.
     /// This method is now responsible for the "prepare" phase.
-    async fn prepare_projection_batches(
+    pub async fn prepare_projection_batches(
         &self,
         event_batches: EventBatches,
     ) -> Result<ProjectionBatches> {
         let (created_projections_res, updated_data_res) = tokio::join!(
             async {
                 if !event_batches.account_created.is_empty() {
-                    Self::prepare_account_creations(event_batches.account_created).await
+                    self.prepare_account_creations(event_batches.account_created)
+                        .await
                 } else {
                     Ok(vec![])
                 }
             },
             async {
                 if !event_batches.transactions.is_empty() {
-                    Self::prepare_account_updates_and_transactions(
-                        event_batches.transactions,
-                        self.projection_store.clone(),
-                    )
-                    .await
+                    self.prepare_account_updates_and_transactions(event_batches.transactions)
+                        .await
                 } else {
                     Ok((vec![], vec![]))
                 }
@@ -814,7 +646,8 @@ impl UltraOptimizedCDCEventProcessor {
     }
 
     /// Prepares projections for `AccountCreated` events. This is a pure transformation function.
-    async fn prepare_account_creations(
+    pub async fn prepare_account_creations(
+        &self,
         events: Vec<ProcessableEvent>,
     ) -> Result<Vec<(Uuid, AccountProjection)>> {
         let mut projections = Vec::with_capacity(events.len());
@@ -835,6 +668,13 @@ impl UltraOptimizedCDCEventProcessor {
                         created_at: event.timestamp,
                         updated_at: event.timestamp,
                     };
+                    // CRITICAL FIX: Populate the cache with the new projection
+                    self.projection_cache
+                        .insert(
+                            projection.id,
+                            ProjectionCacheEntry::from(projection.clone()),
+                        )
+                        .await;
                     projections.push((event.aggregate_id, projection));
                 }
             }
@@ -844,42 +684,89 @@ impl UltraOptimizedCDCEventProcessor {
 
     /// Prepares projections for account updates and creates transaction projections.
     /// This function fetches the current state and applies new events.
-    async fn prepare_account_updates_and_transactions(
+    pub async fn prepare_account_updates_and_transactions(
+        &self,
         events: Vec<ProcessableEvent>,
-        projection_store: Arc<dyn ProjectionStoreTrait>,
     ) -> Result<(Vec<(Uuid, AccountProjection)>, Vec<TransactionProjection>)> {
         if events.is_empty() {
             return Ok((vec![], vec![]));
         }
 
-        let events_by_aggregate = Self::group_events_by_aggregate(events);
-        let aggregate_ids: Vec<Uuid> = events_by_aggregate.keys().cloned().collect();
+        // --- Idempotency Check ---
+        // Check which events have already been processed by looking for their IDs
+        // in the transaction_projections table. This prevents double-processing
+        // if Kafka messages are delivered more than once.
+        let event_ids: Vec<Uuid> = events.iter().map(|e| e.event_id).collect();
+        let processed_event_ids_set: std::collections::HashSet<Uuid> = self
+            .projection_store
+            .get_existing_transaction_ids(&event_ids)
+            .await?
+            .into_iter()
+            .collect();
 
-        // Batch load existing projections
-        let db_projections = projection_store.get_accounts_batch(&aggregate_ids).await?;
-        let mut projections_map: HashMap<Uuid, AccountProjection> =
-            db_projections.into_iter().map(|p| (p.id, p)).collect();
+        let events_by_aggregate = Self::group_events_by_aggregate(events);
+        let mut projections_map: HashMap<Uuid, AccountProjection> = HashMap::new();
+        let mut ids_to_fetch = Vec::new();
+
+        // --- Read-Through Cache Logic ---
+        {
+            for id in events_by_aggregate.keys() {
+                if let Some(entry) = self.projection_cache.get(id).await {
+                    projections_map.insert(*id, entry.data.clone());
+                    self.metrics
+                        .cache_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    ids_to_fetch.push(*id);
+                    self.metrics
+                        .cache_misses
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+
+        // Fetch cache misses from the database
+        if !ids_to_fetch.is_empty() {
+            let db_projections = self
+                .projection_store
+                .get_accounts_batch(&ids_to_fetch)
+                .await?;
+
+            for projection in db_projections {
+                self.projection_cache.insert(
+                    projection.id,
+                    ProjectionCacheEntry::from(projection.clone()),
+                );
+                projections_map.insert(projection.id, projection);
+            }
+        }
 
         let mut updated_projections = Vec::with_capacity(events_by_aggregate.len());
         let mut transaction_projections = Vec::new();
 
         for (aggregate_id, aggregate_events) in events_by_aggregate {
-            if let Some(mut projection) = projections_map.remove(&aggregate_id) {
+            if let Some(mut projection) = projections_map.get_mut(&aggregate_id) {
+                let mut has_updates = false;
                 for event in aggregate_events {
-                    if let Ok(domain_event) = event.get_domain_event() {
-                        projection.apply_event(domain_event)?;
-                        projection.updated_at = event.timestamp;
-
-                        if let Some(tx_proj) = TransactionProjection::from_domain_event(
-                            domain_event,
-                            aggregate_id,
-                            event.timestamp,
-                        ) {
-                            transaction_projections.push(tx_proj);
+                    // Skip events that have already been processed.
+                    if !processed_event_ids_set.contains(&event.event_id) {
+                        if let Ok(domain_event) = event.get_domain_event() {
+                            projection.apply_event(domain_event)?;
+                            projection.updated_at = event.timestamp;
+                            if let Some(tx_proj) = TransactionProjection::from_domain_event(
+                                domain_event,
+                                aggregate_id,
+                                event.timestamp,
+                            ) {
+                                transaction_projections.push(tx_proj);
+                            }
+                            has_updates = true;
                         }
                     }
                 }
-                updated_projections.push((aggregate_id, projection));
+                if has_updates {
+                    updated_projections.push((aggregate_id, projection.clone()));
+                }
             } else {
                 warn!("No projection found for aggregate_id: {}", aggregate_id);
             }
@@ -911,59 +798,11 @@ impl UltraOptimizedCDCEventProcessor {
     }
 
     /// OPTIMIZATION 8: Parallel event extraction with SIMD and memory pools
-    async fn extract_events_parallel_optimized(
+    pub async fn extract_events_parallel_optimized(
         &self,
         cdc_events: &[serde_json::Value],
     ) -> Result<EventBatches> {
         let extraction_start = Instant::now();
-        // let chunk_size = (cdc_events.len() / MAX_PARALLEL_CHUNKS).max(100);
-
-        // // OPTIMIZATION 9: Process chunks in parallel with bounded concurrency
-        // let mut extraction_tasks = Vec::with_capacity(MAX_PARALLEL_CHUNKS);
-
-        // for chunk in cdc_events.chunks(chunk_size) {
-        //     let chunk = chunk.to_vec(); // Clone chunk for async processing
-        //     let permit = self.processing_semaphore.clone().acquire_owned().await?;
-        //     let self_clone = self.clone(); // Clone self to move into async task
-        //     let task = tokio::spawn(async move {
-        //         let _permit = permit; // Keep permit until task completion
-        //         self_clone.extract_chunk_events_simd_optimized(chunk).await
-        //     });
-
-        //     extraction_tasks.push(task);
-        // }
-
-        // // OPTIMIZATION 10: Collect and merge results efficiently
-        // let mut final_batches = EventBatches::with_capacity(cdc_events.len());
-        // let mut extracted_count = 0;
-        // let mut skipped_count = 0;
-        // let mut error_count = 0;
-
-        // for task in extraction_tasks {
-        //     match task.await? {
-        //         Ok((chunk_batches, stats)) => {
-        //             // Merge chunk results
-        //             final_batches
-        //                 .account_created
-        //                 .extend(chunk_batches.account_created);
-        //             final_batches
-        //                 .transactions
-        //                 .extend(chunk_batches.transactions);
-        //             final_batches
-        //                 .account_closed
-        //                 .extend(chunk_batches.account_closed);
-
-        //             extracted_count += stats.0;
-        //             skipped_count += stats.1;
-        //             error_count += stats.2;
-        //         }
-        //         Err(e) => {
-        //             tracing::error!("Chunk extraction failed: {:?}", e);
-        //             error_count += 1;
-        //         }
-        //     }
-        // }
-
         let cdc_events_owned = cdc_events.to_vec();
         let self_clone = self.clone();
 
@@ -1048,69 +887,69 @@ impl UltraOptimizedCDCEventProcessor {
         Ok((batches, (extracted, skipped, errors)))
     }
     /// OPTIMIZATION 18: Process all event types in parallel with maximum efficiency
-    async fn process_all_event_types_parallel(&self, event_batches: EventBatches) -> Result<()> {
-        let batching_service = self
-            .cdc_batching_service
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
+    // async fn process_all_event_types_parallel(&self, event_batches: EventBatches) -> Result<()> {
+    //     let batching_service = self
+    //         .cdc_batching_service
+    //         .as_ref()
+    //         .ok_or_else(|| anyhow::anyhow!("CDC Batching Service not available"))?;
 
-        // OPTIMIZATION 19: Launch all processing tasks in parallel
-        let account_created_task = if !event_batches.account_created.is_empty() {
-            let events = event_batches.account_created;
-            let service = batching_service.clone();
-            Some(tokio::spawn(async move {
-                Self::prepare_account_creations(events).await
-            }))
-        } else {
-            None
-        };
+    //     // OPTIMIZATION 19: Launch all processing tasks in parallel
+    //     let account_created_task = if !event_batches.account_created.is_empty() {
+    //         let events = event_batches.account_created;
+    //         let service = batching_service.clone();
+    //         Some(tokio::spawn(async move {
+    //             Self::prepare_account_creations(events).await
+    //         }))
+    //     } else {
+    //         None
+    //     };
 
-        let transactions_task = if !event_batches.transactions.is_empty() {
-            let events = event_batches.transactions;
-            let service = batching_service.clone();
-            let projection_store = self.projection_store.clone();
-            Some(tokio::spawn(async move {
-                Self::prepare_account_updates_and_transactions(events, projection_store).await
-            }))
-        } else {
-            None
-        };
+    //     let transactions_task = if !event_batches.transactions.is_empty() {
+    //         let events = event_batches.transactions;
+    //         let service = batching_service.clone();
+    //         let projection_store = self.projection_store.clone();
+    //         Some(tokio::spawn(async move {
+    //             Self::prepare_account_updates_and_transactions(events, projection_store).await
+    //         }))
+    //     } else {
+    //         None
+    //     };
 
-        // OPTIMIZATION 20: Wait for all tasks and collect results
-        let mut total_processed = 0;
+    //     // OPTIMIZATION 20: Wait for all tasks and collect results
+    //     let mut total_processed = 0;
 
-        if let Some(task) = account_created_task {
-            match task.await? {
-                Ok(count) => {
-                    total_processed += count.len();
-                    tracing::info!("✅ AccountCreated processing: {} events", count.len());
-                }
-                Err(e) => {
-                    tracing::error!("❌ AccountCreated processing failed: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
+    //     if let Some(task) = account_created_task {
+    //         match task.await? {
+    //             Ok(count) => {
+    //                 total_processed += count.len();
+    //                 tracing::info!("✅ AccountCreated processing: {} events", count.len());
+    //             }
+    //             Err(e) => {
+    //                 tracing::error!("❌ AccountCreated processing failed: {:?}", e);
+    //                 return Err(e);
+    //             }
+    //         }
+    //     }
 
-        if let Some(task) = transactions_task {
-            match task.await? {
-                Ok(count) => {
-                    total_processed += count.0.len() + count.1.len();
-                    tracing::info!(
-                        "✅ Transactions processing: {} events",
-                        count.0.len() + count.1.len()
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("❌ Transactions processing failed: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
+    //     if let Some(task) = transactions_task {
+    //         match task.await? {
+    //             Ok(count) => {
+    //                 total_processed += count.0.len() + count.1.len();
+    //                 tracing::info!(
+    //                     "✅ Transactions processing: {} events",
+    //                     count.0.len() + count.1.len()
+    //                 );
+    //             }
+    //             Err(e) => {
+    //                 tracing::error!("❌ Transactions processing failed: {:?}", e);
+    //                 return Err(e);
+    //             }
+    //         }
+    //     }
 
-        tracing::info!("🏁 Total processed events: {}", total_processed);
-        Ok(())
-    }
+    //     tracing::info!("🏁 Total processed events: {}", total_processed);
+    //     Ok(())
+    // }
 
     /// OPTIMIZATION 21: Ultra-fast AccountCreated processing
     async fn process_account_created_ultra_fast(

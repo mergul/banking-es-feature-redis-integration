@@ -12,7 +12,7 @@
   "rust-analyzer.cargo.runBuildScripts": true,
   "rust-analyzer.cargo.loadOutDirsFromCheck": true,
   "rust-analyzer.cargo.loadOutDirsFromBuild": true,
-  "editor.fontSize": 16,
+  "editor.fontSize": 20,
   "editor.codeLensFontSize": 22,
   "debug.console.fontSize": 22,
   "scm.inputFontSize": 22,

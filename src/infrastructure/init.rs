@@ -3,6 +3,7 @@
 
 use crate::application::services::CQRSAccountService;
 use crate::infrastructure::auth::{AuthConfig, AuthService};
+use crate::infrastructure::cache_models::ProjectionCacheEntry;
 use crate::infrastructure::cache_service::{CacheConfig, CacheService, EvictionPolicy};
 use crate::infrastructure::connection_pool_monitor::{ConnectionPoolMonitor, PoolMonitorConfig};
 use crate::infrastructure::connection_pool_partitioning::{
@@ -20,6 +21,7 @@ use crate::infrastructure::scaling::{ScalingConfig, ScalingManager};
 use crate::infrastructure::sharding::{ShardConfig, ShardManager};
 use crate::infrastructure::user_repository::UserRepository;
 use anyhow::Result;
+use moka::future::Cache;
 use redis::Client;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +51,7 @@ pub async fn init_all_services(
     consistency_manager: Option<
         Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
     >,
+    projection_cache: Cache<uuid::Uuid, ProjectionCacheEntry>,
     partitioned_pools: Arc<crate::infrastructure::connection_pool_partitioning::PartitionedPools>,
 ) -> Result<ServiceContext> {
     info!("Initializing services...");
@@ -377,9 +380,12 @@ pub async fn init_all_services(
         full_page_writes: true,
     };
 
-    let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> = Arc::new(
-        ProjectionStore::from_pool_with_config(event_store.get_pool().clone(), projection_config),
-    );
+    let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> =
+        Arc::new(ProjectionStore::from_pools_with_config(
+            partitioned_pools.clone(),
+            projection_config,
+            projection_cache,
+        ));
 
     // Initialize CacheService with optimized config for high throughput
     let cache_config = CacheConfig {
@@ -668,6 +674,7 @@ pub async fn init_all_services_with_pool(
     consistency_manager: Option<
         Arc<crate::infrastructure::consistency_manager::ConsistencyManager>,
     >,
+    projection_cache: Cache<uuid::Uuid, ProjectionCacheEntry>,
     partitioned_pools: Arc<PartitionedPools>,
 ) -> anyhow::Result<ServiceContext> {
     use crate::infrastructure::auth::{AuthConfig, AuthService};
@@ -701,10 +708,12 @@ pub async fn init_all_services_with_pool(
             ),
         ));
     let mut projection_config = ProjectionConfig::default();
-
-    let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> = Arc::new(
-        ProjectionStore::from_pools_with_config(partitioned_pools.clone(), projection_config),
-    );
+    let projection_store: Arc<dyn ProjectionStoreTrait + Send + Sync> =
+        Arc::new(ProjectionStore::from_pools_with_config(
+            partitioned_pools.clone(),
+            projection_config,
+            projection_cache,
+        ));
 
     // Redis setup
     let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());

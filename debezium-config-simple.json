@@ -1,0 +1,21 @@
+{
+  "name": "banking-es-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.user": "postgres",
+    "database.dbname": "banking_es",
+    "database.server.name": "banking-es-server",
+    "schema.history.internal.kafka.bootstrap.servers": "127.0.0.1:9092",
+    "database.port": "5432",
+    "plugin.name": "pgoutput",
+    "topic.prefix": "banking-es",
+    "schema.history.internal.kafka.topic": "schema-changes.banking-es",
+    "database.hostname": "127.0.0.1",
+    "database.password": "Francisco1",
+    "table.include.list": "public.kafka_outbox_cdc",
+    "poll.interval.ms": "1000",
+    "max.queue.size": "8192",
+    "max.batch.size": "2048"
+  }
+}
+

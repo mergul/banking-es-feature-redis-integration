@@ -14,6 +14,7 @@ use banking_es::{
         PoolSelector, ReadOperation, ReadOperationResult, WriteOperation,
     },
 };
+use moka::future::Cache;
 use rust_decimal::Decimal;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
@@ -118,10 +119,14 @@ async fn setup_stress_test_environment(
             Duration::from_secs(cleanup_interval_secs),    // Use environment variable
         ),
     );
-
+    let projection_cache = Cache::builder()
+        .max_capacity(50_000) // Max 50k cached projections
+        .time_to_live(Duration::from_secs(1800)) // 30 minute TTL
+        .build();
     // Initialize all services with background tasks, passing the shared pool
     let service_context = banking_es::infrastructure::init::init_all_services(
         Some(consistency_manager.clone()),
+        projection_cache.clone(),
         pools.clone(),
     )
     .await?;
@@ -188,7 +193,6 @@ async fn setup_stress_test_environment(
 
     let cdc_config = DebeziumConfig::default();
     let metrics = Arc::new(EnhancedCDCMetrics::default());
-
     // Create CDC service manager with unique consumer group ID
     let mut cdc_service_manager = CDCServiceManager::new(
         cdc_config,
@@ -198,6 +202,7 @@ async fn setup_stress_test_environment(
         service_context.cache_service.clone(),
         service_context.event_store.get_partitioned_pools().clone(),
         Some(metrics.clone()),
+        projection_cache,
         Some(cqrs_service.get_consistency_manager()),
     )
     .await?;

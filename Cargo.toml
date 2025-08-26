@@ -46,7 +46,7 @@ crossbeam = "0.8" # Lock-free data structures
 # fxhash = "0.2"   # Fast hashing for partitioning
 
 # Utilities
-
+moka = { version = "0.12", features = ["future"] }
 
 # Observability
 tracing-appender = "0.2"
@@ -71,6 +71,7 @@ sysinfo = "0.36.1"
 tokio-util = "0.7.15"
 hex = "0.4.3"
 crossbeam-queue = "0.3.12"
+tokio-stream = { version = "0.1", features = ["full"] }
 
 [features]
 default = []
