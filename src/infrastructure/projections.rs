@@ -167,7 +167,12 @@ pub trait ProjectionStoreTrait: Send + Sync {
         &self,
         projections: Vec<TransactionProjection>,
     ) -> Result<()>;
-    async fn get_existing_transaction_ids(&self, event_ids: &[Uuid]) -> Result<Vec<Uuid>>;
+    async fn get_existing_transaction_ids(
+        &self,
+        event_ids: &[Uuid],
+        start_time: DateTime<Utc>,
+        end_time: DateTime<Utc>,
+    ) -> Result<Vec<Uuid>>;
 }
 
 #[async_trait]
@@ -248,7 +253,7 @@ impl ProjectionStoreTrait for ProjectionStore {
         let mut tx = pool.begin().await?;
 
         // Use the optimized COPY function for updates only
-        if let Err(e) = Self::bulk_update_accounts_with_copy_impl(&mut tx, &accounts, pool).await {
+        if let Err(e) = Self::bulk_update_accounts_with_copy_impl(&mut tx, &accounts).await {
             tx.rollback().await?;
             return Err(anyhow::anyhow!("Bulk update accounts failed: {:?}", e));
         }
@@ -295,14 +300,22 @@ impl ProjectionStoreTrait for ProjectionStore {
         Ok(())
     }
 
-    async fn get_existing_transaction_ids(&self, event_ids: &[Uuid]) -> Result<Vec<Uuid>> {
+    async fn get_existing_transaction_ids(
+        &self,
+        event_ids: &[Uuid],
+        start_time: DateTime<Utc>,
+        end_time: DateTime<Utc>,
+    ) -> Result<Vec<Uuid>> {
         if event_ids.is_empty() {
             return Ok(vec![]);
         }
         let read_pool = self.pools.select_pool(OperationType::Read);
+        // OPTIMIZED: Added a time range to the query to allow PostgreSQL to use partition pruning.
         let ids = sqlx::query_scalar!(
-            "SELECT id FROM transaction_projections WHERE id = ANY($1)",
-            event_ids
+            "SELECT id FROM transaction_projections WHERE id = ANY($1) AND timestamp >= $2 AND timestamp <= $3",
+            event_ids,
+            start_time,
+            end_time
         )
         .fetch_all(read_pool)
         .await?;
@@ -640,6 +653,12 @@ impl ProjectionStore {
             "[ProjectionStore] bulk_insert_transactions_direct_copy: processing {} transactions (assuming unique)",
             transactions.len()
         );
+
+        // OPTIMIZATION: Use asynchronous commit for bulk operations to reduce commit latency.
+        sqlx::query("SET LOCAL synchronous_commit = 'off'")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync + 'static>)?;
 
         // CRITICAL: Use fixed binary writer
         let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;
@@ -1403,6 +1422,11 @@ impl ProjectionStore {
         let pool = self.pools.select_pool(OperationType::Write);
         let mut tx = pool.begin().await?;
 
+        // OPTIMIZATION: Use asynchronous commit for this bulk write transaction.
+        sqlx::query("SET LOCAL synchronous_commit = 'off'")
+            .execute(&mut *tx)
+            .await?;
+
         // Use the optimized COPY function
         if let Err(e) = Self::bulk_upsert_accounts_with_copy(&mut tx, &accounts, pool).await {
             tx.rollback().await?;
@@ -1424,6 +1448,11 @@ impl ProjectionStore {
 
         let pool = self.pools.select_pool(OperationType::Write);
         let mut tx = pool.begin().await?;
+
+        // OPTIMIZATION: Use asynchronous commit for this bulk write transaction.
+        sqlx::query("SET LOCAL synchronous_commit = 'off'")
+            .execute(&mut *tx)
+            .await?;
 
         // Use the optimized COPY function
         if let Err(e) = Self::bulk_insert_transactions_with_copy(&mut tx, &transactions, pool).await
@@ -2125,15 +2154,66 @@ impl ProjectionStore {
 
         Ok(())
     }
-    /// Optimized bulk update accounts (updates only, no inserts)
-    pub async fn bulk_update_accounts_with_copy_impl(
+    /// NEW: Update-only using UNNEST, more efficient for smaller batches to avoid temp table overhead.
+    async fn bulk_update_with_unnest(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         accounts: &[AccountProjection],
-        pool: &PgPool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         if accounts.is_empty() {
             return Ok(());
         }
+
+        let ids: Vec<Uuid> = accounts.iter().map(|a| a.id).collect();
+        let owner_names: Vec<String> = accounts.iter().map(|a| a.owner_name.clone()).collect();
+        let balances: Vec<Decimal> = accounts.iter().map(|a| a.balance).collect();
+        let is_actives: Vec<bool> = accounts.iter().map(|a| a.is_active).collect();
+        let updated_ats: Vec<DateTime<Utc>> = accounts.iter().map(|a| a.updated_at).collect();
+
+        let result = sqlx::query!(
+            r#"
+            UPDATE account_projections AS ap
+            SET
+                owner_name = u.owner_name,
+                balance = u.balance,
+                is_active = u.is_active,
+                updated_at = u.updated_at
+            FROM (
+                SELECT id, owner_name, balance, is_active, updated_at
+                FROM UNNEST($1::uuid[], $2::text[], $3::decimal[], $4::boolean[], $5::timestamptz[])
+                AS t(id, owner_name, balance, is_active, updated_at)
+            ) AS u
+            WHERE ap.id = u.id
+            "#,
+            &ids,
+            &owner_names,
+            &balances,
+            &is_actives,
+            &updated_ats
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        tracing::info!(
+            "[ProjectionStore] Successfully updated {} accounts via UNNEST",
+            result.rows_affected()
+        );
+
+        Ok(())
+    }
+    /// Optimized bulk update accounts (updates only, no inserts)
+    pub async fn bulk_update_accounts_with_copy_impl(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        accounts: &[AccountProjection],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        if accounts.is_empty() {
+            return Ok(());
+        }
+
+        // OPTIMIZATION: Use asynchronous commit for bulk operations to reduce commit latency.
+        // sqlx::query("SET LOCAL synchronous_commit = 'off'")
+        //     .execute(&mut **tx)
+        //     .await
+        //     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync + 'static>)?;
 
         let account_ids: Vec<_> = accounts.iter().map(|a| a.id).collect();
         tracing::info!(
@@ -2152,14 +2232,29 @@ impl ProjectionStore {
             accounts.to_vec()
         };
 
-        // Option 1: Direct UPDATE with unnested VALUES (most efficient for updates-only)
-        // if accounts_to_update.len() <= 1000 {
-        //     // Reasonable batch size for VALUES clause
-        //     return bulk_update_with_values(tx, &accounts_to_update).await;
-        // }
+        // OPTIMIZATION: Use UNNEST for smaller batches to avoid temp table overhead and potential
+        // catalog contention. Use COPY for larger batches where it's more efficient.
+        const UNNEST_THRESHOLD: usize = 1600;
+        if accounts_to_update.len() < UNNEST_THRESHOLD {
+            tracing::debug!(
+                "Using UNNEST for small update batch of {}",
+                accounts_to_update.len()
+            );
+            return Self::bulk_update_with_unnest(tx, &accounts_to_update).await;
+        }
 
-        // Option 2: Temp table approach for large batches
+        tracing::debug!(
+            "Using COPY for large update batch of {}",
+            accounts_to_update.len()
+        );
         let table_name = format!("temp_account_updates_{}", uuid::Uuid::new_v4().simple());
+
+        // The slow query was on this command, indicating the transaction was blocked.
+        // By moving to UNNEST for smaller batches, we avoid the DDL that might cause contention.
+        // For large batches where COPY is better, we still apply this optimization.
+        sqlx::query("SET LOCAL synchronous_commit = 'off'")
+            .execute(&mut **tx)
+            .await?;
 
         // Create TEMPORARY table for updates only
         let create_table_sql = format!(
@@ -2243,6 +2338,11 @@ impl ProjectionStore {
 
         let pool = self.pools.select_pool(OperationType::Write);
         let mut tx = pool.begin().await?;
+
+        // OPTIMIZATION: Use asynchronous commit for bulk operations to reduce commit latency.
+        sqlx::query("SET LOCAL synchronous_commit = 'off'")
+            .execute(&mut *tx)
+            .await?;
 
         // CRITICAL: Direct COPY to target table (no temp table needed for new accounts)
         let mut writer = crate::infrastructure::binary_utils::PgCopyBinaryWriter::new()?;

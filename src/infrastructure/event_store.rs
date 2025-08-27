@@ -1045,6 +1045,13 @@ impl EventStore {
             })?
             .map_err(EventStoreError::DatabaseError)?;
 
+        // OPTIMIZATION: Use asynchronous commit for this bulk write transaction.
+        // This is a safeguard that ensures fast commits even if the global
+        // postgresql.conf setting is overridden or hasn't been reloaded.
+        sqlx::query("SET LOCAL synchronous_commit = 'off'")
+            .execute(&mut *tx)
+            .await?;
+
         // Collect all events and response channels, and set correct versions
         let mut all_events = Vec::new();
         let mut all_response_txs = Vec::new();
@@ -1253,98 +1260,53 @@ impl EventStore {
     async fn bulk_insert_events_optimized(
         tx: &mut Transaction<'_, Postgres>,
         events: Vec<Event>,
-        metrics: &EventStoreMetrics,
-        version_cache: &DashMap<Uuid, i64>,
+        _metrics: &EventStoreMetrics,
+        _version_cache: &DashMap<Uuid, i64>,
     ) -> Result<(), EventStoreError> {
         if events.is_empty() {
             return Ok(());
         }
 
+        let start_time = std::time::Instant::now();
         let events_len = events.len();
         info!(
-            "🚀 Starting optimized bulk insert for {} events",
+            "🚀 Starting optimized bulk insert for {} events using COPY BINARY",
             events_len
         );
 
-        // Group events by aggregate_id for better performance
-        let mut events_by_aggregate: std::collections::HashMap<Uuid, Vec<Event>> =
-            std::collections::HashMap::new();
-        for event in events {
-            events_by_aggregate
-                .entry(event.aggregate_id)
-                .or_default()
-                .push(event);
-        }
+        // Convert all events to the binary format for COPY
+        let binary_data = events.to_pgcopy_binary().map_err(|e| {
+            EventStoreError::InternalError(format!("Binary conversion failed: {}", e))
+        })?;
 
-        // Use true bulk insert for each aggregate group
-        for (aggregate_id, aggregate_events) in events_by_aggregate {
-            if aggregate_events.is_empty() {
-                continue;
-            }
+        // The COPY statement for the events table
+        let copy_statement = r#"
+        COPY events (id, aggregate_id, event_type, event_data, version, timestamp, metadata) 
+        FROM STDIN BINARY
+        "#;
 
-            // Build bulk INSERT query for this aggregate
-            let mut query = String::from(
-                "INSERT INTO events (id, aggregate_id, event_type, event_data, version, timestamp, metadata) VALUES "
-            );
+        // Execute the COPY operation within the transaction
+        let mut copy_in = tx
+            .copy_in_raw(copy_statement)
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
 
-            let mut values = Vec::new();
-            let mut event_data_params = Vec::new();
-            let mut metadata_params = Vec::new();
+        copy_in
+            .send(&binary_data[..])
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
 
-            for (i, event) in aggregate_events.iter().enumerate() {
-                values.push(format!(
-                    "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
-                    7 * i + 1,
-                    7 * i + 2,
-                    7 * i + 3,
-                    7 * i + 4,
-                    7 * i + 5,
-                    7 * i + 6,
-                    7 * i + 7
-                ));
+        copy_in
+            .finish()
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
 
-                event_data_params.push(&event.event_data);
-                metadata_params
-                    .push(bincode::serialize(&event.metadata).unwrap_or_else(|_| vec![]));
-            }
-
-            query.push_str(&values.join(", "));
-
-            // Execute bulk INSERT for this aggregate
-            let mut query_builder = sqlx::query(&query);
-
-            // Bind all parameters
-            for event in &aggregate_events {
-                query_builder = query_builder
-                    .bind(event.id)
-                    .bind(event.aggregate_id)
-                    .bind(&event.event_type)
-                    .bind(&event.event_data)
-                    .bind(event.version)
-                    .bind(event.timestamp)
-                    .bind(bincode::serialize(&event.metadata).unwrap_or_else(|_| vec![]));
-            }
-
-            query_builder
-                .execute(&mut **tx)
-                .await
-                .map_err(EventStoreError::DatabaseError)?;
-
-            // Update version cache with the latest version
-            if let Some(last_event) = aggregate_events.last() {
-                version_cache.insert(aggregate_id, last_event.version);
-            }
-
-            info!(
-                "✅ Bulk inserted {} events for aggregate {}",
-                aggregate_events.len(),
-                aggregate_id
-            );
-        }
+        let duration = start_time.elapsed();
+        let throughput = events_len as f64 / duration.as_secs_f64();
 
         info!(
-            "✅ Optimized bulk insert completed for {} events",
-            events_len
+            "✅ Binary COPY bulk insert completed: {} events in {:?} ({:.0} events/sec)",
+            events_len, duration, throughput
         );
         Ok(())
     }
@@ -2451,11 +2413,11 @@ impl EventStore {
 
         let start_time = std::time::Instant::now();
 
-        // Use READ COMMITTED for better performance
-        // sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        //     .execute(&mut **tx)
-        //     .await
-        //     .map_err(EventStoreError::DatabaseError)?;
+        // OPTIMIZATION: Use asynchronous commit for bulk operations to reduce commit latency.
+        sqlx::query("SET LOCAL synchronous_commit = 'off'")
+            .execute(&mut **tx)
+            .await
+            .map_err(EventStoreError::DatabaseError)?;
 
         // Pre-calculate total events for metrics
         let total_events: usize = events_by_aggregate

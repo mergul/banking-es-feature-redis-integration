@@ -3796,6 +3796,39 @@ impl WriteBatchingService {
                     config: crate::infrastructure::PoolPartitioningConfig::default(),
                 },
             ));
+            // --- Transactional Outbox Pattern ---
+            // 1. Save events to the event store
+            // let events_res = event_store
+            //     .save_events_multi_aggregate_in_transaction(&mut transaction, events_by_aggregate)
+            //     .await;
+
+            // let final_result: Result<(), String> = if let Err(e) = events_res {
+            //     Err(e.to_string())
+            // } else {
+            //     // 2. Save outbox messages to the outbox table (within the same transaction)
+            //     if !all_outbox_messages.is_empty() {
+            //         let cdc_repo =
+            //             crate::infrastructure::cdc_debezium::CDCOutboxRepository::new(Arc::new(
+            //                 crate::infrastructure::PartitionedPools {
+            //                     write_pool: (**write_pool).clone(),
+            //                     read_pool: (**write_pool).clone(),
+            //                     config: crate::infrastructure::PoolPartitioningConfig::default(),
+            //                 },
+            //             ));
+
+            //         let outbox_res = cdc_repo
+            //             .add_pending_messages_copy_direct(&mut transaction, all_outbox_messages.clone())
+            //             .await;
+
+            //         if let Err(e) = outbox_res {
+            //             Err(e.to_string())
+            //         } else {
+            //             Ok(())
+            //         }
+            //     } else {
+            //         Ok(())
+            //     }
+            // };
 
             // ✅ Parallel execution using separate transactions
             let (events_res, outbox_res) = tokio::join!(

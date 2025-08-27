@@ -697,9 +697,37 @@ impl UltraOptimizedCDCEventProcessor {
         // in the transaction_projections table. This prevents double-processing
         // if Kafka messages are delivered more than once.
         let event_ids: Vec<Uuid> = events.iter().map(|e| e.event_id).collect();
+
+        // --- Time-bounded idempotency check for partition pruning ---
+        // Find the time range of events in the batch to help PostgreSQL prune partitions.
+        let (min_ts, max_ts) = events.iter().fold(
+            (None, None),
+            |(min_o, max_o): (Option<DateTime<Utc>>, Option<DateTime<Utc>>), e| {
+                let min = min_o.map_or(e.timestamp, |min| min.min(e.timestamp));
+                let max = max_o.map_or(e.timestamp, |max| max.max(e.timestamp));
+                (Some(min), Some(max))
+            },
+        );
+
+        // If we have a time range, use it. Otherwise, this branch is not hit if events is not empty.
+        let (start_time, end_time) = if let (Some(min), Some(max)) = (min_ts, max_ts) {
+            // Add a small buffer to account for clock skew or processing delays.
+            (
+                min - chrono::Duration::minutes(5),
+                max + chrono::Duration::minutes(5),
+            )
+        } else {
+            // This case is unlikely if events is not empty, but as a safe fallback:
+            let now = chrono::Utc::now();
+            (
+                now - chrono::Duration::hours(1),
+                now + chrono::Duration::hours(1),
+            )
+        };
+
         let processed_event_ids_set: std::collections::HashSet<Uuid> = self
             .projection_store
-            .get_existing_transaction_ids(&event_ids)
+            .get_existing_transaction_ids(&event_ids, start_time, end_time) // Pass time range
             .await?
             .into_iter()
             .collect();
